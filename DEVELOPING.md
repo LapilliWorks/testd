@@ -56,7 +56,7 @@ python3 tests/release/run.py desktop --app /Applications/Testd.app
 
 Reports contain local PKI and test credentials and are private by default. Do not attach the entire report directory to a public issue; share only reviewed logs/JSON, never private keys or credentials.
 
-The browser suite uses Bun fixtures and publishes `app.releasecheck`, `api.releasecheck`, and a dead-upstream name. It checks HTTPS, WebSocket idle survival, streamed SSE, a 100 MiB upload, and project-cookie scope. It starts a headless host when none is listening and stops only a host it started; initialize the host with `testd init` first. Run it in every supported browser, complete the certificate and error-response observations, and save the JSON report from the page. Ctrl+C removes only the fixture processes and registrations. For localhost mode, initialize the test host with `testd init --tld localhost`; for a high edge port, pass `--edge-port 8443`. The suite does not install trust or change the resolver.
+The browser suite uses Bun fixtures and publishes `app.releasecheck`, `api.releasecheck`, and a dead-upstream name. It checks HTTPS, WebSocket idle survival, streamed SSE, a 100 MiB upload, and project-cookie scope. It starts a headless host when none is listening and stops only a host it started; initialize the host with `testd init` first. When the suite started the host, the page's restart button replaces the manual daemon restart for the renewal check; a pre-started host is left alone and must be restarted manually. Run it in every supported browser, complete the certificate and error-response observations, and save the JSON report from the page. Ctrl+C removes only the fixture processes and registrations. For localhost mode, initialize the test host with `testd init --tld localhost`; for a high edge port, pass `--edge-port 8443`. The suite does not install trust or change the resolver.
 
 The `service` suite (also available as `host --service` or `artifacts --service`) exercises the real launchd/systemd user-session supervisor: start, TLS, forced-crash restart, and stop. It stages a uniquely named service with an isolated home and high ports, retains the generated unit/plist in the report, and removes only that new service when done. Run in a real user session with a working `systemctl --user` or launchd GUI domain; Windows CLI services are not shipped, so Windows supervision is covered by the tray login checks.
 
@@ -360,7 +360,7 @@ For NSS command-line imports, use `certutil -d sql:<actual browser profile direc
 Run each in every browser you support: Chrome, Firefox, Safari, Edge.
 
 1. `https://app.example.test` loads with no certificate interstitial or bypass. The leaf is issued by `testd intermediate`, chains to `testd root`, carries `app.example.test` in its SAN, and expires within 24 hours.
-2. Wait for the leaf to be re-minted, or restart the daemon: a reload still shows a valid certificate with a newer validity window.
+2. Wait for the leaf to be re-minted, or restart the daemon: a reload still shows a valid certificate with a newer validity window. When the browser suite started the host, use the page's restart button.
 3. The local dashboard opens at `http://127.0.0.1:7737/` and lists the live name. `testd.test` is not a special name on the edge.
 4. WebSocket: a dev server using HMR websockets connects over `wss` and survives 60 seconds idle.
 5. SSE and a 100 MB upload complete without a truncated response.

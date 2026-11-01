@@ -17,6 +17,7 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 ### Fixed
 
 - The browser release suite starts a headless host when none is listening and stops only a host it started, so the suite no longer leaves the fixture retrying for an hour; a host with another TLD is refused
+- The browser page can restart a host the suite started and reports the result back to the page, so the certificate-renewal check no longer needs a separate terminal; a pre-started host is left alone
 - The Windows NRPT snapshot enumerates the JSON array before filtering, so restoring two or more rules no longer nests them into a single element
 - Windows quick-launch checks hand curl its JSON body through a temporary file, because PowerShell 5.1 breaks a native argument that holds both spaces and quotes
 - Windows system checks look the installed root up in the certificate store instead of parsing certutil's localized text, the restore keeps an empty NRPT set an array so strict mode does not abort it, and it reports only meaningful properties it could not recreate

@@ -28,6 +28,8 @@
 		<a id="dead" target="_blank" rel="noopener">Registered, dead upstream: expect 502</a></p>
 	<label><input type="checkbox" id="renewal"> Restarted the daemon, reloaded, and confirmed the newly minted certificate
 		is still trusted (rerun automatic checks after restarting)</label>
+	<button id="restart" type="button" disabled>Restart the suite-managed host</button>
+	<p id="restart-status"></p>
 	<label>Browser version, OS, and notes: <input id="notes" size="70" required></label>
 	<button id="save" disabled>Save report to the terminal's report directory</button>
 	<p id="saved"></p>
@@ -38,6 +40,48 @@ document.querySelector('#unknown').href = `https://testd.${metadata.tld}:${metad
 document.querySelector('#dead').href = `https://dead.releasecheck.${metadata.tld}:${metadata.edgePort}/`;
 const results = [];
 const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+const restartButton = document.querySelector('#restart');
+const restartStatus = document.querySelector('#restart-status');
+
+if (metadata.hostManaged) {
+	restartButton.disabled = false;
+	restartButton.onclick = async () => {
+		restartButton.disabled = true;
+		const id = crypto.randomUUID();
+		restartStatus.textContent = 'Restarting the host...';
+		// The edge may drop this response while the host stops, so the id is
+		// generated here and the result is polled separately.
+		try {
+			await fetch('/restart', { method: 'POST', headers: { 'X-Testd-Browser-Restart': '1',
+				'X-Testd-Browser-Restart-Id': id } });
+		} catch { /* The host may stop before the response reaches us. */ }
+		try {
+			for (let attempt = 0; attempt < 120; attempt++) {
+				await delay(500);
+				let result;
+				try {
+					const response = await fetch(`/restart/status?id=${id}`, { cache: 'no-store',
+						signal: AbortSignal.timeout(2000) });
+					if (!response.ok) continue;
+					result = await response.json();
+				} catch { continue; /* The edge is still restarting. */ }
+				if (result.status === 'ok') {
+					restartStatus.textContent = 'Host restarted. Reload the page, check the certificate viewer, ' +
+						'then tick the renewal box.';
+					return;
+				}
+				if (result.status === 'failed') throw new Error(result.detail ?? 'restart failed');
+			}
+			throw new Error('the host did not come back');
+		} catch (error) {
+			restartStatus.textContent = `Restart failed: ${error}`;
+		} finally {
+			restartButton.disabled = false;
+		}
+	};
+} else {
+	restartStatus.textContent = 'The host was not started by the suite; restart it manually before ticking renewal.';
+}
 
 async function check(name, action) {
 	try {

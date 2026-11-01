@@ -525,6 +525,58 @@ class BrowserTests(unittest.TestCase):
 			wait.assert_called_once_with(7737, 'process', 'output')
 			command.assert_called_once()
 
+	def test_a_managed_host_can_be_restarted(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			events = []
+
+			@contextlib.contextmanager
+			def serve(*args, **kwargs):
+				events.append(('start', args[0]))
+				try:
+					yield 'process', 'output'
+				finally:
+					events.append(('stop', args[0]))
+
+			with patch.object(runner, 'local_host_status', side_effect=runner.HostUnavailable('missing')), \
+				patch.object(runner, 'wait_for_host', return_value={'tld': 'test'}), \
+				patch.object(run, 'serve', side_effect=serve) as serve_mock, \
+				redirect_stdout(io.StringIO()):
+				with runner.HostFixture(run, pathlib.Path('/bin/true'), 7737) as host:
+					host.restart()
+			self.assertEqual(events, [('start', 'host-fixture'), ('stop', 'host-fixture'),
+				('start', 'host-fixture-restart-1'), ('stop', 'host-fixture-restart-1')])
+			self.assertEqual(serve_mock.call_count, 2)
+
+	def test_restart_requests_restart_a_managed_host(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			request_id = '00000000-0000-4000-8000-000000000000'
+			(run.output / f'restart-request-{request_id}.json').write_text('')
+			host = Mock()
+			errors = []
+			stop = Mock()
+			stop.wait = Mock(side_effect=[False, True])
+			runner.watch_restart_requests(run, host, stop, errors)
+			host.restart.assert_called_once_with()
+			self.assertEqual(errors, [])
+			self.assertEqual((run.output / f'restart-result-{request_id}.json').read_text(),
+				'{"status": "ok"}\n')
+			self.assertFalse((run.output / f'restart-request-{request_id}.json').exists())
+
+	def test_restart_requests_fail_when_the_suite_did_not_start_the_host(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			request_id = '00000000-0000-4000-8000-000000000000'
+			(run.output / f'restart-request-{request_id}.json').write_text('')
+			host = Mock()
+			host.restart.side_effect = RuntimeError('the suite did not start this host; restart it manually')
+			stop = Mock()
+			stop.wait = Mock(side_effect=[False, True])
+			runner.watch_restart_requests(run, host, stop, [])
+			self.assertEqual(json.loads((run.output / f'restart-result-{request_id}.json').read_text()),
+				{'status': 'failed', 'detail': 'the suite did not start this host; restart it manually'})
+
 	def test_a_host_that_exits_while_starting_reports_its_log(self):
 		process = SimpleNamespace(poll=lambda: 1, returncode=1)
 		output = SimpleNamespace(text=lambda: 'failed to load config')

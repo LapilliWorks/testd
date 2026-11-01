@@ -178,6 +178,7 @@ class Run:
 		self.output.mkdir(parents=True, exist_ok=False, mode=0o700)
 		self.results = []
 		self.log_count = 0
+		self.lock = threading.RLock()
 		self.metadata = {'os': platform.platform(), 'python': sys.version, 'suite': args.suite}
 		git = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True,
 			encoding=ENCODING, errors='replace', check=True)
@@ -189,18 +190,21 @@ class Run:
 		print(f'Report: {self.output}', flush=True)
 
 	def save(self):
-		(self.output / 'report.json').write_text(
-			json.dumps({**self.metadata, 'checks': self.results}, indent=2) + '\n', encoding=ENCODING)
+		with self.lock:
+			(self.output / 'report.json').write_text(
+				json.dumps({**self.metadata, 'checks': self.results}, indent=2) + '\n', encoding=ENCODING)
 
 	def record(self, name, status, detail=''):
-		self.results.append({'name': name, 'status': status, 'detail': detail})
-		self.save()
-		print(f'{status:8} {name}: {detail}', flush=True)
+		with self.lock:
+			self.results.append({'name': name, 'status': status, 'detail': detail})
+			self.save()
+			print(f'{status:8} {name}: {detail}', flush=True)
 
 	def log_path(self, name):
-		path = self.output / f'{self.log_count:02d}-{re.sub(r"[^a-zA-Z0-9-]", "-", name)}.log'
-		self.log_count += 1
-		return path
+		with self.lock:
+			path = self.output / f'{self.log_count:02d}-{re.sub(r"[^a-zA-Z0-9-]", "-", name)}.log'
+			self.log_count += 1
+			return path
 
 	def command(self, name, command, timeout=300, env=None, expected=0, interrupt_ok=False, terminal=False):
 		"""Run a command and mirror its output.
@@ -547,22 +551,97 @@ def wait_for_host(port, process, output, timeout=30):
 	raise RuntimeError(f'the host did not listen on 127.0.0.1:{port} within {timeout} seconds')
 
 
+class HostFixture:
+	"""A host the browser suite owns. An already-running host is left untouched."""
+
+	def __init__(self, run, cli, port):
+		self.run = run
+		self.cli = cli
+		self.port = port
+		self.started = False
+		self.starts = 0
+		self.status = None
+		self.process = None
+		self.output = None
+		self.context = None
+
+	def __enter__(self):
+		try:
+			self.status = local_host_status(self.port)
+		except HostUnavailable:
+			self.started = True
+			self.start()
+		return self
+
+	def start(self):
+		name = 'host-fixture' if self.starts == 0 else f'host-fixture-restart-{self.starts}'
+		self.starts += 1
+		self.context = self.run.serve(name, [str(self.cli), 'host'], stop_signal=signal.SIGINT)
+		self.process, self.output = self.context.__enter__()
+		try:
+			self.status = wait_for_host(self.port, self.process, self.output)
+		except BaseException:
+			self.stop()
+			raise
+
+	def stop(self):
+		context = self.context
+		if context is None:
+			return
+		self.context = None
+		self.process = self.output = None
+		context.__exit__(None, None, None)
+
+	def restart(self):
+		if not self.started:
+			raise RuntimeError('the suite did not start this host; restart it manually')
+		self.stop()
+		self.start()
+
+	def __exit__(self, *exc_info):
+		self.stop()
+
+
+def write_restart_result(run, request_id, result):
+	path = run.output / f'restart-result-{request_id}.json'
+	temporary = path.with_name(f'{path.name}.tmp')
+	temporary.write_text(json.dumps(result) + '\n', encoding=ENCODING)
+	temporary.replace(path)
+
+
+def watch_restart_requests(run, host, stop, errors):
+	"""Answer restart requests from the browser page while the fixture runs."""
+	handled = set()
+	try:
+		while not stop.wait(0.25):
+			for request in sorted(run.output.glob('restart-request-*.json')):
+				if request.name in handled:
+					continue
+				handled.add(request.name)
+				request_id = request.name.removeprefix('restart-request-').removesuffix('.json')
+				try:
+					host.restart()
+					result = {'status': 'ok'}
+				except Exception as error:
+					result = {'status': 'failed', 'detail': str(error)}
+				write_restart_result(run, request_id, result)
+				request.unlink(missing_ok=True)
+	except Exception as error:
+		errors.append(error)
+		raise
+
+
 def browser(run):
 	require('bun')
 	check_ports([run.args.port, run.args.port + 1])
 	cli = binary(run)
-	try:
-		status = local_host_status(run.args.intake_port)
-		host = contextlib.nullcontext()
-	except HostUnavailable:
-		status = None
-		host = run.serve('host-fixture', [str(cli), 'host'], stop_signal=signal.SIGINT)
-	with host as fixture:
-		if fixture:
-			status = wait_for_host(run.args.intake_port, *fixture)
+	with HostFixture(run, cli, run.args.intake_port) as host:
+		status = host.status
 		if status.get('tld') != run.args.tld:
 			raise RuntimeError(f'the host at 127.0.0.1:{run.args.intake_port} serves .{status.get("tld")}, '
 				f'but --tld {run.args.tld} was requested; run the host with the same TLD')
+		run.metadata['browser_host_managed'] = host.started
+		run.save()
 		url = f'https://app.releasecheck.{run.args.tld}:{run.args.edge_port}/'
 		print(f'Open {url} in each browser. Do not bypass certificate warnings.\n'
 			'Run the checks and save the JSON report using the page. Ctrl+C stops only the fixtures.', flush=True)
@@ -571,10 +650,21 @@ def browser(run):
 		command = [str(cli), 'run', '--host', f'127.0.0.1:{run.args.intake_port}',
 			f'app.releasecheck:{run.args.port}', f'api.releasecheck:{run.args.port}',
 			f'dead.releasecheck:{run.args.port + 1}', '--', 'bun', 'tests/release/browser-server.ts']
+		stop = threading.Event()
+		errors = []
+		watcher = threading.Thread(target=watch_restart_requests, args=(run, host, stop, errors), daemon=True)
+		watcher.start()
 		try:
 			run.command('browser-fixture', command, 3600, env, interrupt_ok=True)
 		except KeyboardInterrupt:
 			pass
+		finally:
+			stop.set()
+			watcher.join(40)
+			if watcher.is_alive():
+				raise RuntimeError('the host restart watcher did not stop')
+			if errors:
+				raise RuntimeError('the host restart watcher failed') from errors[0]
 	reports = list(run.output.glob('browser-*.json'))
 	if not reports:
 		run.metadata['incomplete'] = True

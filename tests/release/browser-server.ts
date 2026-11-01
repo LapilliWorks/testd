@@ -38,6 +38,27 @@ async function upload(request: Request): Promise<Response> {
 	return Response.json({ bytes });
 }
 
+async function requestRestart(request: Request): Promise<Response> {
+	if (request.headers.get('x-testd-browser-restart') !== '1'
+		|| request.headers.get('origin') !== appOrigin) return new Response('Forbidden', { status: 403 });
+	const id = request.headers.get('x-testd-browser-restart-id') ?? '';
+	if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+		return new Response('Invalid restart id', { status: 400 });
+	}
+	await Bun.write(join(reportDirectory, `restart-request-${id}.json`), '');
+	return Response.json({ id }, { status: 202 });
+}
+
+async function restartStatus(request: Request): Promise<Response> {
+	const id = new URL(request.url).searchParams.get('id') ?? '';
+	if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+		return new Response('Invalid restart id', { status: 400 });
+	}
+	const path = join(reportDirectory, `restart-result-${id}.json`);
+	if (!(await Bun.file(path).exists())) return Response.json({ status: 'pending' });
+	return Response.json(await Bun.file(path).json());
+}
+
 async function saveReport(request: Request): Promise<Response> {
 	if (request.headers.get('x-testd-browser-report') !== '1'
 		|| request.headers.get('origin') !== appOrigin) return new Response('Forbidden', { status: 403 });
@@ -65,10 +86,13 @@ Bun.serve({
 			return new Response('WebSocket upgrade required', { status: 400 });
 		}
 		if (request.method === 'POST' && url.pathname === '/report') return saveReport(request);
+		if (request.method === 'POST' && url.pathname === '/restart') return requestRestart(request);
 		if (request.method === 'POST' && url.pathname === '/upload') return upload(request);
 		if (request.method !== 'GET') return new Response('Method not allowed', { status: 405 });
 		if (url.pathname === '/events') return events();
-		if (url.pathname === '/meta') return Response.json({ tld, edgePort, commit: metadata.commit });
+		if (url.pathname === '/meta') return Response.json({ tld, edgePort, commit: metadata.commit,
+			hostManaged: metadata.browser_host_managed === true });
+		if (url.pathname === '/restart/status') return restartStatus(request);
 		if (url.pathname === '/cookie/set') {
 			const nonce = crypto.randomUUID();
 			return Response.json({ nonce }, { headers: {

@@ -10,7 +10,8 @@ const appOrigin = 'https://app.releasecheck.test:8443';
 
 beforeAll(async () => {
 	directory = await mkdtemp(join(tmpdir(), 'testd-browser-fixture-'));
-	await Bun.write(join(directory, 'report.json'), JSON.stringify({ commit: 'fixture-commit' }));
+	await Bun.write(join(directory, 'report.json'),
+		JSON.stringify({ commit: 'fixture-commit', browser_host_managed: true }));
 	const probe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('probe') });
 	const port = probe.port;
 	await probe.stop(true);
@@ -39,7 +40,7 @@ afterAll(async () => {
 test('serves the harness and metadata', async () => {
 	expect(await (await fetch(`${origin}/`)).text()).toContain('testd browser release checks');
 	expect(await (await fetch(`${origin}/meta`)).json()).toEqual({ tld: 'test', edgePort: 8443,
-		commit: 'fixture-commit' });
+		commit: 'fixture-commit', hostManaged: true });
 });
 
 test('streams SSE and counts uploaded bytes', async () => {
@@ -74,6 +75,22 @@ test('refuses cross-site reports and saves complete operator results', async () 
 	const files = (await readdir(directory)).filter(file => file.startsWith('browser-'));
 	expect(files).toHaveLength(1);
 	expect((await Bun.file(join(directory, files[0])).json()).commit).toBe('fixture-commit');
+});
+
+test('records restart requests and reports their result', async () => {
+	const id = crypto.randomUUID();
+	const forbidden = await fetch(`${origin}/restart`, { method: 'POST' });
+	expect(forbidden.status).toBe(403);
+	const invalid = await fetch(`${origin}/restart`, { method: 'POST', headers: { Origin: appOrigin,
+		'X-Testd-Browser-Restart': '1', 'X-Testd-Browser-Restart-Id': '../etc/passwd' } });
+	expect(invalid.status).toBe(400);
+	const requested = await fetch(`${origin}/restart`, { method: 'POST', headers: { Origin: appOrigin,
+		'X-Testd-Browser-Restart': '1', 'X-Testd-Browser-Restart-Id': id } });
+	expect(requested.status).toBe(202);
+	expect(await Bun.file(join(directory, `restart-request-${id}.json`)).exists()).toBe(true);
+	expect(await (await fetch(`${origin}/restart/status?id=${id}`)).json()).toEqual({ status: 'pending' });
+	await Bun.write(join(directory, `restart-result-${id}.json`), JSON.stringify({ status: 'ok' }));
+	expect(await (await fetch(`${origin}/restart/status?id=${id}`)).json()).toEqual({ status: 'ok' });
 });
 
 test('echoes WebSocket messages through a real upgrade', async () => {
