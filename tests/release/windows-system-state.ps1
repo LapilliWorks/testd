@@ -171,8 +171,9 @@ function Restore-Snapshot {
 	$snapshot = Read-Snapshot
 	foreach ($rule in Get-NamespaceRules) {
 		# Remove-DnsClientNrptRule still asks for confirmation with -Confirm:$false
-		# and $ConfirmPreference = 'None'; deleting the CIM instance does not.
-		$rule | Remove-CimInstance -ErrorAction SilentlyContinue
+		# and $ConfirmPreference = 'None'; deleting the CIM instance does not. A
+		# failure must stop the restore rather than leave the rule behind.
+		$rule | Remove-CimInstance
 	}
 	foreach ($rule in $snapshot.Rules) { Add-SnapshotRule $rule }
 	$expected = @($snapshot.Certificates | ForEach-Object { $_.BaseName.ToUpperInvariant() })

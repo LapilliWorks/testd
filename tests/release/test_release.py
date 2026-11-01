@@ -82,6 +82,7 @@ class ReleaseTests(unittest.TestCase):
 				self.assertIn("$ConfirmPreference = 'None'", script)
 				self.assertIn('certutil.exe -delstore -f Root', script)
 				self.assertIn('Remove-CimInstance', script)
+				self.assertNotIn('Remove-CimInstance -ErrorAction SilentlyContinue', script)
 				self.assertNotIn('Remove-DnsClientNrptRule -Name', script)
 
 	def test_workspace_versions_match(self):
