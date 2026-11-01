@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>testd browser release checks</title>
+	<style>
+		body { max-width: 850px; margin: 3rem auto; padding: 0 1rem; font: 16px system-ui; }
+		button, input { font: inherit; padding: .5rem; }
+		label { display: block; margin: 1rem 0; }
+		pre { white-space: pre-wrap; background: #eee; padding: 1rem; }
+	</style>
+</head>
+<body>
+	<h1>testd browser release checks</h1>
+	<p>Run in Chrome, Firefox, Safari, and Edge where supported. Do not bypass TLS warnings or use browser DNS overrides.</p>
+	<p id="metadata"></p>
+	<button id="run">Run automatic checks (about 65 seconds)</button>
+	<pre id="results">Not run</pre>
+	<h2>Required browser observations</h2>
+	<label><input type="checkbox" id="trusted"> This page loaded with no certificate warning or bypass</label>
+	<label><input type="checkbox" id="certificate"> Certificate SAN matches this hostname; issuer is testd intermediate;
+		leaf expires within 24 hours</label>
+	<label>Leaf SHA-256 fingerprint from the browser certificate viewer:
+		<input id="fingerprint" size="68" placeholder="64 hex digits; colons allowed"></label>
+	<label><input type="checkbox" id="errors"> Opened the links below and saw actual HTTP 404 and 502 responses</label>
+	<p><a id="unknown" target="_blank" rel="noopener">Reserved, unregistered name: expect 404</a> |
+		<a id="dead" target="_blank" rel="noopener">Registered, dead upstream: expect 502</a></p>
+	<label><input type="checkbox" id="renewal"> Restarted the daemon, reloaded, and confirmed the newly minted certificate
+		is still trusted (rerun automatic checks after restarting)</label>
+	<label>Browser version, OS, and notes: <input id="notes" size="70" required></label>
+	<button id="save" disabled>Save report to the terminal's report directory</button>
+	<p id="saved"></p>
+<script type="module">
+const metadata = await (await fetch('/meta')).json();
+document.querySelector('#metadata').textContent = `${location.origin}; ${metadata.commit}; ${navigator.userAgent}`;
+document.querySelector('#unknown').href = `https://testd.${metadata.tld}:${metadata.edgePort}/`;
+document.querySelector('#dead').href = `https://dead.releasecheck.${metadata.tld}:${metadata.edgePort}/`;
+const results = [];
+const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+
+async function check(name, action) {
+	try {
+		await action();
+		results.push({ name, status: 'pass' });
+	} catch (error) {
+		results.push({ name, status: 'fail', detail: String(error) });
+	}
+	document.querySelector('#results').textContent = JSON.stringify(results, null, 2);
+}
+
+function streamingEvents() {
+	return new Promise((resolve, reject) => {
+		const started = performance.now();
+		let first = false;
+		const events = new EventSource('/events');
+		const timer = setTimeout(() => finish(new Error('SSE timed out')), 10000);
+		function finish(error) {
+			clearTimeout(timer);
+			events.close();
+			error ? reject(error) : resolve();
+		}
+		events.onerror = () => finish(new Error('SSE connection failed'));
+		events.onmessage = event => {
+			if (event.data === 'first') first = performance.now() - started < 2000;
+			if (event.data === 'done') finish(first ? null : new Error('SSE was buffered or first event was late'));
+		};
+	});
+}
+
+async function websocketIdle() {
+	const socket = new WebSocket(`${location.origin.replace('https:', 'wss:')}/ws`);
+	function exchange(message) {
+		return new Promise((resolve, reject) => {
+			const timer = setTimeout(() => reject(new Error('WebSocket reply timed out')), 5000);
+			socket.onmessage = event => {
+				clearTimeout(timer);
+				event.data === message ? resolve() : reject(new Error('Incorrect echo'));
+			};
+			socket.send(message);
+		});
+	}
+	try {
+		await new Promise((resolve, reject) => {
+			const timer = setTimeout(() => reject(new Error('WebSocket open timed out')), 5000);
+			socket.onopen = () => { clearTimeout(timer); resolve(); };
+			socket.onerror = () => { clearTimeout(timer); reject(new Error('WebSocket failed')); };
+		});
+		await exchange('before idle');
+		await delay(60000);
+		await exchange('after idle');
+	} finally { socket.close(); }
+}
+
+async function upload() {
+	const bytes = new Uint8Array(100 * 1024 * 1024);
+	const abort = new AbortController();
+	const timer = setTimeout(() => abort.abort(), 120000);
+	try {
+		const response = await fetch('/upload', { method: 'POST', body: bytes, signal: abort.signal });
+		const received = await response.json();
+		if (!response.ok || received.bytes !== bytes.length) throw new Error(`Upload truncated: ${received.bytes}`);
+	} finally { clearTimeout(timer); }
+}
+
+async function cookies() {
+	const set = await (await fetch('/cookie/set')).json();
+	const api = new URL(location.href);
+	api.hostname = `api.releasecheck.${metadata.tld}`;
+	api.pathname = '/cookie';
+	const response = await fetch(api, { credentials: 'include', signal: AbortSignal.timeout(10000) });
+	const value = await response.json();
+	if (!response.ok || !value.cookie.includes(`releasecheck=${set.nonce}`)) {
+		throw new Error('The two project names did not share the project-domain cookie');
+	}
+}
+
+document.querySelector('#run').onclick = async () => {
+	document.querySelector('#run').disabled = true;
+	document.querySelector('#save').disabled = true;
+	results.length = 0;
+	await check('HTTPS and secure context', async () => {
+		if (location.protocol !== 'https:' || !window.isSecureContext) throw new Error('Not a secure HTTPS context');
+	});
+	await check('WebSocket, including 60 seconds idle', websocketIdle);
+	await check('Streaming SSE and 100 MiB upload', async () => { await streamingEvents(); await upload(); });
+	await check('Cookie scope across app and api', cookies);
+	document.querySelector('#run').disabled = false;
+	document.querySelector('#save').disabled = false;
+};
+
+document.querySelector('#save').onclick = async () => {
+	const fingerprint = document.querySelector('#fingerprint').value.replace(/[:\s]/g, '').toLowerCase();
+	const confirmed = ['trusted', 'certificate', 'errors', 'renewal'].every(id => document.querySelector(`#${id}`).checked);
+	const notes = document.querySelector('#notes').value.trim();
+	if (!confirmed || !/^[a-f0-9]{64}$/.test(fingerprint) || !notes) {
+		alert('Complete all browser observations, fingerprint, and version/OS notes before saving');
+		return;
+	}
+	const response = await fetch('/report', {
+		method: 'POST', headers: { 'X-Testd-Browser-Report': '1' },
+		body: JSON.stringify({ browser: navigator.userAgent, notes, fingerprint, manualConfirmed: confirmed, checks: results }),
+	});
+	const value = await response.json();
+	document.querySelector('#saved').textContent = response.ok ? `Saved: ${value.saved}` : JSON.stringify(value);
+};
+</script>
+</body>
+</html>

@@ -10,3 +10,7 @@ src-tauri/gen/
 # Local PKI output from manual host runs.
 pki/
 *.cdx.json
+__pycache__/
+/dist/
+**/bom.json
+**/*.bom.json

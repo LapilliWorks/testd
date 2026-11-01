@@ -10,6 +10,9 @@
 # elevated. Cleanup commands are printed at the end.
 
 $ErrorActionPreference = 'Stop'
+if ($env:TESTD_HOST_TEST_SYSTEM -eq '1' -and -not $env:TESTD_HOST_SNAPSHOT) {
+	throw 'Run system checks through tests/release/run.py host --system so existing integration is backed up first'
+}
 $Root = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 Set-Location $Root
 
@@ -126,7 +129,10 @@ if ($newestSource -and $newestSource.LastWriteTime -gt (Get-Item $TestdBin).Last
 	Write-Warning "$($newestSource.FullName) is newer than $TestdBin; rebuild with cargo build --release -p testd"
 }
 
-$TestHome = Join-Path $env:TEMP ('testd-host-' + [guid]::NewGuid().ToString('N'))
+$OutputRoot = if ($env:TESTD_HOST_OUTPUT_DIR) { $env:TESTD_HOST_OUTPUT_DIR } else {
+	Join-Path $env:LOCALAPPDATA 'testd\host-checks'
+}
+$TestHome = Join-Path $OutputRoot ('testd-host-' + [guid]::NewGuid().ToString('N'))
 $AppData = Join-Path $TestHome 'AppData\Roaming'
 New-Item -ItemType Directory -Path $AppData -Force | Out-Null
 $env:APPDATA = $AppData
@@ -161,8 +167,8 @@ try {
 } catch { Fail 'testd --help' }
 try {
 	& $TestdBin --version | Out-Null
-	if ($LASTEXITCODE -eq 0) { Pass 'testd --version' } else { Skip 'testd --version is not exposed' }
-} catch { Skip 'testd --version is not exposed' }
+	if ($LASTEXITCODE -eq 0) { Pass 'testd --version' } else { Fail 'testd --version' }
+} catch { Fail 'testd --version' }
 
 Section 'init'
 $first = Invoke-Init
@@ -414,7 +420,7 @@ if ($LASTEXITCODE -eq 0) {
 	Fail "testd approve delivers the token: $approveOut"
 }
 for ($i = 0; $i -lt 50 -and $AccessProc -and -not $AccessProc.HasExited; $i++) { Start-Sleep -Milliseconds 200 }
-if ($AccessProc -and -not $AccessProc.HasExited) { Stop-Process -ErrorAction SilentlyContinue -Id $AccessProc.Id -Force -ErrorAction SilentlyContinue }
+if ($AccessProc -and -not $AccessProc.HasExited) { Stop-Process -Id $AccessProc.Id -Force -ErrorAction SilentlyContinue }
 $credential = Join-Path $AppData 'testd\credentials\access-test'
 if ((Test-Path $credential) -and (Get-Item $credential).Length -gt 0) {
 	Pass 'the leaf saves the issued token'
@@ -435,7 +441,7 @@ if ($LASTEXITCODE -eq 0) {
 	Fail "testd tokens --revoke withdraws the token: $revokeOut"
 }
 
-if ($ClientProc) { Stop-Process -ErrorAction SilentlyContinue -Id $ClientProc.Id -Force -ErrorAction SilentlyContinue; $ClientProc = $null }
+if ($ClientProc) { Stop-Process -Id $ClientProc.Id -Force -ErrorAction SilentlyContinue; $ClientProc = $null }
 $removed = $false
 for ($i = 0; $i -lt 20; $i++) {
 	$null = Curl-Get "app.testdproj.$Tld" '/' 2>$null
@@ -647,10 +653,15 @@ if ($env:TESTD_HOST_TEST_SYSTEM -eq '1' -and $env:TESTD_HOST_TEST_CLEANUP -eq '1
 	Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
 		Where-Object { $_.Namespace -eq ".$Tld" } |
 		ForEach-Object { Remove-DnsClientNrptRule -Name $_.Name -Confirm:$false -ErrorAction SilentlyContinue }
-	certutil -delstore Root "testd root" | Out-Null
+	if ($rootThumb) {
+		certutil -delstore Root $rootThumb | Out-Null
+		if ($LASTEXITCODE -ne 0) { Fail 'test root cleanup' }
+	} else {
+		Fail 'test root cleanup: no exact thumbprint was recorded'
+	}
 }
 
-if ($ClientProc) { Stop-Process -ErrorAction SilentlyContinue -Id $ClientProc.Id -Force -ErrorAction SilentlyContinue; $ClientProc = $null }
+if ($ClientProc) { Stop-Process -Id $ClientProc.Id -Force -ErrorAction SilentlyContinue; $ClientProc = $null }
 if ($AppJob) {
 	Set-Content -LiteralPath $AppStop -Value 'stop' -ErrorAction SilentlyContinue
 	$null = Wait-Job $AppJob -Timeout 5
@@ -660,7 +671,7 @@ if ($AppJob) {
 if ($LaunchId) {
 	try { $null = Dashboard-Post '/api/local/launches/stop' (@{ id = $LaunchId } | ConvertTo-Json -Compress) } catch { }
 }
-if ($Daemon) { Stop-Process -ErrorAction SilentlyContinue -Id $Daemon.Id -Force -ErrorAction SilentlyContinue }
+if ($Daemon) { Stop-Process -Id $Daemon.Id -Force -ErrorAction SilentlyContinue }
 
 Write-Host "`npassed $Passed, failed $Failed, skipped $Skipped"
 if ($Failed -ne 0) { exit 1 }

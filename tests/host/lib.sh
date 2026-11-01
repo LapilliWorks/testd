@@ -17,6 +17,11 @@
 
 set -euo pipefail
 
+if [ "${TESTD_HOST_TEST_SYSTEM:-0}" = '1' ] && [ -z "${TESTD_HOST_SNAPSHOT:-}" ]; then
+	printf 'run system checks through tests/release/run.py host --system to back up integration first\n' >&2
+	exit 2
+fi
+
 TLD="${TESTD_HOST_TLD:-testdcheck}"
 EDGE_PORT="${TESTD_HOST_EDGE_PORT:-8443}"
 APP_PORT="${TESTD_HOST_APP_PORT:-18080}"
@@ -24,7 +29,9 @@ LAUNCH_PORT="${TESTD_HOST_LAUNCH_PORT:-18081}"
 # Platform default from crates/testd-core/src/config.rs; Windows uses 53.
 DNS_PORT=7753
 TESTD_BIN="${TESTD_BIN:-$(pwd)/target/release/testd}"
-TEST_HOME="$(mktemp -d "${TMPDIR:-/tmp}/testd-host-XXXXXX")"
+HOST_OUTPUT_ROOT="${TESTD_HOST_OUTPUT_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/testd/host-checks}"
+mkdir -p "$HOST_OUTPUT_ROOT"
+TEST_HOME="$(mktemp -d "$HOST_OUTPUT_ROOT/testd-host-XXXXXX")"
 LOG="$TEST_HOME/daemon.log"
 FAKE_TUNNEL="$TEST_HOME/fake-tunnel.sh"
 APP_LOG="$TEST_HOME/app.log"

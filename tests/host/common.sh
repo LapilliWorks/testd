@@ -4,7 +4,7 @@
 check_binary() {
 	section 'binary'
 	if "$TESTD_BIN" --help >/dev/null; then pass 'testd --help'; else fail 'testd --help'; fi
-	if "$TESTD_BIN" --version >/dev/null 2>&1; then pass 'testd --version'; else skip 'testd --version is not exposed'; fi
+	if "$TESTD_BIN" --version >/dev/null 2>&1; then pass 'testd --version'; else fail 'testd --version'; fi
 }
 
 check_init() {
@@ -52,25 +52,6 @@ check_init() {
 	# Keep the daemon off privileged and public ports for the throwaway run.
 	config_set edge_addr "\"127.0.0.1:$EDGE_PORT\""
 	config_set listen_addr "\"127.0.0.1:7737\""
-}
-
-check_name_actions() {
-	section 'name actions'
-	# Stop ends the leaf; delete removes one name's grant.
-	pass 'stop and delete are covered by the daemon suite'
-}
-
-check_withdrawals() {
-	section 'withdrawals'
-	# Revoking a token closes its connections and makes the leaf forget it.
-	pass 'token revocation is covered by the daemon suite'
-}
-
-check_token_requests() {
-	section 'token requests'
-	# The suite stores a leaf token before registering; a client with no
-	# credential must ask the host and wait for approval.
-	pass 'token requests are covered by the daemon suite'
 }
 
 check_daemon() {
@@ -129,12 +110,14 @@ check_edge() {
 
 check_dashboard() {
 	section 'local dashboard'
-	if dashboard_get / | grep -q 'Active domains'; then
+	local page
+	page="$(dashboard_get /)"
+	if grep -q 'Active domains' <<<"$page"; then
 		pass 'loopback dashboard serves the page'
 	else
 		fail 'loopback dashboard serves the page'
 	fi
-	if dashboard_get / | grep -q 'Quick launches'; then
+	if grep -q 'Quick launches' <<<"$page"; then
 		pass 'dashboard shows quick launches'
 	else
 		fail 'dashboard shows quick launches'
@@ -251,7 +234,7 @@ check_registration() {
 	fi
 	local request_id
 	request_id="$(sed -n 's/.*(request \([^)]*\)).*/\1/p' "$access_log" | head -1)"
-	if [ -n "$request_id" ] && HOME="$TEST_HOME" "$TESTD_BIN" requests | grep -q "$request_id"; then
+	if [ -n "$request_id" ] && HOME="$TEST_HOME" "$TESTD_BIN" requests | grep -F -- "$request_id" >/dev/null; then
 		pass 'testd requests lists the waiting request'
 	else
 		fail 'testd requests lists the waiting request'
@@ -489,7 +472,8 @@ check_hosts_helper() {
 	if sh -n "$script"; then pass 'helper syntax'; else fail 'helper syntax'; fi
 
 	local hosts="$TEST_HOME/hosts"
-	cp /etc/hosts "$hosts"
+	cp /etc/hosts "$TEST_HOME/hosts.original"
+	cp "$TEST_HOME/hosts.original" "$hosts"
 	if printf '"app.testdproj.%s"\n' "$TLD" | sh "$script" --tld "$TLD" --hosts-path "$hosts" >/dev/null 2>&1 \
 		&& grep -q "127.0.0.1 app.testdproj.$TLD" "$hosts" \
 		&& grep -q "127.0.0.1 testd.$TLD" "$hosts"; then

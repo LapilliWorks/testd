@@ -1,8 +1,7 @@
 # GUI checklist
 
 These are the checks that need a desktop session and the Tauri bundle. Run them
-against a build from the same commit as the CLI/daemon. Mark each item pass,
-fail, or not implemented.
+against a build from the same commit as the CLI/daemon. `python3 tests/release/run.py desktop --app <candidate>` launches the candidate and records each checkbox below as pass, fail, or not applicable, with evidence. Use a clean disposable VM for system changes.
 
 ## Build
 
@@ -65,8 +64,7 @@ run at a time; the instance lock must reject a second tray or headless host.
 - [ ] Stop `testd run`; the domain disappears from the tray.
 - [ ] "Open dashboard" opens `http://127.0.0.1:7737/` in the browser.
 - [ ] Dashboard shows the same domains, shares, and quick launches as the CLI.
-- [ ] Quit from the tray exits the process, removes `control.json` and
-      `daemon.lock`, and stops the DNS and HTTPS listeners.
+- [ ] Quit from the tray exits the process, removes `control.json`, releases the instance lock, and stops the DNS and HTTPS listeners. The lock file may remain; another instance can acquire it.
 - [ ] Launch a second instance while the first runs: the second must not start a
       second daemon. The same holds for `testd host` next to the tray.
 - [ ] Launch-at-login (where configured) starts the tray after logout/login.
@@ -78,7 +76,7 @@ run at a time; the instance lock must reject a second tray or headless host.
 
 ## Certificate commands
 
-- [ ] The setup wizard can install and remove trust through the exposed certificate commands.
+- [ ] The setup wizard can install trust through its certificate command; removal is available in the dashboard's Certificate section.
 
 ## Notifications
 
@@ -97,11 +95,11 @@ run at a time; the instance lock must reject a second tray or headless host.
 
 ## Dashboard
 
-- [ ] **Active domains** lists registered names and targets; the deregister
-      button removes the name from the edge and DNS.
+- [ ] **Active domains** lists registered names and targets; **Stop** ends the leaf and removes all its names while keeping grants.
+- [ ] **Delete** removes only the selected name's grant; its leaf keeps publishing other granted names and must request that name again.
 - [ ] **Shares** lists the URL, exposure, and provider; **Stop** removes the
       share but leaves the name registered.
-- [ ] **Access** lists waiting requests and issued tokens; approving a request lets its leaf connect, and revoking a token refuses its next connection.
+- [ ] **Access** lists waiting requests and issued tokens; approving a request lets its leaf connect, and revoking a token closes all its current connections, releases names, and refuses its next connection.
 - [ ] **Quick launches** lists saved definitions and their live state.
 - [ ] **Certificate** shows the root summary and fingerprint; **Install** and
       **Remove** update the OS trust store and the page state. The tray menu has no certificate entry.
@@ -156,8 +154,7 @@ run at a time; the instance lock must reject a second tray or headless host.
 
 ## Not implemented yet
 
-- [ ] Tray attach/detach of an already-running process by PID or port (quick
-      launches wrap a child command instead).
+Tray attach/detach of an already-running process by PID or port is deferred and is not a release gate. Quick launches wrap a child command instead.
 
 ## Packaging and signing
 
@@ -182,5 +179,12 @@ dpkg-deb -I target/release/bundle/deb/*.deb
 dpkg-deb -c target/release/bundle/deb/*.deb | head
 ```
 
-Only the release repo has the notarization and Authenticode signing keys. The
-public repo can build and smoke-test unsigned artifacts.
+Signing credentials are supplied by the operator, not stored here. Public CI builds unsigned artifacts. Signing observations apply only to artifacts advertised as signed; record unsigned ones as not applicable with a reason.
+
+## Install, upgrade, and removal
+
+- [ ] Install the actual candidate package in a fresh desktop session and reach a trusted HTTPS name using the documented setup and Linux port-privilege instructions.
+- [ ] Upgrade a previous install without changing the operator secret, root trust, saved launches, or the launch-at-login preference.
+- [ ] Untick launch at login, stop the daemon, and run `testd uninstall`; DNS routing and the exact installed trust root are removed.
+- [ ] Remove the app through the platform uninstaller; no tray process or listeners remain.
+- [ ] Reinstall and confirm the documented setup path works again.
