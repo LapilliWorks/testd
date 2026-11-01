@@ -19,6 +19,7 @@ use crate::launch::LaunchBook;
 use crate::registry::Claim;
 
 #[cfg(debug_assertions)]
+#[cfg(debug_assertions)]
 const DASHBOARD_TEMPLATE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/dashboard.html");
 
 /// State shared by every dashboard request.
