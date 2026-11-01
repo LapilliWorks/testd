@@ -25,6 +25,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+# Nothing here has an operator to answer a prompt, so never ask: a confirmation
+# read on a redirected stdin stalls the run.
+$ConfirmPreference = 'None'
 # The runner captures this script through pipes and decodes UTF-8, as do the
 # native tools whose output the checks read.
 . "$PSScriptRoot\utf8-output.ps1"
@@ -160,7 +163,7 @@ function Restore-Snapshot {
 	$expected = @($snapshot.Certificates | ForEach-Object { $_.BaseName.ToUpperInvariant() })
 	foreach ($thumbprint in Get-RootThumbprints) {
 		if ($expected -notcontains $thumbprint) {
-			& certutil.exe -delstore Root $thumbprint | Out-Null
+			& certutil.exe -delstore -f Root $thumbprint | Out-Null
 			if ($LASTEXITCODE -ne 0) { throw "certutil -delstore failed for $thumbprint" }
 		}
 	}

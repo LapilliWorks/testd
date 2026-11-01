@@ -24,6 +24,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+# The caller waits for this helper without an operator at the keyboard, so never
+# ask: a confirmation on a redirected stdin would hang it.
+$ConfirmPreference = 'None'
 
 function Assert-Tld([string]$value) {
 	if ($value -notmatch '^[a-z0-9]{1,10}$') {
@@ -71,7 +74,7 @@ switch ($Action) {
 
 	'RemoveRoot' {
 		Assert-Thumbprint $Thumbprint
-		& certutil.exe -delstore Root $Thumbprint | Out-Null
+		& certutil.exe -delstore -f Root $Thumbprint | Out-Null
 		if ($LASTEXITCODE -ne 0) { throw "certutil -delstore failed" }
 	}
 

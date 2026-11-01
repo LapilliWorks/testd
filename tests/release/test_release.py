@@ -68,6 +68,14 @@ class ReleaseTests(unittest.TestCase):
 		self.assertEqual(script.count('2>&1'), 1, 'capture native output only through Invoke-Captured')
 		self.assertIn("$ErrorActionPreference = 'Continue'", script)
 
+	def test_windows_system_scripts_never_wait_for_confirmation(self):
+		"""Nothing on either side answers a prompt, so a confirmation stalls the run."""
+		for name in ('tests/release/windows-system-state.ps1', 'scripts/testd-elevated.ps1'):
+			with self.subTest(script=name):
+				script = (ROOT / name).read_text()
+				self.assertIn("$ConfirmPreference = 'None'", script)
+				self.assertIn('certutil.exe -delstore -f Root', script)
+
 	def test_workspace_versions_match(self):
 		release.check_version('0.1.0')
 		with self.assertRaises(ValueError):

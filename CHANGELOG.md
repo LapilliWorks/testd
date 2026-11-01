@@ -16,6 +16,7 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 
 ### Fixed
 
+- The Windows system-state restore and the elevated helper never prompt and force `certutil -delstore`, so an NRPT or certificate deletion cannot sit on a confirmation
 - Windows host checks capture expected failures through one helper that relaxes the error preference for the call, so PowerShell 5.1 does not turn their redirected stderr into a terminating error
 - `host --system` runs the platform script on the operator's terminal, so its own sudo check and `doctor --fix` find the cached ticket
 - Windows host checks read the expected 404s as status codes instead of letting `curl --fail` write to stderr, which PowerShell 5.1 turns into a terminating error
