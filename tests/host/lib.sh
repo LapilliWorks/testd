@@ -2,9 +2,9 @@
 # Shared helpers for the host-only checks.
 #
 # Each script uses a throwaway HOME, TLD, edge port, and app ports so it does not
-# collide with a normal testd install. OS changes (resolver, trust store) only
-# happen when sudo is available without a prompt and TESTD_HOST_TEST_SYSTEM=1 is
-# set. Cleanup commands are printed at the end.
+# collide with a normal testd install. System changes (resolver, trust store) only
+# happen through tests/release/run.py, which snapshots the host integration first
+# and restores it afterwards; a direct run of this script cannot do that.
 #
 # Environment:
 #   TESTD_BIN                 binary to test (default target/release/testd)
@@ -13,12 +13,12 @@
 #   TESTD_HOST_APP_PORT       upstream port for registration (default 18080)
 #   TESTD_HOST_LAUNCH_PORT    quick-launch upstream port (default 18081)
 #   TESTD_HOST_TEST_SYSTEM    allow resolver and trust changes (default 0)
-#   TESTD_HOST_TEST_CLEANUP   revert resolver/trust changes afterwards (default 0)
+#   TESTD_HOST_SNAPSHOT       snapshot directory from tests/release/run.py --system
 
 set -euo pipefail
 
-if [ "${TESTD_HOST_TEST_SYSTEM:-0}" = '1' ] && [ -z "${TESTD_HOST_SNAPSHOT:-}" ]; then
-	printf 'run system checks through tests/release/run.py host --system to back up integration first\n' >&2
+if [ "${TESTD_HOST_TEST_SYSTEM:-0}" = '1' ] && [ ! -f "${TESTD_HOST_SNAPSHOT:-/nonexistent}/manifest.json" ]; then
+	printf 'system checks need a snapshot: run tests/release/run.py host --system\n' >&2
 	exit 2
 fi
 

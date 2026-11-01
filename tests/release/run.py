@@ -4,7 +4,9 @@
 import argparse
 import codecs
 import datetime
+import functools
 import hashlib
+import importlib.util
 import json
 import locale
 import os
@@ -25,6 +27,8 @@ import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SYSTEM = platform.system()
+# Throwaway TLD for the host suite, so it never collides with a real .test setup.
+HOST_TLD = os.environ.get('TESTD_HOST_TLD', 'testdcheck')
 
 
 def require(tool):
@@ -32,6 +36,15 @@ def require(tool):
 	if not path:
 		raise RuntimeError(f'please install {tool} before running this suite')
 	return path
+
+
+@functools.cache
+def helper(name):
+	"""Load a sibling module from tests/release, which is not an installed package."""
+	spec = importlib.util.spec_from_file_location(name, pathlib.Path(__file__).with_name(f'{name}.py'))
+	module = importlib.util.module_from_spec(spec)
+	spec.loader.exec_module(module)
+	return module
 
 
 def file_digest(path):
@@ -207,67 +220,68 @@ def binary(run):
 	return path
 
 
-def system_snapshot(run):
-	"""Save inventories before changes; refuse to overwrite any existing testd integration."""
+def system_snapshot(run, tld, interactive=False):
+	"""Record the OS integration `doctor --fix` will change, so the run can restore it."""
+	state = helper('system_state')
+	if SYSTEM != 'Windows' and not interactive:
+		require('sudo')
+		run.command('sudo-ready', ['sudo', '-n', 'true'])
 	backup = run.output / 'system-before'
+	index = 2
+	# Every snapshot stays on disk; a later run must not overwrite the state an
+	# earlier, possibly failed, restore would need.
+	while backup.exists():
+		backup = run.output / f'system-before-{index}'
+		index += 1
 	backup.mkdir(mode=0o700)
-	if SYSTEM == 'Windows':
-		script = ROOT / 'tests/release/snapshot-windows.ps1'
-		command = ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(script),
-			'-Destination', str(backup)]
-		if run.args.system:
-			command.append('-RequireAdministrator')
-		run.command('system-snapshot', command)
-		return
-	require('sudo')
-	run.command('sudo-ready', ['sudo', '-n', 'true'])
-	paths = ['/usr/local/share/ca-certificates/testd-root.crt', '/etc/systemd/resolved.conf.d/90-testd.conf']
-	if SYSTEM == 'Darwin':
-		paths = ['/etc/resolver/testdcheck']
-		text = run.command('root-inventory', ['security', 'find-certificate', '-a', '-p',
-			'/Library/Keychains/System.keychain'])
-		(backup / 'roots.pem').write_text(text)
-		query = subprocess.run(['security', 'find-certificate', '-c', 'testd root', '-p',
-			'/Library/Keychains/System.keychain'], capture_output=True, text=True)
-		if query.returncode == 0:
-			raise RuntimeError('an existing testd root would be replaced; use a clean disposable VM')
-	for name in paths:
-		path = pathlib.Path(name)
-		if path.exists():
-			shutil.copy2(path, backup / path.name)
-			raise RuntimeError(f'{path} already exists; backed up, but refusing replacement: use a clean VM')
-	(backup / 'absent.json').write_text(json.dumps(paths))
-	run.record('system-snapshot', 'pass', str(backup))
+	manifest = state.snapshot(state.Host(SYSTEM, tld, interactive), backup)
+	run.record('system-snapshot', 'pass', str(manifest))
+	return backup
+
+
+def system_restore(run, backup, tld, interactive=False):
+	"""Put the recorded integration back and verify it against the snapshot."""
+	state = helper('system_state')
+	problems = state.restore(state.Host(SYSTEM, tld, interactive), backup)
+	if problems:
+		run.record('system-restore', 'fail', '; '.join(problems))
+		raise RuntimeError('the host was not fully restored; fix the cause and rerun with '
+			f'--restore-report {run.output}')
+	run.record('system-restore', 'pass', f'{backup}; integration matches the snapshot')
 
 
 def host(run):
 	cli = binary(run)
-	if run.args.system:
-		system_snapshot(run)
 	ports = [7737, 7740, int(os.environ.get('TESTD_HOST_EDGE_PORT', '8443')),
 		int(os.environ.get('TESTD_HOST_APP_PORT', '18080')), int(os.environ.get('TESTD_HOST_LAUNCH_PORT', '18081'))]
+	# Refuse a busy fixture port before any system state is touched.
 	check_ports(ports, [53 if SYSTEM == 'Windows' else 7753])
 	state = run.output / 'host-state'
 	state.mkdir(mode=0o700)
-	env = dict(os.environ, TESTD_HOST_OUTPUT_DIR=str(state),
-		TESTD_HOST_SNAPSHOT=str(run.output / 'system-before'), TESTD_BIN=str(cli),
-		TESTD_HOST_TEST_SYSTEM='1' if run.args.system else '0',
-		TESTD_HOST_TEST_CLEANUP='1', TESTD_HOST_TLD='testdcheck')
+	env = dict(os.environ, TESTD_HOST_OUTPUT_DIR=str(state), TESTD_BIN=str(cli),
+		TESTD_HOST_TEST_SYSTEM='1' if run.args.system else '0', TESTD_HOST_TLD=HOST_TLD)
+	snapshot = system_snapshot(run, HOST_TLD) if run.args.system else None
+	if snapshot:
+		env['TESTD_HOST_SNAPSHOT'] = str(snapshot)
 	if SYSTEM == 'Windows':
 		command = ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'tests/host/windows.ps1']
 	else:
 		require('python3')
 		command = ['bash', f'tests/host/{"macos" if SYSTEM == "Darwin" else "linux"}.sh']
-	text = run.command('host-checks', command, 600, env)
-	if 'skip' in text:
-		run.record('host-coverage', 'skip', 'see host log for unchecked system/autostart sections')
-	if run.args.system:
-		if 'ok    doctor --fix' not in text:
-			raise RuntimeError('requested system checks did not run successfully')
-		run.record('system-checks', 'pass', 'resolver and trust checks ran; inspect cleanup output in host log')
-	if run.args.service:
-		run.args.bin = cli
-		service(run)
+	try:
+		text = run.command('host-checks', command, 600, env)
+		if 'skip' in text:
+			run.record('host-coverage', 'skip', 'see host log for unchecked system/autostart sections')
+		if run.args.system:
+			if 'ok    doctor --fix' not in text:
+				raise RuntimeError('requested system checks did not run successfully')
+			run.record('system-checks', 'pass', 'resolver and trust checks ran')
+		if run.args.service:
+			run.args.bin = cli
+			service(run)
+	finally:
+		if snapshot:
+			system_restore(run, snapshot, HOST_TLD)
 
 
 def check_ports(tcp, udp=()):
@@ -430,25 +444,29 @@ def browser(run):
 def desktop(run):
 	if not run.args.app:
 		raise RuntimeError('provide --app with the candidate .app, .AppImage, or NSIS installer')
-	system_snapshot(run)
-	print('Use a clean disposable VM/user session. This suite requires actual desktop interaction.', flush=True)
+	snapshot = system_snapshot(run, HOST_TLD, interactive=True)
+	print('This suite requires a real desktop session and actual interaction. '
+		'Integration installed while it runs is restored afterwards.', flush=True)
 	app = run.args.app.resolve()
 	command = ['open', str(app)] if SYSTEM == 'Darwin' else [str(app)]
 	subprocess.Popen(command)
 	items = checklist_items((ROOT / 'tests/host/gui-checklist.md').read_text())
-	for item in items:
-		print(f'\n{item}')
-		answer = input('[p]ass / [f]ail / [n]ot applicable / [q]uit: ').strip().lower()
-		while answer not in ['p', 'f', 'n', 'q']:
-			answer = input('Enter p, f, n, or q: ').strip().lower()
-		if answer == 'q':
-			run.metadata['incomplete'] = True
-			run.record('desktop-checklist', 'skip', 'interrupted; unanswered checks are not passed')
-			return
-		detail = input('Evidence or reason (required for fail/not applicable): ').strip()
-		if answer in ['f', 'n'] and not detail:
-			raise RuntimeError('a reason is required')
-		run.record(item, {'p': 'pass', 'f': 'fail', 'n': 'skip'}[answer], detail)
+	try:
+		for item in items:
+			print(f'\n{item}')
+			answer = input('[p]ass / [f]ail / [n]ot applicable / [q]uit: ').strip().lower()
+			while answer not in ['p', 'f', 'n', 'q']:
+				answer = input('Enter p, f, n, or q: ').strip().lower()
+			if answer == 'q':
+				run.metadata['incomplete'] = True
+				run.record('desktop-checklist', 'skip', 'interrupted; unanswered checks are not passed')
+				return
+			detail = input('Evidence or reason (required for fail/not applicable): ').strip()
+			if answer in ['f', 'n'] and not detail:
+				raise RuntimeError('a reason is required')
+			run.record(item, {'p': 'pass', 'f': 'fail', 'n': 'skip'}[answer], detail)
+	finally:
+		system_restore(run, snapshot, HOST_TLD, interactive=True)
 
 
 def checklist_items(text):
@@ -461,16 +479,57 @@ def checklist_items(text):
 	return items
 
 
+def restore_report(directory):
+	"""Recover a host after a run that could not restore its own integration."""
+	directory = directory.resolve()
+	state = helper('system_state')
+	snapshots = []
+	for path in directory.glob('system-before*'):
+		if (path / 'manifest.json').is_file():
+			manifest = state.load(path)
+			snapshots.append((manifest['created'], path, manifest))
+	if not snapshots:
+		raise SystemExit(f'no system snapshot in {directory}; system checks are only run by '
+			'tests/release/run.py host --system')
+	status = 0
+	# Newest first: each snapshot describes the state before its own run, so the
+	# oldest one restores last and wins.
+	for created, path, manifest in sorted(snapshots, key=lambda item: item[0], reverse=True):
+		if manifest['system'] != SYSTEM:
+			raise SystemExit(f'the snapshot at {path} belongs to {manifest["system"]}; run this on that host')
+		print(f'Restoring integration recorded at {created} (tld {manifest["tld"]})', flush=True)
+		try:
+			problems = state.restore(state.Host(SYSTEM, manifest['tld']), path)
+		except state.HostError as error:
+			problems = [str(error)]
+		for problem in problems:
+			print(f'fail     {problem}', flush=True)
+		if problems:
+			status = 1
+	if status:
+		print('\nThe host is not fully restored. Fix the cause and rerun this command.', flush=True)
+	else:
+		print(f'Restored and verified against every snapshot in {directory}', flush=True)
+	return status
+
+
+def interrupt(signum, frame):
+	raise KeyboardInterrupt(f'signal {signum}')
+
+
 def main():
 	if sys.version_info < (3, 12):
 		raise SystemExit('Please install Python 3.12 or newer for release validation')
 	parser = argparse.ArgumentParser(description=__doc__)
-	parser.add_argument('suite', choices=['core', 'host', 'artifacts', 'browser', 'desktop', 'service'])
+	parser.add_argument('suite', nargs='?', choices=['core', 'host', 'artifacts', 'browser', 'desktop', 'service'])
 	parser.add_argument('--report', type=pathlib.Path, help='new persisted report directory')
+	parser.add_argument('--restore-report', type=pathlib.Path,
+		help='restore the system integration recorded in an existing report directory, then exit')
 	parser.add_argument('--bin', type=pathlib.Path, help='candidate CLI; otherwise build from source')
 	parser.add_argument('--gui', action='store_true', help='include Tauri in core checks')
 	parser.add_argument('--strict', action='store_true', help='fail rather than skip missing dependency/MSRV tools')
-	parser.add_argument('--system', action='store_true', help='test and clean up resolver/trust changes on a clean VM')
+	parser.add_argument('--system', action='store_true',
+		help='test resolver/trust changes; integration is snapshotted and restored')
 	parser.add_argument('--artifacts', type=pathlib.Path)
 	parser.add_argument('--require-checksums', action='store_true')
 	parser.add_argument('--host', action='store_true', help='run host suite against the extracted CLI')
@@ -482,11 +541,23 @@ def main():
 	parser.add_argument('--edge-port', type=int, default=443)
 	parser.add_argument('--intake-port', type=int, default=7737)
 	args = parser.parse_args()
+	if args.restore_report:
+		return restore_report(args.restore_report)
+	if not args.suite:
+		parser.error('a suite is required unless --restore-report is given')
 	if args.suite == 'artifacts' and not args.artifacts:
 		parser.error('artifacts requires --artifacts')
+	# A supervisor restarting or an operator stopping the run must still restore.
+	for number in ('SIGTERM', 'SIGHUP'):
+		if hasattr(signal, number):
+			signal.signal(getattr(signal, number), interrupt)
 	run = Run(args)
 	try:
 		globals()[args.suite](run)
+	except KeyboardInterrupt:
+		run.metadata['incomplete'] = True
+		run.record(args.suite, 'skip', 'interrupted; check system-restore and use --restore-report if needed')
+		return 2
 	except Exception as error:
 		run.record(args.suite, 'fail', str(error))
 		return 1

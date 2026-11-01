@@ -3,8 +3,11 @@
 #
 # Run on the target host, not in the dev container:
 #   cargo build --release -p testd
-#   sudo -v   # optional: resolver and trust checks, with TESTD_HOST_TEST_SYSTEM=1
 #   tests/host/linux.sh
+#
+# Resolver and trust checks need a snapshot, so they only run through the runner,
+# which restores the integration afterwards:
+#   sudo -v && python3 tests/release/run.py host --system
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -93,15 +96,11 @@ fi
 check_launch_at_login
 
 section 'cleanup'
-printf 'resolver: sudo rm -f /etc/systemd/resolved.conf.d/90-testd.conf && sudo systemctl reload systemd-resolved\n'
-printf 'trust:    sudo rm -f /usr/local/share/ca-certificates/testd-root.crt && sudo update-ca-certificates --fresh\n'
-printf 'config:   %s\n' "$TEST_HOME"
-if [ "${TESTD_HOST_TEST_SYSTEM:-0}" = '1' ] && [ "${TESTD_HOST_TEST_CLEANUP:-0}" = '1' ]; then
-	sudo -n rm -f /etc/systemd/resolved.conf.d/90-testd.conf 2>/dev/null || true
-	sudo -n systemctl reload systemd-resolved >/dev/null 2>&1 || true
-	sudo -n rm -f /usr/local/share/ca-certificates/testd-root.crt 2>/dev/null || true
-	sudo -n update-ca-certificates --fresh >/dev/null 2>&1 || true
+if [ -n "${TESTD_HOST_SNAPSHOT:-}" ]; then
+	printf 'integration: restored from %s by tests/release/run.py after this script\n' \
+		"$TESTD_HOST_SNAPSHOT"
 fi
+printf 'config:      %s\n' "$TEST_HOME"
 
 stop_daemon
 summary

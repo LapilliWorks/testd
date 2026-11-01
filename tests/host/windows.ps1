@@ -3,15 +3,16 @@
 # Run on the target host, not in the dev container:
 #   cargo build --release -p testd
 #   powershell -ExecutionPolicy Bypass -File tests\host\windows.ps1
-#   $env:TESTD_HOST_TEST_SYSTEM = "1"   # optional: NRPT rule and root trust
 #
-# The script uses a throwaway %APPDATA% and a high edge port. It does not touch
-# NRPT or the trust store unless TESTD_HOST_TEST_SYSTEM=1 and the shell is
-# elevated. Cleanup commands are printed at the end.
+# The script uses a throwaway %APPDATA% and a high edge port. NRPT and trust
+# checks need a snapshot, so they only run through the runner, which restores the
+# integration afterwards:
+#   python tests\release\run.py host --system   # from an elevated shell
 
 $ErrorActionPreference = 'Stop'
-if ($env:TESTD_HOST_TEST_SYSTEM -eq '1' -and -not $env:TESTD_HOST_SNAPSHOT) {
-	throw 'Run system checks through tests/release/run.py host --system so existing integration is backed up first'
+if ($env:TESTD_HOST_TEST_SYSTEM -eq '1' -and
+	-not ($env:TESTD_HOST_SNAPSHOT -and (Test-Path (Join-Path $env:TESTD_HOST_SNAPSHOT 'manifest.json')))) {
+	throw 'Run system checks through tests/release/run.py host --system so the integration is snapshotted first'
 }
 $Root = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 Set-Location $Root
@@ -644,22 +645,10 @@ if ($runValue) {
 }
 
 Section 'cleanup'
-$nrptCleanup = 'Get-DnsClientNrptRule | Where-Object { $_.Namespace -eq ''.<tld>'' } |' +
-	' ForEach-Object { Remove-DnsClientNrptRule -Name $_.Name -Confirm:$false }'
-Write-Host ('NRPT:     ' + $nrptCleanup.Replace('<tld>', $Tld))
-Write-Host 'trust:    certutil -delstore Root "testd root"'
-Write-Host "config:   $TestHome"
-if ($env:TESTD_HOST_TEST_SYSTEM -eq '1' -and $env:TESTD_HOST_TEST_CLEANUP -eq '1') {
-	Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
-		Where-Object { $_.Namespace -eq ".$Tld" } |
-		ForEach-Object { Remove-DnsClientNrptRule -Name $_.Name -Confirm:$false -ErrorAction SilentlyContinue }
-	if ($rootThumb) {
-		certutil -delstore Root $rootThumb | Out-Null
-		if ($LASTEXITCODE -ne 0) { Fail 'test root cleanup' }
-	} else {
-		Fail 'test root cleanup: no exact thumbprint was recorded'
-	}
+if ($env:TESTD_HOST_SNAPSHOT) {
+	Write-Host "integration: restored from $env:TESTD_HOST_SNAPSHOT by tests/release/run.py after this script"
 }
+Write-Host "config:      $TestHome"
 
 if ($ClientProc) { Stop-Process -Id $ClientProc.Id -Force -ErrorAction SilentlyContinue; $ClientProc = $null }
 if ($AppJob) {
