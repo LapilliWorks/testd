@@ -7,5 +7,20 @@
 <body>
 <h1>testd</h1>
 <p>Live names are served by the host daemon.</p>
+<section id="access">
+<h2>Access</h2>
+<p>Requests waiting for approval and tokens issued to leaves.</p>
+<ul id="requests"></ul>
+</section>
+<script>
+fetch('/api/local/requests').then(r => r.json()).then(items => {
+  const list = document.getElementById('requests');
+  for (const item of items) {
+    const li = document.createElement('li');
+    li.textContent = item.label + ' asks for ' + item.names.join(', ');
+    list.append(li);
+  }
+});
+</script>
 </body>
 </html>
