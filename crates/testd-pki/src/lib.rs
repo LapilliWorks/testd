@@ -139,8 +139,8 @@ fn root_params() -> Result<CertificateParams> {
 	params.distinguished_name = distinguished_name("testd root");
 	params.serial_number = Some(random_serial());
 	params.use_authority_key_identifier_extension = true;
-	params.not_before = now() - time::Duration::hours(1);
-	params.not_after = now() + time::Duration::days(3650);
+	params.not_before = time::OffsetDateTime::now_utc() - time::Duration::hours(1);
+	params.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(3650);
 	Ok(params)
 }
 
@@ -162,8 +162,8 @@ fn generate_intermediate(root: &Issuer<'_, KeyPair>) -> Result<(String, Issuer<'
 	params.distinguished_name = distinguished_name("testd intermediate");
 	params.serial_number = Some(random_serial());
 	params.use_authority_key_identifier_extension = true;
-	params.not_before = now() - time::Duration::hours(1);
-	params.not_after = now() + time::Duration::days(365);
+	params.not_before = time::OffsetDateTime::now_utc() - time::Duration::hours(1);
+	params.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(365);
 
 	let cert = params.signed_by(&key, root).context("sign node intermediate")?;
 	Ok((cert.pem(), Issuer::new(params, key)))
@@ -177,8 +177,8 @@ fn leaf_params(hostname: &str) -> Result<CertificateParams> {
 	params.use_authority_key_identifier_extension = true;
 	params.distinguished_name = distinguished_name(hostname);
 	params.serial_number = Some(random_serial());
-	params.not_before = now() - time::Duration::hours(1);
-	params.not_after = now() + time::Duration::hours(LEAF_LIFETIME_HOURS);
+	params.not_before = time::OffsetDateTime::now_utc() - time::Duration::hours(1);
+	params.not_after = time::OffsetDateTime::now_utc() + time::Duration::hours(LEAF_LIFETIME_HOURS);
 	Ok(params)
 }
 
@@ -186,10 +186,6 @@ fn distinguished_name(common_name: &str) -> DistinguishedName {
 	let mut name = DistinguishedName::new();
 	name.push(DnType::CommonName, common_name);
 	name
-}
-
-fn now() -> time::OffsetDateTime {
-	time::OffsetDateTime::now_utc()
 }
 
 /// A random 128-bit serial number.
