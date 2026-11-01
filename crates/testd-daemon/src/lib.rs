@@ -1,6 +1,13 @@
+pub mod access;
 pub mod caddy;
 pub mod certificate;
+pub mod control;
+pub mod daemon;
 pub mod edge;
+pub mod engine;
 pub mod health;
+pub mod http;
+pub mod launch;
 pub mod registry;
 pub mod resolver;
+pub mod share;
