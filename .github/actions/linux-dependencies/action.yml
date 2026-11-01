@@ -1,0 +1,11 @@
+name: Linux Tauri dependencies
+description: Install the system libraries and bundling tools for the public tray
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+          libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
+          libdbus-1-dev patchelf

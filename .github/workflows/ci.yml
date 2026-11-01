@@ -3,7 +3,12 @@ name: ci
 on:
   push:
     branches: [master]
+    tags: ['v*']
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -11,32 +16,45 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14, windows-latest]
+        os: [ubuntu-latest, macos-15, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - name: Linux dependencies
+      - uses: ./.github/actions/linux-dependencies
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
-            libdbus-1-dev
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: oven-sh/setup-bun@v2
       - uses: taiki-e/install-action@nextest
       - run: cargo fmt --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo nextest run --workspace
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo nextest run --workspace --locked
+      - run: python scripts/release.py verify-version
+      - run: python -m unittest discover -s tests/release -p 'test_*.py'
+      - run: bun test tests/release/browser.test.ts
 
   msrv:
-    name: msrv (1.88)
+    name: msrv (${{ matrix.toolchain }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - toolchain: '1.88.0'
+            packages: '--workspace --exclude testd-gui'
+          - toolchain: '1.90.0'
+            packages: '-p testd-gui'
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88.0
-      - run: cargo check --workspace --exclude testd-gui
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - uses: ./.github/actions/linux-dependencies
+        if: matrix.toolchain == '1.90.0'
+      - run: cargo check ${{ matrix.packages }} --locked
 
   deny:
     name: cargo-deny
@@ -46,25 +64,104 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   bundle:
-    name: bundle (${{ matrix.os }})
+    name: bundle (${{ matrix.target }})
     if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, msrv, deny]
     strategy:
+      fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-latest, windows-latest]
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+            bundles: app,dmg
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            bundles: app,dmg
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bundles: appimage,deb
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Linux dependencies
+        with:
+          targets: ${{ matrix.target }}
+      - uses: ./.github/actions/linux-dependencies
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libdbus-1-dev \
-            patchelf
-      - run: cargo install cargo-tauri --locked
-      - run: cargo tauri build
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python scripts/release.py verify-version "${GITHUB_REF_NAME#v}"
+      - run: cargo build --release --bin testd --locked --target ${{ matrix.target }}
+      - run: cargo install cargo-tauri --locked --version '^2'
+      - run: cargo tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+      - run: >-
+          python scripts/release.py package --version "${GITHUB_REF_NAME#v}"
+          --target ${{ matrix.target }} --build-dir target/${{ matrix.target }}/release --output dist
+      - run: python tests/release/run.py artifacts --artifacts dist
       - uses: actions/upload-artifact@v4
         with:
-          name: testd-${{ matrix.os }}
-          path: target/release/bundle
+          name: bundles-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  sbom:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, msrv, deny]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: cargo install cargo-cyclonedx --locked
+      - run: scripts/release-sbom.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: dist/sbom/
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [bundle, sbom]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bundles-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: sbom
+          path: sbom
+      - run: tar -czf dist/testd-sbom.tar.gz -C sbom .
+      - name: Generate Homebrew definitions from real release bytes
+        run: >-
+          python scripts/release.py homebrew --version "${GITHUB_REF_NAME#v}"
+          --artifacts dist --output dist
+      - run: python scripts/release.py checksums dist
+      - name: Attach free artifacts to a draft public release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/release.py release-notes "${GITHUB_REF_NAME#v}" > release-notes.md
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "$GITHUB_REF_NAME" \
+              --notes-file release-notes.md
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/*
