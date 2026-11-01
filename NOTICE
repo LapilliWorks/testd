@@ -1,0 +1,9 @@
+testd
+Copyright 2026 the testd authors
+
+testd is distributed under the ISC license. See LICENSE.
+
+Third-party dependencies retain their own licenses. The authoritative list is
+Cargo.lock; a machine-readable SBOM is produced by `scripts/release-sbom.sh`.
+Redistributions of a built binary must include this file and the generated
+NOTICE from `cargo about` or `cargo-cyclonedx` when one is produced.

@@ -1,0 +1,15 @@
+[package]
+name = "testd"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "ISC"
+description = "Local dev domain manager"
+
+[[bin]]
+name = "testd"
+path = "src/main.rs"
+
+[workspace]
+members = []
+resolver = "3"
