@@ -30,7 +30,7 @@ cargo deny check
 
 ## Release validation
 
-Run against the release candidate on each supported host. Reports, logs, OS information, and the commit id are saved under `~/.local/share/testd/release-checks/` (`%LOCALAPPDATA%/testd/release-checks/` on Windows). Use Python 3.12 or newer; on Windows replace `python3` with `python` or `py -3`.
+Run against the release candidate on each supported host. Child stdout and stderr are streamed live to the matching terminal streams and retained together in each command's log. Reports, logs, OS information, and the commit id are saved under `~/.local/share/testd/release-checks/` (`%LOCALAPPDATA%/testd/release-checks/` on Windows). Use Python 3.12 or newer; on Windows replace `python3` with `python` or `py -3`.
 
 ```sh
 # Automated code/dependency/MSRV checks; omit --gui if Tauri prerequisites are absent

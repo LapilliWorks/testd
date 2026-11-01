@@ -1,7 +1,12 @@
 import importlib.util
+import io
 import pathlib
 import tempfile
 import unittest
+import subprocess
+import sys
+import threading
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 import json
 from types import SimpleNamespace
@@ -83,6 +88,109 @@ class ReleaseTests(unittest.TestCase):
 	def test_manual_checks_are_not_invented_from_headings(self):
 		items = runner.checklist_items('# Build\n- [ ] First check\n      continued\n\n- [ ] Second check\n')
 		self.assertEqual(items, ['First check continued', 'Second check'])
+
+
+class CommandOutputTests(unittest.TestCase):
+	def create_run(self, directory):
+		args = SimpleNamespace(report=pathlib.Path(directory) / 'report', suite='fixture')
+		with redirect_stdout(io.StringIO()):
+			return runner.Run(args)
+
+	def test_both_streams_are_mirrored_and_retained(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			stdout, stderr = io.StringIO(), io.StringIO()
+			code = "import os; os.write(1, b'output\\n'); os.write(2, b'diagnostic\\n')"
+			with redirect_stdout(stdout), redirect_stderr(stderr):
+				text = run.command('streams', [sys.executable, '-c', code])
+			self.assertIn('output\n', stdout.getvalue())
+			self.assertNotIn('\ndiagnostic\n', stdout.getvalue())
+			self.assertEqual(stderr.getvalue(), 'diagnostic\n')
+			self.assertIn('output\n', text)
+			self.assertIn('diagnostic\n', text)
+			log = (run.output / '00-streams.log').read_text()
+			self.assertIn('output\n', log)
+			self.assertIn('diagnostic\n', log)
+
+	def test_partial_lines_reach_the_terminal_and_log_before_exit(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			acknowledged = pathlib.Path(directory) / 'acknowledged'
+
+			class LiveOutput(io.StringIO):
+				def write(self, value):
+					if value == 'ready':
+						if b'ready' not in (run.output / '00-live.log').read_bytes():
+							raise RuntimeError('the live log was not flushed')
+						acknowledged.touch()
+					return super().write(value)
+
+			code = (
+				"import os, pathlib, sys, time\n"
+				"os.write(1, b'ready')\n"
+				"deadline = time.monotonic() + 3\n"
+				"while not pathlib.Path(sys.argv[1]).exists():\n"
+				"    if time.monotonic() >= deadline: sys.exit(1)\n"
+				"    time.sleep(0.01)\n"
+			)
+			with redirect_stdout(LiveOutput()), redirect_stderr(io.StringIO()):
+				self.assertEqual(run.command('live', [sys.executable, '-c', code, str(acknowledged)]), 'ready')
+			self.assertTrue(acknowledged.exists())
+
+	def test_failures_keep_output_and_the_exit_status(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			stdout, stderr = io.StringIO(), io.StringIO()
+			code = "import os, sys; os.write(1, b'output\\n'); os.write(2, b'failure\\n'); sys.exit(7)"
+			with redirect_stdout(stdout), redirect_stderr(stderr), self.assertRaises(RuntimeError):
+				run.command('failure', [sys.executable, '-c', code])
+			self.assertEqual(run.results[-1]['status'], 'fail')
+			self.assertIn('exit 7', run.results[-1]['detail'])
+			self.assertIn('output\n', stdout.getvalue())
+			self.assertIn('failure\n', stderr.getvalue())
+			self.assertIn('failure\n', (run.output / '00-failure.log').read_text())
+
+	def test_timeout_retains_and_mirrors_output(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			stdout, stderr = io.StringIO(), io.StringIO()
+			code = "import os, time; os.write(1, b'output\\n'); os.write(2, b'diagnostic\\n'); time.sleep(60)"
+			with redirect_stdout(stdout), redirect_stderr(stderr), self.assertRaises(subprocess.TimeoutExpired):
+				run.command('timeout', [sys.executable, '-c', code], timeout=1)
+			self.assertEqual(run.results[-1]['status'], 'fail')
+			self.assertIn('output\n', stdout.getvalue())
+			self.assertIn('diagnostic\n', stderr.getvalue())
+			self.assertIn('diagnostic\n', (run.output / '00-timeout.log').read_text())
+
+	def test_operator_interrupt_keeps_live_output(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			ready = threading.Event()
+			original_wait = subprocess.Popen.wait
+			should_interrupt = True
+
+			class LiveOutput(io.StringIO):
+				def write(self, value):
+					if value == 'ready':
+						ready.set()
+					return super().write(value)
+
+			def interrupt_once(process, timeout=None):
+				nonlocal should_interrupt
+				if should_interrupt:
+					should_interrupt = False
+					if not ready.wait(3):
+						raise RuntimeError('the child output never reached the terminal')
+					raise KeyboardInterrupt
+				return original_wait(process, timeout=timeout)
+
+			code = "import os, time; os.write(1, b'ready'); time.sleep(60)"
+			with redirect_stdout(LiveOutput()), redirect_stderr(io.StringIO()):
+				with patch.object(subprocess.Popen, 'wait', interrupt_once):
+					text = run.command('interrupt', [sys.executable, '-c', code], interrupt_ok=True)
+			self.assertEqual(text, 'ready')
+			self.assertEqual((run.output / '00-interrupt.log').read_text(), 'ready')
+			self.assertEqual(run.results[-1]['status'], 'pass')
 
 
 if __name__ == '__main__':

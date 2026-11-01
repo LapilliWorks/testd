@@ -2,9 +2,11 @@
 """Free-release validation: core, host, service, artifacts, browser, or desktop."""
 
 import argparse
+import codecs
 import datetime
 import hashlib
 import json
+import locale
 import os
 import pathlib
 import platform
@@ -15,6 +17,8 @@ import socket
 import subprocess
 import sys
 import tarfile
+import threading
+import time
 import tomllib
 import uuid
 import zipfile
@@ -40,6 +44,70 @@ def safe_members(names):
 		path = pathlib.PurePosixPath(name.replace('\\', '/'))
 		if path.is_absolute() or '..' in path.parts or ':' in name:
 			raise ValueError(f'unsafe archive path: {name}')
+
+
+class CommandOutput:
+	"""Drain both child streams live, preserving their terminal destinations."""
+
+	def __init__(self, process, log):
+		self.process = process
+		self.log = log
+		self.data = bytearray()
+		self.errors = []
+		self.lock = threading.Lock()
+		self.encoding = locale.getpreferredencoding(False)
+		self.threads = []
+		for pipe, terminal in [(process.stdout, sys.stdout), (process.stderr, sys.stderr)]:
+			thread = threading.Thread(target=self.copy, args=(pipe, terminal), daemon=True)
+			thread.start()
+			self.threads.append(thread)
+
+	def copy(self, pipe, terminal):
+		binary_terminal = getattr(terminal, 'buffer', None)
+		decoder = codecs.getincrementaldecoder(self.encoding)(errors='replace')
+		try:
+			while chunk := pipe.read1(64 * 1024):
+				with self.lock:
+					self.data.extend(chunk)
+					self.log.write(chunk)
+					self.log.flush()
+				if binary_terminal is not None:
+					binary_terminal.write(chunk)
+					binary_terminal.flush()
+				else:
+					terminal.write(decoder.decode(chunk))
+					terminal.flush()
+			if binary_terminal is None:
+				terminal.write(decoder.decode(b'', final=True))
+				terminal.flush()
+		except Exception as error:
+			with self.lock:
+				self.errors.append(error)
+		finally:
+			pipe.close()
+
+	def wait(self, timeout):
+		deadline = time.monotonic() + timeout
+		self.process.wait(timeout=timeout)
+		for thread in self.threads:
+			thread.join(timeout=max(0, deadline - time.monotonic()))
+			if thread.is_alive():
+				raise subprocess.TimeoutExpired(self.process.args, timeout)
+		if self.errors:
+			raise RuntimeError('failed to mirror command output to the terminal or log') from self.errors[0]
+		return self.data.decode(self.encoding, errors='replace')
+
+
+def stop_command(process, signal_number):
+	if SYSTEM == 'Windows':
+		if process.poll() is None:
+			subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'], check=True, capture_output=True)
+	else:
+		try:
+			os.killpg(process.pid, signal_number)
+		except ProcessLookupError:
+			# The group can exit between the timeout and cleanup.
+			return
 
 
 class Run:
@@ -69,23 +137,24 @@ class Run:
 	def command(self, name, command, timeout=300, env=None, expected=0, interrupt_ok=False):
 		log = self.output / f'{len(self.results):02d}-{re.sub(r"[^a-zA-Z0-9-]", "-", name)}.log'
 		print(f'Running: {" ".join(map(str, command))}', flush=True)
-		process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE,
-			stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True, start_new_session=SYSTEM != 'Windows')
-		try:
-			text, _ = process.communicate(timeout=timeout)
-		except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
-			if SYSTEM == 'Windows':
-				subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'], check=True, capture_output=True)
-			else:
-				os.killpg(process.pid, signal.SIGTERM)
-			text, _ = process.communicate(timeout=10)
-			log.write_text(text)
-			if interrupt_ok and isinstance(error, KeyboardInterrupt):
-				self.record(name, 'pass', f'fixture stopped by operator; {log}')
-				return text
-			self.record(name, 'fail', f'timed out or interrupted; {log}')
-			raise
-		log.write_text(text)
+		with log.open('xb') as log_file:
+			process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE,
+				stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, start_new_session=SYSTEM != 'Windows')
+			output = CommandOutput(process, log_file)
+			try:
+				text = output.wait(timeout)
+			except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
+				stop_command(process, signal.SIGTERM)
+				try:
+					text = output.wait(10)
+				except subprocess.TimeoutExpired:
+					stop_command(process, signal.SIGKILL if SYSTEM != 'Windows' else signal.SIGTERM)
+					text = output.wait(10)
+				if interrupt_ok and isinstance(error, KeyboardInterrupt):
+					self.record(name, 'pass', f'fixture stopped by operator; {log}')
+					return text
+				self.record(name, 'fail', f'timed out or interrupted; {log}')
+				raise
 		status = 'pass' if process.returncode == expected else 'fail'
 		self.record(name, status, f'exit {process.returncode}; {log}')
 		if status == 'fail':
