@@ -71,6 +71,10 @@ run at a time; the instance lock must reject a second tray or headless host.
       second daemon. The same holds for `testd host` next to the tray.
 - [ ] Launch-at-login (where configured) starts the tray after logout/login.
 
+## Certificate commands
+
+- [ ] The setup wizard can install and remove trust through the exposed certificate commands.
+
 ## Notifications
 
 - [ ] Fresh host, no resolver route: the tray posts one "DNS routing is not set up" notification, not one per probe.
