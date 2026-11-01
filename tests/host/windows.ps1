@@ -620,11 +620,19 @@ if ($env:TESTD_HOST_TEST_SYSTEM -eq '1' -and $isAdmin -and $daemonUp) {
 			$base64 = [regex]::Match($pem, $pattern, 'Singleline').Groups[1].Value
 			$der = [Convert]::FromBase64String(($base64 -replace '\s', ''))
 			$rootThumb = ([System.Security.Cryptography.X509Certificates.X509Certificate2]::new([byte[]]$der)).Thumbprint
-			# certutil prints the hash in spaced pairs, so compare compact hex.
-			$storeText = (Invoke-Captured 'certutil' 'store', 'Root').Text
-			$hashes = [regex]::Matches($storeText, 'Cert Hash\(sha1\):\s*([0-9a-fA-F ]+)') |
-				ForEach-Object { ($_.Groups[1].Value -replace '[^0-9a-fA-F]', '').ToLowerInvariant() }
-			if ($hashes -contains $rootThumb.ToLowerInvariant()) {
+			# Look the certificate up in the store itself: certutil's text is
+			# localized and prints the hash in spaced pairs.
+			$storeName = [System.Security.Cryptography.X509Certificates.StoreName]::Root
+			$storePlace = [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine
+			$store = [System.Security.Cryptography.X509Certificates.X509Store]::new($storeName, $storePlace)
+			$store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+			try {
+				$installed = $store.Certificates.Find(
+					[System.Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint, $rootThumb, $false)
+			} finally {
+				$store.Close()
+			}
+			if ($installed.Count -gt 0) {
 				Pass "current root installed ($rootThumb)"
 			} else {
 				Fail "current root missing from the machine store ($rootThumb)"
