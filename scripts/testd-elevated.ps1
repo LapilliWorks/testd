@@ -87,10 +87,9 @@ switch ($Action) {
 		$correct = $existing | Where-Object { $_.NameServers -contains $NameServer }
 		if (-not $correct) {
 			foreach ($rule in $existing) {
-				# Remove-DnsClientNrptRule prompts even with -Confirm:$false and
-				# $ConfirmPreference = 'None'; deleting the CIM instance does not.
-				# Let a failure stop the action: a stale rule must not survive.
-				$rule | Remove-CimInstance
+				# Only the cmdlet's own -Force suppresses its confirmation. Let a
+				# failure stop the action: a stale rule must not survive.
+				Remove-DnsClientNrptRule -Name $rule.Name -Force -Confirm:$false
 			}
 			Add-DnsClientNrptRule -Namespace $namespace -NameServers $NameServer | Out-Null
 		}
@@ -101,6 +100,6 @@ switch ($Action) {
 		$namespace = "." + $Tld
 		Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
 			Where-Object { $_.Namespace -eq $namespace } |
-			ForEach-Object { $_ | Remove-CimInstance }
+			ForEach-Object { Remove-DnsClientNrptRule -Name $_.Name -Force -Confirm:$false }
 	}
 }
