@@ -1,6 +1,8 @@
 import importlib.util
 import hashlib
 import io
+import locale
+import os
 import pathlib
 import re
 import shutil
@@ -218,7 +220,8 @@ class SystemStateTests(unittest.TestCase):
 			backup = pathlib.Path(temporary) / 'windows'
 			state.snapshot(host, backup)
 			self.assertEqual(state.occupied(backup), [])
-			(backup / 'nrpt.json').write_text(json.dumps([{'Signature': {'Namespace': '.testdrestore'}}]))
+			(backup / 'nrpt.json').write_bytes(
+				b'\xef\xbb\xbf' + json.dumps([{'Signature': {'Namespace': '.testdrestore'}}]).encode())
 			self.assertEqual(state.occupied(backup), ['NRPT rule for .testdrestore'])
 
 	def test_self_test_refuses_a_host_that_already_has_integration(self):
@@ -442,6 +445,34 @@ class CommandOutputTests(unittest.TestCase):
 			log = (run.output / '00-streams.log').read_text()
 			self.assertIn('output\n', log)
 			self.assertIn('diagnostic\n', log)
+
+	def test_utf8_output_is_decoded_where_the_locale_is_not_utf8(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			stdout = io.StringIO()
+			code = "import os; os.write(1, 'caf\u00e9 \u251c\u2500 tree\\n'.encode())"
+			with redirect_stdout(stdout), redirect_stderr(io.StringIO()), \
+				patch.object(locale, 'getpreferredencoding', return_value='cp1252'):
+				text = run.command('utf8', [sys.executable, '-c', code])
+			self.assertEqual(text, 'café ├─ tree\n')
+			self.assertIn('café ├─ tree\n', stdout.getvalue())
+			self.assertNotIn('Ã', stdout.getvalue())
+			self.assertEqual((run.output / '00-utf8.log').read_bytes(), 'café ├─ tree\n'.encode())
+
+	def test_child_interpreters_are_forced_into_utf8_mode(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			code = "import os; os.write(1, os.environ['PYTHONUTF8'].encode())"
+			with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+				self.assertEqual(run.command('utf8-mode', [sys.executable, '-c', code]), '1')
+
+	def test_a_command_environment_keeps_its_own_values(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			env = dict(os.environ, TESTD_ENCODING_MARKER='kept')
+			code = "import os; os.write(1, os.environ['TESTD_ENCODING_MARKER'].encode())"
+			with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+				self.assertEqual(run.command('env', [sys.executable, '-c', code], env=env), 'kept')
 
 	def test_partial_lines_reach_the_terminal_and_log_before_exit(self):
 		with tempfile.TemporaryDirectory() as directory:
