@@ -18,7 +18,7 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 
 - Windows quick-launch checks hand curl its JSON body through a temporary file, because PowerShell 5.1 breaks a native argument that holds both spaces and quotes
 - Windows system checks look the installed root up in the certificate store instead of parsing certutil's localized text, the restore keeps an empty NRPT set an array so strict mode does not abort it, and it reports only meaningful properties it could not recreate
-- The Windows system-state restore and the elevated helper never prompt and force `certutil -delstore`, so an NRPT or certificate deletion cannot sit on a confirmation
+- The Windows system-state restore and the elevated helper delete NRPT rules through the CIM instance and force `certutil -delstore`: `Remove-DnsClientNrptRule` asked for confirmation even with `-Confirm:$false` and `$ConfirmPreference = 'None'`
 - Windows host checks capture expected failures through one helper that relaxes the error preference for the call, so PowerShell 5.1 does not turn their redirected stderr into a terminating error
 - `host --system` runs the platform script on the operator's terminal, so its own sudo check and `doctor --fix` find the cached ticket
 - Windows host checks read the expected 404s as status codes instead of letting `curl --fail` write to stderr, which PowerShell 5.1 turns into a terminating error
