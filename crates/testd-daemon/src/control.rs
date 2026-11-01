@@ -549,6 +549,7 @@ mod tests {
 	use super::*;
 	use crate::health::RootAuthority;
 	use crate::registry::Registry;
+	#[cfg(unix)]
 	use crate::share::Exposure;
 	use tokio::sync::Mutex as AsyncMutex;
 	use crate::resolver::{ResolvedName, Resolver};
