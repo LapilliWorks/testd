@@ -71,6 +71,11 @@ run at a time; the instance lock must reject a second tray or headless host.
       second daemon. The same holds for `testd host` next to the tray.
 - [ ] Launch-at-login (where configured) starts the tray after logout/login.
 
+## Operator secret
+
+- [ ] The setup wizard shows an editable operator secret and a Generate button.
+- [ ] Saving a secret shorter than 16 characters is refused and the wizard stays put.
+
 ## Certificate commands
 
 - [ ] The setup wizard can install and remove trust through the exposed certificate commands.
