@@ -726,7 +726,7 @@ mod tests {
 
 		let content = build_caddyfile_with_import(&caddyfile, &managed).expect("import should be added");
 		assert!(content.starts_with(":8080\n"));
-		assert!(content.ends_with(&format!("import {}\n", managed.display())));
+		assert!(content.ends_with(&format!("import {}\n", render_caddyfile_path(&managed))));
 
 		std::fs::write(&caddyfile, &content).unwrap();
 		assert!(build_caddyfile_with_import(&caddyfile, &managed).is_none());
