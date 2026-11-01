@@ -88,9 +88,18 @@ function Dashboard-Get([string]$Path = '/') {
 
 function Dashboard-Post([string]$Path, [string]$Body = '') {
 	if ($Body) {
-		& curl.exe --silent --show-error --fail --max-time 20 --noproxy '*' `
-			-H 'X-Testd-Request: 1' -H 'Content-Type: application/json' `
-			-X POST --data $Body "http://127.0.0.1:7737$Path"
+		# PowerShell 5.1 does not quote an argument that holds both spaces and
+		# double quotes, so a JSON body on the command line reaches curl broken.
+		# Hand curl a file instead.
+		$bodyFile = [IO.Path]::GetTempFileName()
+		try {
+			[IO.File]::WriteAllText($bodyFile, $Body, [Text.UTF8Encoding]::new($false))
+			& curl.exe --silent --show-error --fail --max-time 20 --noproxy '*' `
+				-H 'X-Testd-Request: 1' -H 'Content-Type: application/json' `
+				--data-binary "@$bodyFile" "http://127.0.0.1:7737$Path"
+		} finally {
+			Remove-Item -LiteralPath $bodyFile -Force -ErrorAction SilentlyContinue
+		}
 	} else {
 		& curl.exe --silent --show-error --fail --max-time 20 --noproxy '*' `
 			-H 'X-Testd-Request: 1' -X POST "http://127.0.0.1:7737$Path"
@@ -611,8 +620,11 @@ if ($env:TESTD_HOST_TEST_SYSTEM -eq '1' -and $isAdmin -and $daemonUp) {
 			$base64 = [regex]::Match($pem, $pattern, 'Singleline').Groups[1].Value
 			$der = [Convert]::FromBase64String(($base64 -replace '\s', ''))
 			$rootThumb = ([System.Security.Cryptography.X509Certificates.X509Certificate2]::new([byte[]]$der)).Thumbprint
+			# certutil prints the hash in spaced pairs, so compare compact hex.
 			$storeText = (Invoke-Captured 'certutil' 'store', 'Root').Text
-			if ($storeText.ToLower().Contains($rootThumb.ToLower())) {
+			$hashes = [regex]::Matches($storeText, 'Cert Hash\(sha1\):\s*([0-9a-fA-F ]+)') |
+				ForEach-Object { ($_.Groups[1].Value -replace '[^0-9a-fA-F]', '').ToLowerInvariant() }
+			if ($hashes -contains $rootThumb.ToLowerInvariant()) {
 				Pass "current root installed ($rootThumb)"
 			} else {
 				Fail "current root missing from the machine store ($rootThumb)"

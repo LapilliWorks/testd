@@ -68,6 +68,12 @@ class ReleaseTests(unittest.TestCase):
 		self.assertEqual(script.count('2>&1'), 1, 'capture native output only through Invoke-Captured')
 		self.assertIn("$ErrorActionPreference = 'Continue'", script)
 
+	def test_windows_host_script_hands_curl_bodies_through_a_file(self):
+		"""PowerShell 5.1 breaks a native argument that holds spaces and quotes."""
+		script = (ROOT / 'tests/host/windows.ps1').read_text()
+		self.assertIn('--data-binary "@$bodyFile"', script)
+		self.assertNotIn('--data $Body', script)
+
 	def test_windows_system_scripts_never_wait_for_confirmation(self):
 		"""Nothing on either side answers a prompt, so a confirmation stalls the run."""
 		for name in ('tests/release/windows-system-state.ps1', 'scripts/testd-elevated.ps1'):

@@ -167,7 +167,7 @@ function Restore-Snapshot {
 			if ($LASTEXITCODE -ne 0) { throw "certutil -delstore failed for $thumbprint" }
 		}
 	}
-	$current = Get-RootThumbprints
+	$current = @(Get-RootThumbprints)
 	foreach ($certificate in $snapshot.Certificates) {
 		if ($current -notcontains $certificate.BaseName.ToUpperInvariant()) {
 			& certutil.exe -addstore -f Root $certificate.FullName | Out-Null
@@ -178,12 +178,15 @@ function Restore-Snapshot {
 
 function Get-PropertyDifferences($snapshot) {
 	$differences = @()
-	$restored = Get-NamespaceRules
-	if ($restored.Count -ne $snapshot.Rules.Count) {
-		return @("NRPT rules for ${Namespace}: expected $($snapshot.Rules.Count), found $($restored.Count)")
+	# A function that returns nothing leaves $null, and StrictMode rejects
+	# $null.Count, so keep the rule set an array.
+	$restored = @(Get-NamespaceRules)
+	$expected = @($snapshot.Rules)
+	if ($restored.Count -ne $expected.Count) {
+		return @("NRPT rules for ${Namespace}: expected $($expected.Count), found $($restored.Count)")
 	}
 	$actual = @($restored | ForEach-Object { Get-RuleSignature $_ })
-	foreach ($rule in $snapshot.Rules) {
+	foreach ($rule in $expected) {
 		$signature = $rule.Signature
 		$match = $actual | Where-Object {
 			$_.Namespace -eq $signature.Namespace -and $_.NameServers -eq $signature.NameServers -and
@@ -209,7 +212,7 @@ function Test-Snapshot {
 	$snapshot = Read-Snapshot
 	$differences = @(Get-PropertyDifferences $snapshot)
 	$expected = @($snapshot.Certificates | ForEach-Object { $_.BaseName.ToUpperInvariant() })
-	$actual = Get-RootThumbprints
+	$actual = @(Get-RootThumbprints)
 	foreach ($thumbprint in $expected) {
 		if ($actual -notcontains $thumbprint) { $differences += "testd root $thumbprint is missing from the machine store" }
 	}
