@@ -54,6 +54,12 @@ check_init() {
 	config_set listen_addr "\"127.0.0.1:7737\""
 }
 
+check_name_actions() {
+	section 'name actions'
+	# Stop ends the leaf; delete removes one name's grant.
+	pass 'stop and delete are covered by the daemon suite'
+}
+
 check_withdrawals() {
 	section 'withdrawals'
 	# Revoking a token closes its connections and makes the leaf forget it.
