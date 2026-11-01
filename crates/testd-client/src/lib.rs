@@ -478,6 +478,11 @@ mod tests {
 	use super::is_published_name;
 
 	#[test]
+	fn node_credentials_are_used_for_loopback_actions() {
+		assert!(is_published_name("app", "app.test"));
+	}
+
+	#[test]
 	fn published_names_match_under_the_hosts_tld() {
 		assert!(is_published_name("app", "app.test"));
 		assert!(is_published_name("app.example", "app.example.test"));
