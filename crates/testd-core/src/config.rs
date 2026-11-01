@@ -837,6 +837,10 @@ mod reconstructed_secret_tests {
 	fn generated_secrets_are_long_enough_to_edit() {
 		let secret = super::generate_operator_secret().unwrap();
 		assert!(secret.len() >= 16);
-		assert!(secret.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~')));
+		assert!(
+			secret
+				.chars()
+				.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'))
+		);
 	}
 }
