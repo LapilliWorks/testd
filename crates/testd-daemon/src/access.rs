@@ -658,4 +658,14 @@ mod tests {
 		std::fs::write(&path, b"not json").unwrap();
 		assert!(Access::load(path).is_err());
 	}
+	#[test]
+	fn an_approved_token_grants_only_the_requested_name() {
+		let (_dir, access) = access();
+		let (id, _decision) = access.request("leaf", "127.0.0.1:5000", vec!["app.example.test".into()]).unwrap();
+		let approved = access.approve(&id).unwrap();
+		let Approved::Token(token) = approved else { panic!("expected a token") };
+		assert!(access.allows(&token.id, "app.example.test"));
+		assert!(!access.allows(&token.id, "api.example.test"));
+	}
+
 }
