@@ -24,7 +24,8 @@ enum Command {
 		/// Path to the global Caddyfile. Auto-detected if omitted.
 		#[arg(long, env = "TESTD_CADDYFILE")]
 		caddyfile: Option<String>,
-		/// TLD appended to registered names. Use `localhost` for zero-setup mode.
+		/// TLD appended to registered names. `localhost` skips resolver setup,
+		/// but HTTPS still needs root trust and permission to bind the edge port.
 		#[arg(long, env = "TESTD_TLD")]
 		tld: Option<String>,
 		/// Accept every default without prompting.
@@ -123,17 +124,19 @@ enum Command {
 	/// Approve a waiting access request. Its client receives a new token.
 	Approve {
 		/// Request id from `testd requests`.
+		#[arg(allow_hyphen_values = true)]
 		id: String,
 	},
 	/// Deny a waiting access request.
 	Deny {
 		/// Request id from `testd requests`.
+		#[arg(allow_hyphen_values = true)]
 		id: String,
 	},
 	/// List tokens issued to leaves, or revoke one.
 	Tokens {
 		/// Revoke this token id from `testd tokens`.
-		#[arg(long)]
+		#[arg(long, allow_hyphen_values = true)]
 		revoke: Option<String>,
 	},
 	/// Print a Caddyfile that routes every name to the built-in edge.
@@ -320,7 +323,7 @@ async fn init(caddyfile: Option<String>, tld: Option<String>, yes: bool, resolve
 	let interactive = std::io::stdin().is_terminal() && !yes;
 	let allow_privileged = interactive || yes;
 
-	// [1/3] Resolver: lazy by default, so init never needs sudo for a local host.
+	/* Resolver setup is deferred by default; certificate trust is handled below. */
 	eprintln!("[1/3] Resolver");
 	if localhost_mode {
 		eprintln!("      .localhost resolves to 127.0.0.1 without a resolver change\n");

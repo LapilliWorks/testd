@@ -521,7 +521,8 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 		loop {
 			let request: Request = match reader.next().await {
 				Ok(Some(r)) => r,
-				_ => break,
+				Ok(None) => break,
+				Err(error) => return Err(error),
 			};
 
 			match request {

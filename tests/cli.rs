@@ -9,6 +9,10 @@ fn testd(home: &Path, args: &[&str]) -> Output {
 	Command::new(env!("CARGO_BIN_EXE_testd"))
 		.args(args)
 		.env("HOME", home)
+		.env("APPDATA", home.join("AppData/Roaming"))
+		.env("USERPROFILE", home)
+		.current_dir(home)
+		.env_remove("TESTD_HOSTS")
 		.env_remove("TESTD_HOST")
 		.env_remove("TESTD_TLD")
 		.env_remove("TESTD_CADDYFILE")
@@ -24,8 +28,12 @@ fn init(home: &Path) -> Output {
 	testd(home, &["init", "--caddyfile", ""])
 }
 
+fn config_dir(home: &Path) -> std::path::PathBuf {
+	if cfg!(windows) { home.join("AppData/Roaming/testd") } else { home.join(".config/testd") }
+}
+
 fn config(home: &Path) -> String {
-	std::fs::read_to_string(home.join(".config/testd/config.toml")).expect("config exists")
+	std::fs::read_to_string(config_dir(home).join("config.toml")).expect("config exists")
 }
 
 fn operator_secret(home: &Path) -> String {
@@ -111,11 +119,11 @@ fn init_reports_an_already_configured_resolver() {
 fn uninstall_purge_removes_local_data_without_system_changes() {
 	let home = TempDir::new().unwrap();
 	assert!(init(home.path()).status.success());
-	assert!(home.path().join(".config/testd/config.toml").exists());
+	assert!(config_dir(home.path()).join("config.toml").exists());
 
 	let out = testd(home.path(), &["uninstall", "--purge", "--keep-resolver", "--keep-certificate"]);
 	assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-	assert!(!home.path().join(".config/testd").exists());
+	assert!(!config_dir(home.path()).exists());
 }
 
 #[test]
@@ -151,6 +159,18 @@ fn version_matches_the_package() {
 		.unwrap();
 	assert!(output.status.success());
 	assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), concat!("testd ", env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
+fn access_ids_may_start_with_a_hyphen() {
+	let home = TempDir::new().unwrap();
+	for id in ["-abc1234", "-hbc1234", "--help12", "-Vbc1234", "--revoke"] {
+		for args in [["approve", id].as_slice(), ["deny", id].as_slice(), ["tokens", "--revoke", id].as_slice()] {
+			let output = testd(home.path(), args);
+			/* Reach the missing-daemon error, not clap's parser/help/version handling. */
+			assert_eq!(output.status.code(), Some(1), "{}", String::from_utf8_lossy(&output.stderr));
+		}
+	}
 }
 
 #[test]
@@ -236,7 +256,7 @@ fn a_leaf_without_a_credential_requests_one_and_saves_it() {
 	assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 	host.join().expect("fake host completed");
 
-	let credential = home.path().join(".config/testd/credentials/default");
+	let credential = config_dir(home.path()).join("credentials/default");
 	assert_eq!(std::fs::read_to_string(&credential).unwrap().trim(), "issued-token");
 }
 
@@ -246,6 +266,9 @@ fn environment_variables_are_accepted_as_inputs() {
 	let out = Command::new(env!("CARGO_BIN_EXE_testd"))
 		.args(["init", "--caddyfile", ""])
 		.env("HOME", home.path())
+		.env("APPDATA", home.path().join("AppData/Roaming"))
+		.env("USERPROFILE", home.path())
+		.env_remove("TESTD_YES")
 		.env("TESTD_TLD", "localhost")
 		.output()
 		.unwrap();

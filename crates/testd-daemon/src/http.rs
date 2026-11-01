@@ -42,6 +42,7 @@ pub struct HttpContext {
 const MAX_BODY: usize = 256 * 1024;
 const MAX_HEAD: usize = 32 * 1024;
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// A custom header cannot be sent by a cross-site form and forces a CORS
 /// preflight, which this server does not grant.
 const REQUEST_HEADER: &str = "x-testd-request";
@@ -317,9 +318,13 @@ async fn respond_with<W: AsyncWriteExt + Unpin>(
 		header.push_str(&format!("{name}: {value}\r\n"));
 	}
 	header.push_str("\r\n");
-	writer.write_all(header.as_bytes()).await?;
-	writer.write_all(body).await?;
-	writer.flush().await
+	tokio::time::timeout(RESPONSE_TIMEOUT, async {
+		writer.write_all(header.as_bytes()).await?;
+		writer.write_all(body).await?;
+		writer.flush().await
+	})
+	.await
+	.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "HTTP response write timed out"))?
 }
 
 fn advisory(regs: &[Registration]) -> Vec<String> {
@@ -677,5 +682,22 @@ async fn serve_ca_cert<W: AsyncWriteExt + Unpin>(writer: &mut W, pki_dir: &Path)
 			let msg = format!("CA certificate not found at {}", cert_path.display());
 			respond(writer, "404 Not Found", "text/plain", msg.as_bytes()).await
 		},
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn a_dashboard_client_that_stops_reading_cannot_hold_a_writer_forever() {
+		let (mut writer, _unread_peer) = tokio::io::duplex(1);
+		let result = tokio::time::timeout(
+			RESPONSE_TIMEOUT + std::time::Duration::from_secs(1),
+			respond(&mut writer, "200 OK", "text/plain", b"fixture"),
+		)
+		.await
+		.expect("dashboard writes have a deadline");
+		assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
 	}
 }

@@ -5,8 +5,8 @@
 //! - `node.crt` / `node.key`: the local intermediate that signs short-lived leaves
 //!
 //! Serving needs only the intermediate. The root key is optional: a host whose
-//! root key lives in an offline seed serves from `node.crt` / `node.key` alone
-//! and only needs `root.key` to recreate a lost intermediate.
+//! root key is stored offline serves from `node.crt` / `node.key` alone
+//! and needs `root.key` restored to renew or recreate the intermediate.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
