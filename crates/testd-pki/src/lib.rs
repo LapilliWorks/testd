@@ -64,6 +64,9 @@ impl Ca {
 				!node_cert_path.exists(),
 				"node.crt exists without root.crt; the PKI directory is inconsistent"
 			);
+			if root_key_path.exists() {
+				backup_files(dir, &["root.key"])?;
+			}
 			let (cert_pem, issuer) = generate_root()?;
 			write_private(&root_key_path, issuer.key().serialize_pem().as_bytes())?;
 			write_private(&root_cert_path, cert_pem.as_bytes())?;
@@ -85,6 +88,9 @@ impl Ca {
 				)
 			})?;
 			let (cert_pem, issuer) = generate_intermediate(root_issuer)?;
+			if node_cert_path.exists() || node_key_path.exists() {
+				backup_files(dir, &["node.crt", "node.key"])?;
+			}
 			write_private(&node_key_path, issuer.key().serialize_pem().as_bytes())?;
 			write_private(&node_cert_path, cert_pem.as_bytes())?;
 			(cert_pem, issuer)
@@ -150,7 +156,7 @@ impl Ca {
 				/* Retain the signing key: renewal replaces only the certificate atomically. */
 				let key = KeyPair::from_pem(&intermediate.issuer.key().serialize_pem())?;
 				let renewed = generate_intermediate_with_key(&root, key)?;
-				backup_intermediate(&self.dir)?;
+				backup_files(&self.dir, &["node.crt", "node.key"])?;
 				let path = self.dir.join("node.crt");
 				let temporary = self.dir.join("node.crt.new");
 				write_private(&temporary, renewed.0.as_bytes())?;
@@ -242,11 +248,11 @@ fn certificate_expiry(pem: &str) -> Result<i64> {
 	Ok(cert.validity().not_after.timestamp())
 }
 
-fn backup_intermediate(dir: &Path) -> Result<()> {
+fn backup_files(dir: &Path, names: &[&str]) -> Result<()> {
 	let timestamp = time::OffsetDateTime::now_utc().unix_timestamp_nanos();
 	let backup = dir.join("backups").join(timestamp.to_string());
 	std::fs::create_dir_all(&backup)?;
-	for name in ["node.crt", "node.key"] {
+	for name in names {
 		let path = dir.join(name);
 		if path.exists() {
 			write_private(&backup.join(name), &std::fs::read(path)?)?;

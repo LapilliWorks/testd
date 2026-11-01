@@ -121,24 +121,7 @@ impl Daemon {
 		// A share belongs to its name: when the registration goes, the tunnel goes.
 		{
 			let shares = Arc::clone(&shares);
-			let mut events = engine.subscribe();
-			let suffix = format!(".{}", config.tld);
-			tokio::spawn(async move {
-				while let Ok(crate::engine::EngineEvent::Changed(registrations)) = events.recv().await {
-					// Shares are keyed without the TLD, so strip it here too.
-					let names: Vec<String> = registrations
-						.into_iter()
-						.map(|registration| {
-							registration
-								.domain
-								.strip_suffix(&suffix)
-								.unwrap_or(&registration.domain)
-								.to_owned()
-						})
-						.collect();
-					shares.retain(&names).await;
-				}
-			});
+			tokio::spawn(retain_shares(shares, engine.subscribe(), engine.registrations(), config.tld.clone()));
 		}
 
 		let control = match ControlServer::start(
@@ -259,6 +242,34 @@ impl Daemon {
 	}
 }
 
+/// A lagged registration subscriber must still close shares after revocation.
+async fn retain_shares(
+	shares: Arc<crate::share::Shares>,
+	mut events: tokio::sync::broadcast::Receiver<crate::engine::EngineEvent>,
+	registry: crate::engine::Registrations,
+	tld: String,
+) {
+	let suffix = format!(".{tld}");
+	loop {
+		let registrations = match events.recv().await {
+			Ok(crate::engine::EngineEvent::Changed(registrations)) => registrations,
+			Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => registry.lock().await.snapshot(),
+			Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+		};
+		let names: Vec<String> = registrations
+			.into_iter()
+			.map(|registration| {
+				registration
+					.domain
+					.strip_suffix(&suffix)
+					.unwrap_or(&registration.domain)
+					.to_owned()
+			})
+			.collect();
+		shares.retain(&names).await;
+	}
+}
+
 /// Announce each newly waiting request through the desktop notifier.
 ///
 /// The access store publishes its whole waiting list, so a burst or a missed
@@ -314,4 +325,37 @@ fn acquire_instance_lock() -> std::io::Result<std::fs::File> {
 /// The local client connects to the same listener over loopback.
 fn local_client_addr(listen: SocketAddr) -> SocketAddr {
 	if listen.ip().is_unspecified() { SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), listen.port()) } else { listen }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+	use super::*;
+	use crate::engine::EngineEvent;
+	use crate::share::{Provider, Shares};
+	use std::os::unix::fs::PermissionsExt;
+
+	#[tokio::test]
+	async fn a_lagged_subscriber_still_stops_a_share_whose_name_left() {
+		let dir = tempfile::tempdir().unwrap();
+		let provider = dir.path().join("provider");
+		std::fs::write(&provider, "#!/bin/sh\necho 'https://fixture.trycloudflare.com' >&2\nexec sleep 30\n").unwrap();
+		std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o700)).unwrap();
+		let shares = Arc::new(Shares::new(Provider::Cloudflared, Some(provider), None));
+		shares.start("app", "127.0.0.1:3000", None).await.unwrap();
+		let registry = Arc::new(tokio::sync::Mutex::new(crate::registry::Registry::default()));
+		let (sender, receiver) = tokio::sync::broadcast::channel(1);
+		for _ in 0..3 {
+			sender.send(EngineEvent::Changed(Vec::new())).unwrap();
+		}
+		let task = tokio::spawn(retain_shares(Arc::clone(&shares), receiver, registry, "test".into()));
+		tokio::time::timeout(std::time::Duration::from_secs(3), async {
+			while !shares.list().await.is_empty() {
+				tokio::task::yield_now().await;
+			}
+		})
+		.await
+		.expect("a missed registration event cannot keep a share alive");
+		drop(sender);
+		task.await.unwrap();
+	}
 }

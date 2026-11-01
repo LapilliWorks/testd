@@ -867,7 +867,7 @@ async fn request_name_grant<R: AsyncBufRead + Unpin>(
 		decision = &mut decision => decision.ok(),
 		closed = reader.buffer_until_disconnect() => {
 			closed?;
-			return Ok(false);
+			return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "leaf disconnected during grant approval"));
 		},
 		_ = tokio::time::sleep(crate::access::REQUEST_TTL) => None,
 	};
