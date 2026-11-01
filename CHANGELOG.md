@@ -4,6 +4,11 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 
 ## [Unreleased]
 
+### Added
+
+- `tests/release/system_state.py --self-test` snapshots, installs a fixture, restores, and verifies the real resolver and trust artifacts on a disposable host; CI runs it on Linux, macOS, and Windows
+- Gated `host-system` CI job for the full privileged host suite, enabled per dispatch or with the `TESTD_CI_HOST_SYSTEM` repository variable
+
 ### Changed
 
 - `tests/release/run.py host --system` snapshots the resolver and trust integration it changes and restores it afterwards instead of refusing to run on a host that already has testd integration; `--restore-report` recovers a report after a hard kill
