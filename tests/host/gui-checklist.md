@@ -91,6 +91,10 @@ run at a time; the instance lock must reject a second tray or headless host.
 - [ ] On a desktop session, `testd host` posts the same notifications; in a session without D-Bus they are logged as `[notice]` and no notification is attempted.
 - [ ] A leaf without a token requests access: one "Token request from <label>" notification appears and the tray icon turns light blue until the request is approved, denied, or expires.
 
+## Token requests
+
+- [ ] A leaf without a token shows a notification and a light-blue tray icon until approved or denied.
+
 ## Dashboard
 
 - [ ] **Active domains** lists registered names and targets; the deregister
