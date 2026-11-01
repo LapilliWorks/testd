@@ -139,7 +139,11 @@ function Read-Snapshot {
 	$text = Get-Content -LiteralPath $NrptFile -Raw -Encoding utf8
 	$rules = @()
 	if ($text -and $text.Trim()) {
-		$rules = @($text | ConvertFrom-Json | Where-Object { $null -ne $_ })
+		# ConvertFrom-Json hands back the whole array as one object, and the filter
+		# would keep it that way, leaving the rules nested in a single element.
+		# Enumerate it through a variable first.
+		$parsed = $text | ConvertFrom-Json
+		$rules = @($parsed | Where-Object { $null -ne $_ })
 	}
 	$certificates = @()
 	if (Test-Path -LiteralPath $RootDirectory) {

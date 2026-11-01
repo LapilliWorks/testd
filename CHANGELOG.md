@@ -16,6 +16,7 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 
 ### Fixed
 
+- The Windows NRPT snapshot enumerates the JSON array before filtering, so restoring two or more rules no longer nests them into a single element
 - Windows quick-launch checks hand curl its JSON body through a temporary file, because PowerShell 5.1 breaks a native argument that holds both spaces and quotes
 - Windows system checks look the installed root up in the certificate store instead of parsing certutil's localized text, the restore keeps an empty NRPT set an array so strict mode does not abort it, and it reports only meaningful properties it could not recreate
 - The Windows system-state restore and the elevated helper remove NRPT rules with the cmdlet's own `-Force`, the only switch that suppresses its confirmation, fail loudly when a removal does not work, and force `certutil -delstore`
