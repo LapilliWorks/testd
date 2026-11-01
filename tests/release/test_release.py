@@ -62,6 +62,12 @@ class ReleaseTests(unittest.TestCase):
 		manifest = release.tomllib.loads((ROOT / 'crates/testd-daemon/Cargo.toml').read_text())
 		self.assertEqual(manifest['dependencies']['notify-rust'], '4.18')
 
+	def test_windows_host_script_captures_expected_failures_through_the_helper(self):
+		"""PowerShell 5.1 turns redirected native stderr into a terminating error."""
+		script = (ROOT / 'tests/host/windows.ps1').read_text()
+		self.assertEqual(script.count('2>&1'), 1, 'capture native output only through Invoke-Captured')
+		self.assertIn("$ErrorActionPreference = 'Continue'", script)
+
 	def test_workspace_versions_match(self):
 		release.check_version('0.1.0')
 		with self.assertRaises(ValueError):

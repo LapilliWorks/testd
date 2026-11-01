@@ -16,6 +16,7 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 
 ### Fixed
 
+- Windows host checks capture expected failures through one helper that relaxes the error preference for the call, so PowerShell 5.1 does not turn their redirected stderr into a terminating error
 - `host --system` runs the platform script on the operator's terminal, so its own sudo check and `doctor --fix` find the cached ticket
 - Windows host checks read the expected 404s as status codes instead of letting `curl --fail` write to stderr, which PowerShell 5.1 turns into a terminating error
 - System restore reloads a consumer only when its file changed, follows the Debian/Ubuntu or Fedora/RHEL CA anchor, and times out a privileged command instead of stalling silently

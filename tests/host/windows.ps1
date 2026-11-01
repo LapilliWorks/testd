@@ -101,6 +101,25 @@ function Dashboard-Status([string]$Path = '/') {
 	& curl.exe --silent --max-time 10 --noproxy '*' --output NUL --write-out '%{http_code}' "http://127.0.0.1:7737$Path"
 }
 
+# Capture a native command whose failure is part of the check. PowerShell 5.1
+# turns redirected native stderr into a terminating error while the error
+# preference is Stop, so relax the preference for the call itself. An optional
+# stderr file keeps diagnostics out of a document that must stay parseable.
+function Invoke-Captured([string]$File, [string[]]$Arguments, [string]$StderrPath = '') {
+	$previous = $ErrorActionPreference
+	$ErrorActionPreference = 'Continue'
+	try {
+		$text = if ($StderrPath) {
+			(& $File @Arguments 2>$StderrPath | Out-String)
+		} else {
+			(& $File @Arguments 2>&1 | Out-String)
+		}
+		return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Text = $text }
+	} finally {
+		$ErrorActionPreference = $previous
+	}
+}
+
 function OperatorSecret {
 	$match = Select-String -Path $Config -Pattern '^secret\s*=\s*"(.*)"' | Select-Object -First 1
 	if ($match) { $match.Matches[0].Groups[1].Value } else { '' }
@@ -414,17 +433,17 @@ if (Wait-Log 'requested access' $AccessErr 10) {
 $requestText = if (Test-Path $AccessErr) { Get-Content $AccessErr -Raw -Encoding utf8 -ErrorAction SilentlyContinue } else { '' }
 $requestId = $null
 if ($requestText -match '\(request ([^)]+)\)') { $requestId = $Matches[1] }
-$requestsOut = (& $TestdBin requests 2>&1 | Out-String)
-if ($requestId -and $requestsOut -match [regex]::Escape($requestId)) {
+$requests = Invoke-Captured $TestdBin 'requests'
+if ($requestId -and $requests.Text -match [regex]::Escape($requestId)) {
 	Pass 'testd requests lists the waiting request'
 } else {
-	Fail "testd requests lists the waiting request: $requestsOut"
+	Fail "testd requests lists the waiting request: $($requests.Text)"
 }
-$approveOut = (& $TestdBin approve $requestId 2>&1 | Out-String)
-if ($LASTEXITCODE -eq 0) {
+$approve = Invoke-Captured $TestdBin 'approve', $requestId
+if ($approve.ExitCode -eq 0) {
 	Pass 'testd approve delivers the token'
 } else {
-	Fail "testd approve delivers the token: $approveOut"
+	Fail "testd approve delivers the token: $($approve.Text)"
 }
 for ($i = 0; $i -lt 50 -and $AccessProc -and -not $AccessProc.HasExited; $i++) { Start-Sleep -Milliseconds 200 }
 if ($AccessProc -and -not $AccessProc.HasExited) { Stop-Process -Id $AccessProc.Id -Force -ErrorAction SilentlyContinue }
@@ -434,18 +453,19 @@ if ((Test-Path $credential) -and (Get-Item $credential).Length -gt 0) {
 } else {
 	Fail 'the leaf saves the issued token'
 }
-$tokenLines = @(& $TestdBin tokens 2>&1)
+$tokens = Invoke-Captured $TestdBin 'tokens'
+$tokenLines = @($tokens.Text -split '\r?\n' | Where-Object { $_ })
 if ($tokenLines.Count -gt 0 -and $tokenLines[0] -ne 'no issued tokens') {
 	Pass 'testd tokens lists the issued token'
 } else {
 	Fail "testd tokens lists the issued token: $($tokenLines -join ' ')"
 }
 $tokenId = if ($tokenLines.Count -gt 0) { ($tokenLines[0] -split '\s+')[0] } else { '' }
-$revokeOut = (& $TestdBin tokens --revoke $tokenId 2>&1 | Out-String)
-if ($LASTEXITCODE -eq 0) {
+$revoke = Invoke-Captured $TestdBin 'tokens', '--revoke', $tokenId
+if ($revoke.ExitCode -eq 0) {
 	Pass 'testd tokens --revoke withdraws the token'
 } else {
-	Fail "testd tokens --revoke withdraws the token: $revokeOut"
+	Fail "testd tokens --revoke withdraws the token: $($revoke.Text)"
 }
 
 if ($ClientProc) { Stop-Process -Id $ClientProc.Id -Force -ErrorAction SilentlyContinue; $ClientProc = $null }
@@ -460,19 +480,19 @@ Section 'sharing'
 # The happy path needs a fake provider binary, which a PowerShell script cannot
 # be for a native spawn; provider shapes are covered by `cargo test -p
 # testd-daemon --test share` on any OS.
-$shareOut = (& $TestdBin share app.testdproj 2>&1 | Out-String)
-if ($LASTEXITCODE -ne 0 -and $shareOut -match 'not registered') {
+$share = Invoke-Captured $TestdBin 'share', 'app.testdproj'
+if ($share.ExitCode -ne 0 -and $share.Text -match 'not registered') {
 	Pass 'share refuses an unregistered name'
 } else {
-	Fail "share refuses an unregistered name: $shareOut"
+	Fail "share refuses an unregistered name: $($share.Text)"
 }
-$shareList = (& $TestdBin share --list 2>&1 | Out-String)
-if ($LASTEXITCODE -eq 0) { Pass 'share --list answers' } else { Fail "share --list answers: $shareList" }
-$unknown = (& $TestdBin share app.testdproj --provider mystery 2>&1 | Out-String)
-if ($LASTEXITCODE -ne 0 -and $unknown -match 'unknown provider') {
+$shareList = Invoke-Captured $TestdBin 'share', '--list'
+if ($shareList.ExitCode -eq 0) { Pass 'share --list answers' } else { Fail "share --list answers: $($shareList.Text)" }
+$unknown = Invoke-Captured $TestdBin 'share', 'app.testdproj', '--provider', 'mystery'
+if ($unknown.ExitCode -ne 0 -and $unknown.Text -match 'unknown provider') {
 	Pass 'an unknown provider is refused'
 } else {
-	Fail "an unknown provider is refused: $unknown"
+	Fail "an unknown provider is refused: $($unknown.Text)"
 }
 
 Section 'quick launches'
@@ -539,11 +559,11 @@ if (-not $python) {
 }
 
 Section 'url actions'
-$urlOut = (& $TestdBin url testd://fix/unknown 2>&1 | Out-String)
-if ($LASTEXITCODE -ne 0 -and $urlOut -match 'unknown testd action') {
+$url = Invoke-Captured $TestdBin 'url', 'testd://fix/unknown'
+if ($url.ExitCode -ne 0 -and $url.Text -match 'unknown testd action') {
 	Pass 'an unknown testd:// action is refused'
 } else {
-	Fail "an unknown testd:// action is refused: $urlOut"
+	Fail "an unknown testd:// action is refused: $($url.Text)"
 }
 
 Section 'NRPT and trust'
@@ -562,11 +582,10 @@ if ($env:TESTD_HOST_TEST_SYSTEM -eq '1' -and $isAdmin -and $daemonUp) {
 	} else {
 		Write-Host '      curl.exe not found on PATH'
 	}
-	# Keep the document and the diagnostics apart: `2>&1` would merge log lines
-	# into the JSON and break parsing.
+	# Keep the JSON document and the diagnostics apart into separate streams.
 	$doctorErr = Join-Path $TestHome 'doctor.err.txt'
-	$doctorJson = & $TestdBin doctor --fix --json 2>$doctorErr
-	if ($LASTEXITCODE -eq 0) {
+	$doctor = Invoke-Captured $TestdBin 'doctor', '--fix', '--json' $doctorErr
+	if ($doctor.ExitCode -eq 0) {
 		Pass 'doctor --fix'
 	} else {
 		Fail 'doctor --fix'
@@ -575,7 +594,7 @@ if ($env:TESTD_HOST_TEST_SYSTEM -eq '1' -and $isAdmin -and $daemonUp) {
 	}
 	try {
 		$checks = @{}
-		($doctorJson | Out-String | ConvertFrom-Json).checks | ForEach-Object { $checks[$_.name] = $_.ok }
+		($doctor.Text | ConvertFrom-Json).checks | ForEach-Object { $checks[$_.name] = $_.ok }
 		if ($checks['resolver'] -eq $true -and $checks['resolution'] -eq $true -and $checks['edge'] -eq $true) {
 			Pass 'resolver, name resolution, and edge'
 		} else {
@@ -592,7 +611,7 @@ if ($env:TESTD_HOST_TEST_SYSTEM -eq '1' -and $isAdmin -and $daemonUp) {
 			$base64 = [regex]::Match($pem, $pattern, 'Singleline').Groups[1].Value
 			$der = [Convert]::FromBase64String(($base64 -replace '\s', ''))
 			$rootThumb = ([System.Security.Cryptography.X509Certificates.X509Certificate2]::new([byte[]]$der)).Thumbprint
-			$storeText = (certutil -store Root 2>&1 | Out-String)
+			$storeText = (Invoke-Captured 'certutil' 'store', 'Root').Text
 			if ($storeText.ToLower().Contains($rootThumb.ToLower())) {
 				Pass "current root installed ($rootThumb)"
 			} else {
@@ -618,17 +637,17 @@ if ($env:TESTD_HOST_TEST_SYSTEM -eq '1' -and $isAdmin -and $daemonUp) {
 	} else {
 		Fail "system trust (TLS accepted without --insecure): $((System-Status "testd.$Tld" '/ok.svg'))"
 	}
-	$resolverUrl = (& $TestdBin url testd://fix/resolver 2>&1 | Out-String)
-	if ($LASTEXITCODE -eq 0) {
+	$resolverUrl = Invoke-Captured $TestdBin 'url', 'testd://fix/resolver'
+	if ($resolverUrl.ExitCode -eq 0) {
 		Pass 'testd url forwards the resolver repair'
 	} else {
-		Fail "testd url forwards the resolver repair: $resolverUrl"
+		Fail "testd url forwards the resolver repair: $($resolverUrl.Text)"
 	}
-	$certificateUrl = (& $TestdBin url testd://fix/certificate 2>&1 | Out-String)
-	if ($LASTEXITCODE -eq 0) {
+	$certificateUrl = Invoke-Captured $TestdBin 'url', 'testd://fix/certificate'
+	if ($certificateUrl.ExitCode -eq 0) {
 		Pass 'testd url forwards the certificate repair'
 	} else {
-		Fail "testd url forwards the certificate repair: $certificateUrl"
+		Fail "testd url forwards the certificate repair: $($certificateUrl.Text)"
 	}
 } elseif ($env:TESTD_HOST_TEST_SYSTEM -eq '1') {
 	Fail 'system checks requested, but this PowerShell is not elevated; open PowerShell as Administrator and rerun'
