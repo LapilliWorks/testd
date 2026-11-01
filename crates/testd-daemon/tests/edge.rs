@@ -16,6 +16,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use rustls::pki_types::ServerName;
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex as AsyncMutex, Notify};
@@ -36,6 +37,11 @@ struct Harness {
 }
 
 async fn start() -> Harness {
+	// Windows may take more than 300 ms to report a refused loopback connection.
+	start_with_upstream_timeout(Duration::from_secs(5)).await
+}
+
+async fn start_with_upstream_timeout(upstream_timeout: Duration) -> Harness {
 	let (upstream, upstream_dropped) = start_upstream().await;
 	let dir = std::env::temp_dir().join(format!("testd-edge-{}-{}", std::process::id(), upstream.port()));
 	std::fs::create_dir_all(&dir).unwrap();
@@ -49,7 +55,7 @@ async fn start() -> Harness {
 		.unwrap();
 
 	let mut ctx = EdgeContext::new("test", registry.clone());
-	ctx.upstream_timeout = Duration::from_millis(300);
+	ctx.upstream_timeout = upstream_timeout;
 
 	let pki_dir = dir.join("pki");
 	let edge =
@@ -261,10 +267,11 @@ async fn client_abort_drops_the_upstream_connection() {
 #[tokio::test]
 async fn dead_upstream_is_502() {
 	let harness = start().await;
-	let port = {
-		let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-		probe.local_addr().unwrap().port()
-	};
+	// Reserve a TCP port without listening; no parallel fixture can reuse it.
+	let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+	let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+	socket.bind(&addr.into()).unwrap();
+	let port = socket.local_addr().unwrap().as_socket().unwrap().port();
 	let connection = harness.registry.lock().await.connection_id();
 	harness
 		.registry
@@ -285,7 +292,7 @@ async fn dead_upstream_is_502() {
 
 #[tokio::test]
 async fn slow_upstream_is_504() {
-	let harness = start().await;
+	let harness = start_with_upstream_timeout(Duration::from_millis(300)).await;
 	let response = raw_request(harness.edge.http_addr, &get("app.test", "/slow")).await;
 	assert!(response.starts_with("HTTP/1.1 504"), "{response}");
 }
