@@ -19,7 +19,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
 	/// Configure this machine as a host. Idempotent: re-running keeps the
-	/// existing TLD and only updates what changed.
+	/// existing TLD and operator secret and only updates what changed.
 	Init {
 		/// Path to the global Caddyfile. Auto-detected if omitted.
 		#[arg(long, env = "TESTD_CADDYFILE")]
