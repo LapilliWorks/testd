@@ -436,6 +436,20 @@ class HostSystemTests(unittest.TestCase):
 				runner.system_snapshot(run, 'testdcheck')
 			command.assert_called_once_with('sudo-ready', ['sudo', '-n', 'true'], terminal=True)
 
+	def test_host_checks_keep_the_terminal_only_for_system_runs(self):
+		for system in (False, True):
+			with self.subTest(system=system), tempfile.TemporaryDirectory() as directory:
+				run = self.create_run(directory)
+				run.args.system = system
+				with patch.object(runner, 'binary', return_value=pathlib.Path('/bin/true')), \
+					patch.object(runner, 'check_ports'), \
+					patch.object(runner, 'system_snapshot'), \
+					patch.object(runner, 'system_restore'), \
+					patch.object(run, 'command', return_value='ok    doctor --fix\n') as command, \
+					redirect_stdout(io.StringIO()):
+					runner.host(run)
+				self.assertEqual(command.call_args.kwargs['terminal'], system)
+
 
 class CommandOutputTests(unittest.TestCase):
 	def create_run(self, directory):
@@ -495,6 +509,8 @@ class CommandOutputTests(unittest.TestCase):
 				run.command('sudo-ready', [sys.executable, '-c', 'pass'], terminal=True)
 			self.assertIsNone(popen.call_args.kwargs['stdin'])
 			self.assertFalse(popen.call_args.kwargs['start_new_session'])
+			if runner.SYSTEM != 'Windows':
+				self.assertEqual(popen.call_args.kwargs['process_group'], 0)
 
 	def test_other_checks_detach_from_the_terminal(self):
 		with tempfile.TemporaryDirectory() as directory:
@@ -504,6 +520,7 @@ class CommandOutputTests(unittest.TestCase):
 				run.command('detached', [sys.executable, '-c', 'pass'])
 			self.assertIs(popen.call_args.kwargs['stdin'], subprocess.DEVNULL)
 			self.assertEqual(popen.call_args.kwargs['start_new_session'], runner.SYSTEM != 'Windows')
+			self.assertNotIn('process_group', popen.call_args.kwargs)
 
 	def test_a_detached_child_is_signalled_alone(self):
 		process = Mock(pid=4321)

@@ -196,7 +196,8 @@ class Run:
 		`terminal` keeps the operator's terminal attached, stdin and session
 		alike. sudo keys its cached credential to that terminal, so a detached
 		check asks for a password even right after `sudo -v` succeeded in the
-		same shell.
+		same shell. The child still leads its own process group, so a timeout can
+		stop the processes it started.
 		"""
 		log = self.output / f'{len(self.results):02d}-{re.sub(r"[^a-zA-Z0-9-]", "-", name)}.log'
 		print(f'Running: {" ".join(map(str, command))}', flush=True)
@@ -205,7 +206,8 @@ class Run:
 		with log.open('xb') as log_file:
 			process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE,
 				stderr=subprocess.PIPE, stdin=None if terminal else subprocess.DEVNULL,
-				start_new_session=SYSTEM != 'Windows' and not terminal)
+				start_new_session=SYSTEM != 'Windows' and not terminal,
+				**({'process_group': 0} if terminal and SYSTEM != 'Windows' else {}))
 			output = CommandOutput(process, log_file)
 			try:
 				text = output.wait(timeout)
@@ -322,7 +324,10 @@ def host(run):
 		require('python3')
 		command = ['bash', f'tests/host/{"macos" if SYSTEM == "Darwin" else "linux"}.sh']
 	try:
-		text = run.command('host-checks', command, 600, env)
+		# With --system the script runs sudo itself, which needs the terminal the
+		# credential was validated on. Plain runs keep fixtures off the operator's
+		# stdin.
+		text = run.command('host-checks', command, 600, env, terminal=run.args.system)
 		if 'skip' in text:
 			run.record('host-coverage', 'skip', 'see host log for unchecked system/autostart sections')
 		if run.args.system:
