@@ -104,7 +104,7 @@ run at a time; the instance lock must reject a second tray or headless host.
 - [ ] **Access** lists waiting requests and issued tokens; approving a request lets its leaf connect, and revoking a token refuses its next connection.
 - [ ] **Quick launches** lists saved definitions and their live state.
 - [ ] **Certificate** shows the root summary and fingerprint; **Install** and
-      **Remove** update the OS trust store and the page state.
+      **Remove** update the OS trust store and the page state. The tray menu has no certificate entry.
 - [ ] After **Remove**, restarting the tray does not reinstall trust; **Install**
       or the setup wizard is needed to trust it again.
 - [ ] A mutation from a cross-site page is refused: the dashboard requires the
