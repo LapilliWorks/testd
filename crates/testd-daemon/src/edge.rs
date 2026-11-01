@@ -372,13 +372,11 @@ fn upgrade_response(
 ) -> Response<Body> {
 	let upstream_upgrade = hyper::upgrade::on(&mut response);
 	let status = response.status();
-	let headers = response.headers().clone();
+	let headers = upgrade_headers(response.headers());
 
 	let mut builder = Response::builder().status(status);
 	for (name, value) in headers.iter() {
-		if name == CONNECTION || name == UPGRADE {
-			builder = builder.header(name, value);
-		}
+		builder = builder.header(name, value);
 	}
 	let response = builder.body(empty()).unwrap();
 
@@ -397,6 +395,17 @@ fn upgrade_response(
 		});
 	}
 	response
+}
+
+/// End-to-end headers from a 101 response, including the WebSocket accept and
+/// subprotocol negotiation. Only the hop-by-hop connection fields are rebuilt.
+fn upgrade_headers(headers: &hyper::HeaderMap) -> hyper::HeaderMap {
+	let mut filtered = filter_response_headers(headers);
+	if let Some(value) = headers.get(UPGRADE) {
+		filtered.insert(UPGRADE, value.clone());
+	}
+	filtered.insert(CONNECTION, HeaderValue::from_static("upgrade"));
+	filtered
 }
 
 fn host_of<B>(request: &Request<B>) -> Option<String> {
@@ -519,6 +528,23 @@ mod tests {
 		let second = store.mint("app.test").unwrap();
 		assert_eq!(first.cert[0].as_ref(), second.cert[0].as_ref());
 		std::fs::remove_dir_all(&dir).ok();
+	}
+
+	#[test]
+	fn upgrade_responses_keep_the_websocket_handshake_headers() {
+		let mut headers = hyper::HeaderMap::new();
+		headers.insert(UPGRADE, HeaderValue::from_static("websocket"));
+		headers.insert(CONNECTION, HeaderValue::from_static("Upgrade"));
+		headers.insert("sec-websocket-accept", HeaderValue::from_static("accept-value"));
+		headers.insert("sec-websocket-protocol", HeaderValue::from_static("chat"));
+		headers.insert("x-other", HeaderValue::from_static("kept"));
+
+		let filtered = upgrade_headers(&headers);
+		assert_eq!(filtered.get("sec-websocket-accept").unwrap(), "accept-value");
+		assert_eq!(filtered.get("sec-websocket-protocol").unwrap(), "chat");
+		assert_eq!(filtered.get("x-other").unwrap(), "kept");
+		assert_eq!(filtered.get(UPGRADE).unwrap(), "websocket");
+		assert_eq!(filtered.get(CONNECTION).unwrap(), "upgrade");
 	}
 
 	#[test]

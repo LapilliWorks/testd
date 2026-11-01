@@ -18,6 +18,9 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 
 - The browser release suite starts a headless host when none is listening and stops only a host it started, so the suite no longer leaves the fixture retrying for an hour; a host with another TLD is refused
 - The browser page can restart a host the suite started and reports the result back to the page, so the certificate-renewal check no longer needs a separate terminal; a pre-started host is left alone
+- The HTTPS edge keeps the WebSocket handshake response headers, including `Sec-WebSocket-Accept`, so upgrades through the edge work in browsers again
+- macOS resolver setup and teardown flush the DNS cache and reload mDNSResponder, so a new or removed `/etc/resolver/<tld>` route takes effect without a stale negative cache; `doctor --fix` also rewrites the route when resolution still fails
+- The browser suite checks the OS resolver through `testd doctor --json` before opening the page, and the page can save a failing report with its observations unchecked instead of forcing a false confirmation
 - The Windows NRPT snapshot enumerates the JSON array before filtering, so restoring two or more rules no longer nests them into a single element
 - Windows quick-launch checks hand curl its JSON body through a temporary file, because PowerShell 5.1 breaks a native argument that holds both spaces and quotes
 - Windows system checks look the installed root up in the certificate store instead of parsing certutil's localized text, the restore keeps an empty NRPT set an array so strict mode does not abort it, and it reports only meaningful properties it could not recreate

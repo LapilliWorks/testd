@@ -177,8 +177,14 @@ document.querySelector('#save').onclick = async () => {
 	const fingerprint = document.querySelector('#fingerprint').value.replace(/[:\s]/g, '').toLowerCase();
 	const confirmed = ['trusted', 'certificate', 'errors', 'renewal'].every(id => document.querySelector(`#${id}`).checked);
 	const notes = document.querySelector('#notes').value.trim();
-	if (!confirmed || !/^[a-f0-9]{64}$/.test(fingerprint) || !notes) {
-		alert('Complete all browser observations, fingerprint, and version/OS notes before saving');
+	if (!notes) {
+		alert('Enter the browser version, OS, and notes before saving');
+		return;
+	}
+	// A failed run must still be saveable as evidence. Only a report that claims
+	// all manual observations passed needs a certificate fingerprint.
+	if (confirmed && !/^[a-f0-9]{64}$/.test(fingerprint)) {
+		alert('Enter the leaf SHA-256 fingerprint, or leave the observations unchecked to save a failing report');
 		return;
 	}
 	const response = await fetch('/report', {

@@ -232,7 +232,12 @@ fn nrpt_has_name_server(output: &str, addr: SocketAddr) -> bool {
 fn resolver_commands(tld: &str, addr: SocketAddr) -> Vec<String> {
 	let path = format!("/etc/resolver/{tld}");
 	let content = format!("nameserver {}\\nport {}\\n", addr.ip(), addr.port());
-	vec!["mkdir -p /etc/resolver".to_owned(), format!("printf '{content}' > {path}")]
+	vec![
+		"mkdir -p /etc/resolver".to_owned(),
+		format!("printf '{content}' > {path}"),
+		"dscacheutil -flushcache".to_owned(),
+		"killall -HUP mDNSResponder".to_owned(),
+	]
 }
 
 #[cfg(target_os = "linux")]
@@ -466,6 +471,14 @@ fn teardown_macos(tld: &str) -> io::Result<()> {
 	if !status.success() {
 		return Err(io::Error::other(format!("sudo rm {path} failed")));
 	}
+	let status = silent_command("sudo").args(["dscacheutil", "-flushcache"]).status()?;
+	if !status.success() {
+		return Err(io::Error::other("sudo dscacheutil -flushcache failed"));
+	}
+	let status = silent_command("sudo").args(["killall", "-HUP", "mDNSResponder"]).status()?;
+	if !status.success() {
+		return Err(io::Error::other("sudo killall -HUP mDNSResponder failed"));
+	}
 	Ok(())
 }
 
@@ -658,6 +671,19 @@ mod tests {
 		assert!(commands[0].contains("90-testd.conf"));
 		assert!(commands[0].contains("systemctl reload systemd-resolved"));
 		assert!(!commands[0].contains("resolvectl"));
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn macos_resolver_writes_the_route_and_flushes_the_cache() {
+		let addr: SocketAddr = "127.0.0.1:7753".parse().unwrap();
+		let commands = resolver_commands("test", addr);
+		assert_eq!(commands.len(), 4);
+		assert!(commands[1].contains("/etc/resolver/test"));
+		assert!(commands[1].contains("nameserver 127.0.0.1"));
+		assert!(commands[1].contains("port 7753"));
+		assert_eq!(commands[2], "dscacheutil -flushcache");
+		assert_eq!(commands[3], "killall -HUP mDNSResponder");
 	}
 
 	#[test]

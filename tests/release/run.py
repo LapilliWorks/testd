@@ -551,6 +551,29 @@ def wait_for_host(port, process, output, timeout=30):
 	raise RuntimeError(f'the host did not listen on 127.0.0.1:{port} within {timeout} seconds')
 
 
+def require_host_resolution(run, cli):
+	"""Fail before a browser opens if the OS resolver does not reach the host TLD."""
+	log = run.log_path('host-doctor')
+	print(f'Running: {cli} doctor --json', flush=True)
+	try:
+		result = subprocess.run([str(cli), 'doctor', '--json'], cwd=ROOT,
+			env={**os.environ, 'PYTHONUTF8': '1'}, capture_output=True, timeout=60)
+	except subprocess.TimeoutExpired as error:
+		raise RuntimeError(f'`testd doctor --json` timed out; inspect {log}') from error
+	log.write_bytes(result.stdout + result.stderr)
+	try:
+		checks = {item['name']: item for item in json.loads(result.stdout)['checks']}
+	except (KeyError, TypeError, ValueError) as error:
+		raise RuntimeError(f'could not read `testd doctor --json`; inspect {log}') from error
+	for name in ('resolver', 'resolution'):
+		check = checks.get(name)
+		if not check or not check.get('ok'):
+			detail = check.get('detail', 'missing check') if check else 'missing check'
+			fix = (check.get('fix') if check else None) or 'run `testd doctor --fix` on the host'
+			raise RuntimeError(f'{name}: {detail}; {fix}')
+	run.record('host-resolution', 'pass', 'the OS resolver resolves the host TLD')
+
+
 class HostFixture:
 	"""A host the browser suite owns. An already-running host is left untouched."""
 
@@ -640,6 +663,8 @@ def browser(run):
 		if status.get('tld') != run.args.tld:
 			raise RuntimeError(f'the host at 127.0.0.1:{run.args.intake_port} serves .{status.get("tld")}, '
 				f'but --tld {run.args.tld} was requested; run the host with the same TLD')
+		if run.args.tld != 'localhost':
+			require_host_resolution(run, cli)
 		run.metadata['browser_host_managed'] = host.started
 		run.save()
 		url = f'https://app.releasecheck.{run.args.tld}:{run.args.edge_port}/'

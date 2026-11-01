@@ -640,7 +640,21 @@ async fn doctor(fix: bool, json: bool) -> anyhow::Result<i32> {
 			ResolverBackend::Dns => std::net::IpAddr::V4(config.answer_addr),
 			ResolverBackend::Hosts => std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
 		};
-		match resolve_via_os(&dashboard) {
+		let resolved = resolve_via_os(&dashboard);
+		// A route can exist while mDNSResponder or systemd-resolved still answers
+		// from a stale cache. Rewriting the route also refreshes that cache.
+		let resolved = if fix
+			&& matches!(config.resolver, ResolverBackend::Dns)
+			&& !matches!(&resolved, Some(addrs) if addrs.contains(&expected))
+		{
+			match testd_setup::setup_os_resolver(&config.tld, dns_addr) {
+				Ok(()) => resolve_via_os(&dashboard),
+				Err(_) => resolved,
+			}
+		} else {
+			resolved
+		};
+		match resolved {
 			Some(addrs) if addrs.contains(&expected) => {
 				checks.push(Check::ok("resolution", format!("{dashboard} resolves to {expected}")));
 			},

@@ -516,6 +516,7 @@ class BrowserTests(unittest.TestCase):
 				patch.object(runner, 'local_host_status', side_effect=runner.HostUnavailable('missing')), \
 				patch.object(runner, 'wait_for_host', return_value={'tld': 'test'}) as wait, \
 				patch.object(runner, 'binary', return_value=pathlib.Path('/bin/true')), \
+				patch.object(runner, 'require_host_resolution'), \
 				patch.object(run, 'serve', side_effect=start_host) as serve, \
 				patch.object(run, 'command', return_value='') as command, \
 				redirect_stdout(io.StringIO()):
@@ -604,6 +605,7 @@ class BrowserTests(unittest.TestCase):
 				patch.object(runner, 'check_ports'), \
 				patch.object(runner, 'local_host_status', return_value={'tld': 'test'}), \
 				patch.object(runner, 'binary', return_value=pathlib.Path('/bin/true')), \
+				patch.object(runner, 'require_host_resolution'), \
 				patch.object(run, 'serve') as serve, \
 				patch.object(run, 'command', return_value='') as command, \
 				redirect_stdout(io.StringIO()):
@@ -611,6 +613,36 @@ class BrowserTests(unittest.TestCase):
 			serve.assert_not_called()
 			command.assert_called_once()
 			self.assertTrue(run.metadata['incomplete'])
+
+	def test_a_missing_os_resolver_fails_before_the_browser_opens(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			doctor = json.dumps({'checks': [
+				{'name': 'resolver', 'ok': False, 'detail': 'not configured',
+					'fix': 'run `testd doctor --fix` or `testd init --resolver-now`'},
+				{'name': 'resolution', 'ok': False, 'detail': 'testd.test does not resolve',
+					'fix': 'run `testd doctor --fix`'},
+			]}).encode()
+			result = SimpleNamespace(stdout=doctor, stderr=b'')
+			with patch.object(runner.subprocess, 'run', return_value=result), \
+				redirect_stdout(io.StringIO()):
+				with self.assertRaisesRegex(RuntimeError, 'resolver: not configured; run `testd doctor --fix`'):
+					runner.require_host_resolution(run, pathlib.Path('/bin/true'))
+			self.assertIn('not configured', (run.output / '00-host-doctor.log').read_text())
+
+	def test_a_configured_os_resolver_passes(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			doctor = json.dumps({'checks': [
+				{'name': 'resolver', 'ok': True, 'detail': 'configured', 'fix': None},
+				{'name': 'resolution', 'ok': True, 'detail': 'testd.test resolves', 'fix': None},
+			]}).encode()
+			result = SimpleNamespace(stdout=doctor, stderr=b'')
+			with patch.object(runner.subprocess, 'run', return_value=result), \
+				redirect_stdout(io.StringIO()):
+				runner.require_host_resolution(run, pathlib.Path('/bin/true'))
+			self.assertEqual(run.results[-1]['name'], 'host-resolution')
+			self.assertEqual(run.results[-1]['status'], 'pass')
 
 	def test_a_refused_connection_is_reported_as_a_missing_host(self):
 		with patch.object(runner.http.client, 'HTTPConnection') as connection:
