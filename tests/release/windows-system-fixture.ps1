@@ -17,6 +17,10 @@ Set-StrictMode -Version Latest
 # native tools whose output the checks read.
 . "$PSScriptRoot\utf8-output.ps1"
 
+# -Command does not load Microsoft.PowerShell.Security, which owns the Cert:
+# drive that -CertStoreLocation resolves, so import it first.
+Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
+
 if ($Tld -notmatch '^[a-z0-9]{1,10}$') { throw 'invalid TLD' }
 $identity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {

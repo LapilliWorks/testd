@@ -62,8 +62,17 @@ function Get-NamespaceRules {
 }
 
 function Get-RootCertificates {
-	$roots = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction Stop
-	@($roots | Where-Object { $_.Subject -eq $RootName })
+	# The Cert: provider drive only exists once Microsoft.PowerShell.Security is
+	# loaded, which -Command does not guarantee, so read the store directly.
+	$name = [System.Security.Cryptography.X509Certificates.StoreName]::Root
+	$location = [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine
+	$store = [System.Security.Cryptography.X509Certificates.X509Store]::new($name, $location)
+	$store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+	try {
+		@($store.Certificates | Where-Object { $_.Subject -eq $RootName })
+	} finally {
+		$store.Close()
+	}
 }
 
 function Get-RootThumbprints {
