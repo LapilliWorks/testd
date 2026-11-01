@@ -13,6 +13,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+# The runner captures this script through pipes and decodes UTF-8, as do the
+# native tools whose output the checks read.
+. "$PSScriptRoot\utf8-output.ps1"
 
 if ($Tld -notmatch '^[a-z0-9]{1,10}$') { throw 'invalid TLD' }
 $identity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()

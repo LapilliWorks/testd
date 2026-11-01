@@ -25,6 +25,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+# The runner captures this script through pipes and decodes UTF-8, as do the
+# native tools whose output the checks read.
+. "$PSScriptRoot\utf8-output.ps1"
 
 if ($Tld -notmatch '^[a-z0-9]{1,10}$') { throw "invalid TLD" }
 $Namespace = '.' + $Tld
@@ -97,7 +100,7 @@ function Save-Snapshot {
 	})
 	# PowerShell 5.1 writes nothing for an empty array, so spell empty out.
 	$json = if ($rules.Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject $rules -Depth 10 }
-	Set-Content -LiteralPath $NrptFile -Value $json
+	Set-Content -LiteralPath $NrptFile -Value $json -Encoding utf8
 	New-Item -ItemType Directory -Path $RootDirectory -Force | Out-Null
 	foreach ($root in Get-RootCertificates) {
 		[IO.File]::WriteAllBytes((Join-Path $RootDirectory ($root.Thumbprint + '.cer')),
@@ -108,7 +111,7 @@ function Save-Snapshot {
 
 function Read-Snapshot {
 	if (-not (Test-Path -LiteralPath $NrptFile)) { throw "missing snapshot: $NrptFile" }
-	$text = Get-Content -LiteralPath $NrptFile -Raw
+	$text = Get-Content -LiteralPath $NrptFile -Raw -Encoding utf8
 	$rules = @()
 	if ($text -and $text.Trim()) {
 		$rules = @($text | ConvertFrom-Json | Where-Object { $null -ne $_ })

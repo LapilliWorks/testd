@@ -10,6 +10,9 @@
 #   python tests\release\run.py host --system   # from an elevated shell
 
 $ErrorActionPreference = 'Stop'
+# The runner captures this script through pipes and decodes UTF-8, as do the
+# native tools whose output the checks read.
+. "$PSScriptRoot\..\release\utf8-output.ps1"
 if ($env:TESTD_HOST_TEST_SYSTEM -eq '1' -and
 	-not ($env:TESTD_HOST_SNAPSHOT -and (Test-Path (Join-Path $env:TESTD_HOST_SNAPSHOT 'manifest.json')))) {
 	throw 'Run system checks through tests/release/run.py host --system so the integration is snapshotted first'
@@ -45,7 +48,7 @@ function Wait-Tcp([string]$HostName, [int]$Port, [int]$Seconds = 30) {
 function Wait-Log([string]$Pattern, [string]$Path, [int]$Seconds = 30) {
 	for ($i = 0; $i -lt $Seconds; $i++) {
 		if (Test-Path $Path) {
-			$text = Get-Content $Path -Raw -ErrorAction SilentlyContinue
+			$text = Get-Content $Path -Raw -Encoding utf8 -ErrorAction SilentlyContinue
 			if ($text -and $text -match $Pattern) { return $true }
 		}
 		Start-Sleep -Seconds 1
@@ -111,6 +114,8 @@ function Invoke-Init {
 	$psi.RedirectStandardInput = $true
 	$psi.RedirectStandardOutput = $true
 	$psi.RedirectStandardError = $true
+	$psi.StandardOutputEncoding = $Utf8
+	$psi.StandardErrorEncoding = $Utf8
 	$process = [System.Diagnostics.Process]::Start($psi)
 	$process.StandardInput.Close()
 	$stdout = $process.StandardOutput.ReadToEnd()
@@ -199,7 +204,7 @@ if ($second.ExitCode -eq 0 -and (OperatorSecret) -eq $secret) {
 }
 
 # Keep the daemon off privileged and public ports for the throwaway run.
-$lines = Get-Content $Config
+$lines = Get-Content $Config -Encoding utf8
 $new = New-Object System.Collections.Generic.List[string]
 foreach ($line in $lines) {
 	$new.Add($line)
@@ -217,7 +222,7 @@ if (Wait-Tcp '127.0.0.1' 7737 30) {
 	Pass 'testd host'
 } else {
 	Fail 'testd host'
-	Get-Content $DaemonErr -ErrorAction SilentlyContinue | Select-Object -First 120
+	Get-Content $DaemonErr -Encoding utf8 -ErrorAction SilentlyContinue | Select-Object -First 120
 }
 if (Wait-Tcp '127.0.0.1' $EdgePort 30) { Pass "HTTPS listener $EdgePort" } else { Fail "HTTPS listener $EdgePort" }
 if (Test-Path $Control) { Pass 'control channel file' } else { Fail 'control channel file' }
@@ -228,8 +233,8 @@ $lockErr = Join-Path $TestHome 'second-host.err'
 $secondDaemon = Start-Process -FilePath $TestdBin -ArgumentList 'host' -PassThru -Wait -NoNewWindow `
 	-RedirectStandardOutput $lockOut -RedirectStandardError $lockErr
 $lockText = ''
-if (Test-Path $lockOut) { $lockText += Get-Content $lockOut -Raw }
-if (Test-Path $lockErr) { $lockText += Get-Content $lockErr -Raw }
+if (Test-Path $lockOut) { $lockText += Get-Content $lockOut -Raw -Encoding utf8 }
+if (Test-Path $lockErr) { $lockText += Get-Content $lockErr -Raw -Encoding utf8 }
 if ($secondDaemon.ExitCode -ne 0 -and $lockText -match 'another testd daemon is already running') {
 	Pass 'a second daemon is refused'
 } else {
@@ -379,7 +384,7 @@ if (Wait-Log '\[reg\]' $ClientErr 20) {
 } else {
 	Fail 'client registered with the node operator secret'
 	if (Test-Path $ClientErr) {
-		Get-Content $ClientErr -ErrorAction SilentlyContinue | Select-Object -First 40 |
+		Get-Content $ClientErr -Encoding utf8 -ErrorAction SilentlyContinue | Select-Object -First 40 |
 			ForEach-Object { Write-Host "      $_" }
 	}
 }
@@ -403,9 +408,9 @@ if (Wait-Log 'requested access' $AccessErr 10) {
 	Pass 'a leaf with no credential requests a token'
 } else {
 	Fail 'a leaf with no credential requests a token'
-	if (Test-Path $AccessErr) { Get-Content $AccessErr -ErrorAction SilentlyContinue | Select-Object -First 40 }
+	if (Test-Path $AccessErr) { Get-Content $AccessErr -Encoding utf8 -ErrorAction SilentlyContinue | Select-Object -First 40 }
 }
-$requestText = if (Test-Path $AccessErr) { Get-Content $AccessErr -Raw -ErrorAction SilentlyContinue } else { '' }
+$requestText = if (Test-Path $AccessErr) { Get-Content $AccessErr -Raw -Encoding utf8 -ErrorAction SilentlyContinue } else { '' }
 $requestId = $null
 if ($requestText -match '\(request ([^)]+)\)') { $requestId = $Matches[1] }
 $requestsOut = (& $TestdBin requests 2>&1 | Out-String)
@@ -565,7 +570,7 @@ if ($env:TESTD_HOST_TEST_SYSTEM -eq '1' -and $isAdmin -and $daemonUp) {
 		Pass 'doctor --fix'
 	} else {
 		Fail 'doctor --fix'
-		Get-Content $doctorErr -ErrorAction SilentlyContinue | Select-Object -First 80 |
+		Get-Content $doctorErr -Encoding utf8 -ErrorAction SilentlyContinue | Select-Object -First 80 |
 			ForEach-Object { Write-Host "      $_" }
 	}
 	try {
@@ -582,7 +587,7 @@ if ($env:TESTD_HOST_TEST_SYSTEM -eq '1' -and $isAdmin -and $daemonUp) {
 	$rootPath = Join-Path $Pki 'root.crt'
 	if (Test-Path $rootPath) {
 		try {
-			$pem = Get-Content $rootPath -Raw
+			$pem = Get-Content $rootPath -Raw -Encoding utf8
 			$pattern = '-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----'
 			$base64 = [regex]::Match($pem, $pattern, 'Singleline').Groups[1].Value
 			$der = [Convert]::FromBase64String(($base64 -replace '\s', ''))

@@ -9,7 +9,6 @@ import functools
 import hashlib
 import importlib.util
 import json
-import locale
 import os
 import pathlib
 import platform
@@ -28,6 +27,10 @@ import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SYSTEM = platform.system()
+# Every tool the suites drive writes UTF-8, and the host scripts switch PowerShell
+# to it. The locale encoding is the ANSI code page on non-English Windows, so
+# decoding with it corrupts cargo trees and any non-ASCII path or message.
+ENCODING = 'utf-8'
 # Throwaway TLD for the host suite, so it never collides with a real .test setup.
 HOST_TLD = os.environ.get('TESTD_HOST_TLD', 'testdcheck')
 
@@ -49,12 +52,12 @@ def console_encoding():
 	"""The encoding the shell capturing our redirected output will decode with.
 
 	PowerShell 7 decodes a child's output with [Console]::OutputEncoding, which
-	follows the console code page (cp936 on a Chinese system). Python 3.15
-	writes UTF-8 for redirected streams, so a captured run shows the report and
-	every localized error as mojibake even though the bytes are right. Writing
-	the console code page instead keeps the mirror readable; a UTF-8 console
-	(65001) needs nothing, and the console itself is written through the
-	Windows console API whatever we choose here.
+	follows the console code page (cp936 on a Chinese system), but this runner
+	writes redirected streams as UTF-8. A captured run would then show the
+	report and every localized error as mojibake even though the bytes are
+	right. Writing the console code page instead keeps the mirror readable; a
+	UTF-8 console (65001) needs nothing, and the console itself is written
+	through the Windows console API whatever we choose here.
 	"""
 	if SYSTEM != 'Windows':
 		return None
@@ -107,7 +110,6 @@ class CommandOutput:
 		self.data = bytearray()
 		self.errors = []
 		self.lock = threading.Lock()
-		self.encoding = locale.getpreferredencoding(False)
 		self.threads = []
 		for pipe, terminal in [(process.stdout, sys.stdout), (process.stderr, sys.stderr)]:
 			thread = threading.Thread(target=self.copy, args=(pipe, terminal), daemon=True)
@@ -115,23 +117,17 @@ class CommandOutput:
 			self.threads.append(thread)
 
 	def copy(self, pipe, terminal):
-		binary_terminal = getattr(terminal, 'buffer', None)
-		decoder = codecs.getincrementaldecoder(self.encoding)(errors='replace')
+		decoder = codecs.getincrementaldecoder(ENCODING)(errors='replace')
 		try:
 			while chunk := pipe.read1(64 * 1024):
 				with self.lock:
 					self.data.extend(chunk)
 					self.log.write(chunk)
 					self.log.flush()
-				if binary_terminal is not None:
-					binary_terminal.write(chunk)
-					binary_terminal.flush()
-				else:
-					terminal.write(decoder.decode(chunk))
-					terminal.flush()
-			if binary_terminal is None:
-				terminal.write(decoder.decode(b'', final=True))
+				terminal.write(decoder.decode(chunk))
 				terminal.flush()
+			terminal.write(decoder.decode(b'', final=True))
+			terminal.flush()
 		except Exception as error:
 			with self.lock:
 				self.errors.append(error)
@@ -147,7 +143,7 @@ class CommandOutput:
 				raise subprocess.TimeoutExpired(self.process.args, timeout)
 		if self.errors:
 			raise RuntimeError('failed to mirror command output to the terminal or log') from self.errors[0]
-		return self.data.decode(self.encoding, errors='replace')
+		return self.data.decode(ENCODING, errors='replace')
 
 
 def stop_command(process, signal_number):
@@ -171,15 +167,18 @@ class Run:
 		self.output.mkdir(parents=True, exist_ok=False, mode=0o700)
 		self.results = []
 		self.metadata = {'os': platform.platform(), 'python': sys.version, 'suite': args.suite}
-		git = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True, text=True, check=True)
+		git = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True,
+			encoding=ENCODING, errors='replace', check=True)
 		self.metadata['commit'] = git.stdout.strip()
-		status = subprocess.run(['git', 'status', '--porcelain'], cwd=ROOT, capture_output=True, text=True, check=True)
+		status = subprocess.run(['git', 'status', '--porcelain'], cwd=ROOT, capture_output=True,
+			encoding=ENCODING, errors='replace', check=True)
 		self.metadata['dirty'] = bool(status.stdout.strip())
 		self.save()
 		print(f'Report: {self.output}', flush=True)
 
 	def save(self):
-		(self.output / 'report.json').write_text(json.dumps({**self.metadata, 'checks': self.results}, indent=2) + '\n')
+		(self.output / 'report.json').write_text(
+			json.dumps({**self.metadata, 'checks': self.results}, indent=2) + '\n', encoding=ENCODING)
 
 	def record(self, name, status, detail=''):
 		self.results.append({'name': name, 'status': status, 'detail': detail})
@@ -189,6 +188,8 @@ class Run:
 	def command(self, name, command, timeout=300, env=None, expected=0, interrupt_ok=False):
 		log = self.output / f'{len(self.results):02d}-{re.sub(r"[^a-zA-Z0-9-]", "-", name)}.log'
 		print(f'Running: {" ".join(map(str, command))}', flush=True)
+		# Nested Python tools would otherwise write the ANSI code page on Windows.
+		env = {**(os.environ if env is None else env), 'PYTHONUTF8': '1'}
 		with log.open('xb') as log_file:
 			process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE,
 				stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, start_new_session=SYSTEM != 'Windows')
@@ -354,7 +355,7 @@ def extract_archive(path, destination):
 
 def verify_checksums(directory):
 	listed = set()
-	for line in (directory / 'SHA256SUMS').read_text().splitlines():
+	for line in (directory / 'SHA256SUMS').read_text(encoding=ENCODING).splitlines():
 		expected, name = line.split('  ', 1)
 		safe_members([name])
 		path = directory / name
@@ -424,9 +425,9 @@ def fresh_install(run, cli, index, expected_version):
 	run.command('upgrade-base-init' if run.args.previous_bin else 'fresh-init',
 		[str(initial), 'init', '--caddyfile', '', '--tld', 'localhost'], env=env)
 	root_before = file_digest(self_config / 'pki/root.crt')
-	before = tomllib.loads((self_config / 'config.toml').read_text())
+	before = tomllib.loads((self_config / 'config.toml').read_text(encoding=ENCODING))
 	run.command('re-init', [str(cli), 'init', '--caddyfile', '', '--tld', 'localhost'], env=env)
-	after = tomllib.loads((self_config / 'config.toml').read_text())
+	after = tomllib.loads((self_config / 'config.toml').read_text(encoding=ENCODING))
 	assert_preserved_config(before, after)
 	if file_digest(self_config / 'pki/root.crt') != root_before:
 		raise RuntimeError('re-init or upgrade changed root trust')
@@ -474,7 +475,7 @@ def browser(run):
 		run.metadata['incomplete'] = True
 		run.record('browser-results', 'skip', 'no browser report was saved')
 	for report in reports:
-		result = json.loads(report.read_text())
+		result = json.loads(report.read_text(encoding=ENCODING))
 		has_passed = result.get('manualConfirmed') and all(item['status'] == 'pass' for item in result['checks'])
 		status = 'pass' if has_passed else 'fail'
 		run.record('browser-results', status, str(report))
@@ -489,7 +490,7 @@ def desktop(run):
 	app = run.args.app.resolve()
 	command = ['open', str(app)] if SYSTEM == 'Darwin' else [str(app)]
 	subprocess.Popen(command)
-	items = checklist_items((ROOT / 'tests/host/gui-checklist.md').read_text())
+	items = checklist_items((ROOT / 'tests/host/gui-checklist.md').read_text(encoding=ENCODING))
 	try:
 		for item in items:
 			print(f'\n{item}')
@@ -559,6 +560,12 @@ def interrupt(signum, frame):
 def main():
 	if sys.version_info < (3, 12):
 		raise SystemExit('Please install Python 3.12 or newer for release validation')
+	# Start from UTF-8 so argparse and non-Windows captures never use the locale
+	# encoding; match_redirected_encoding then narrows a Windows capture to the
+	# code page its shell decodes with.
+	for stream in (sys.stdout, sys.stderr):
+		if hasattr(stream, 'reconfigure'):
+			stream.reconfigure(encoding=ENCODING)
 	parser = argparse.ArgumentParser(description=__doc__)
 	parser.add_argument('suite', nargs='?', choices=['core', 'host', 'artifacts', 'browser', 'desktop', 'service'])
 	parser.add_argument('--report', type=pathlib.Path, help='new persisted report directory')

@@ -321,7 +321,8 @@ def occupied(directory):
 	found += [f'{KEYCHAIN} {entry["sha1"]}' for entry in manifest['certificates']]
 	if manifest['system'] == 'Windows':
 		nrpt = directory / 'nrpt.json'
-		rules = json.loads(nrpt.read_text()) if nrpt.is_file() else []
+		# The host script writes UTF-8, with a BOM on PowerShell 5.1.
+		rules = json.loads(nrpt.read_text(encoding='utf-8-sig')) if nrpt.is_file() else []
 		found += [f'NRPT rule for {rule["Signature"]["Namespace"]}' for rule in rules]
 		roots = directory / 'roots'
 		if roots.is_dir():
