@@ -7,6 +7,7 @@ import ctypes
 import datetime
 import functools
 import hashlib
+import http.client
 import importlib.util
 import json
 import os
@@ -472,9 +473,34 @@ def service(run):
 	service_checks.run_service(run, binary(run), SYSTEM)
 
 
+def local_host_status(port):
+	"""Read the running host's status, so a missing host fails before the fixture starts."""
+	connection = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+	try:
+		connection.request('GET', '/api/status')
+		response = connection.getresponse()
+		body = response.read()
+	except OSError as error:
+		raise RuntimeError(f'no testd host is listening at 127.0.0.1:{port}; start `testd host` '
+			'or the tray app on the host and rerun this suite') from error
+	finally:
+		connection.close()
+	if response.status != 200:
+		raise RuntimeError(f'the service at 127.0.0.1:{port} returned {response.status} for /api/status; '
+			'is a testd host running there?')
+	try:
+		return json.loads(body)
+	except (UnicodeDecodeError, ValueError) as error:
+		raise RuntimeError(f'the host at 127.0.0.1:{port} returned an invalid /api/status document') from error
+
+
 def browser(run):
 	require('bun')
 	check_ports([run.args.port, run.args.port + 1])
+	status = local_host_status(run.args.intake_port)
+	if status.get('tld') != run.args.tld:
+		raise RuntimeError(f'the host at 127.0.0.1:{run.args.intake_port} serves .{status.get("tld")}, '
+			f'but --tld {run.args.tld} was requested; run the host with the same TLD')
 	cli = binary(run)
 	url = f'https://app.releasecheck.{run.args.tld}:{run.args.edge_port}/'
 	print(f'Open {url} in each browser. Do not bypass certificate warnings.\n'

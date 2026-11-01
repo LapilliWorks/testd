@@ -490,6 +490,59 @@ class HostSystemTests(unittest.TestCase):
 				self.assertEqual(command.call_args.kwargs['terminal'], system)
 
 
+class BrowserTests(unittest.TestCase):
+	def create_run(self, directory, tld='test'):
+		args = SimpleNamespace(report=pathlib.Path(directory) / 'report', suite='browser', tld=tld,
+			port=19080, edge_port=443, intake_port=7737)
+		with redirect_stdout(io.StringIO()):
+			return runner.Run(args)
+
+	def test_missing_host_fails_before_the_fixture_or_build_starts(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			with patch.object(runner, 'require'), \
+				patch.object(runner, 'check_ports'), \
+				patch.object(runner, 'local_host_status', side_effect=RuntimeError('no testd host is listening')), \
+				patch.object(runner, 'binary') as binary, \
+				patch.object(run, 'command') as command:
+				with self.assertRaisesRegex(RuntimeError, 'no testd host is listening'):
+					runner.browser(run)
+			binary.assert_not_called()
+			command.assert_not_called()
+
+	def test_a_different_host_tld_is_refused_before_the_fixture_starts(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			with patch.object(runner, 'require'), \
+				patch.object(runner, 'check_ports'), \
+				patch.object(runner, 'local_host_status', return_value={'tld': 'localhost'}), \
+				patch.object(runner, 'binary') as binary, \
+				patch.object(run, 'command') as command:
+				with self.assertRaisesRegex(RuntimeError, r'serves \.localhost'):
+					runner.browser(run)
+			binary.assert_not_called()
+			command.assert_not_called()
+
+	def test_a_reachable_host_starts_the_fixture(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			with patch.object(runner, 'require'), \
+				patch.object(runner, 'check_ports'), \
+				patch.object(runner, 'local_host_status', return_value={'tld': 'test'}), \
+				patch.object(runner, 'binary', return_value=pathlib.Path('/bin/true')), \
+				patch.object(run, 'command', return_value='') as command, \
+				redirect_stdout(io.StringIO()):
+				runner.browser(run)
+			command.assert_called_once()
+			self.assertTrue(run.metadata['incomplete'])
+
+	def test_a_refused_connection_names_the_missing_host(self):
+		with patch.object(runner.http.client, 'HTTPConnection') as connection:
+			connection.return_value.getresponse.side_effect = ConnectionRefusedError(111, 'Connection refused')
+			with self.assertRaisesRegex(RuntimeError, 'no testd host is listening'):
+				runner.local_host_status(7737)
+
+
 class CommandOutputTests(unittest.TestCase):
 	def create_run(self, directory):
 		args = SimpleNamespace(report=pathlib.Path(directory) / 'report', suite='fixture')
