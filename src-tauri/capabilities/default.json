@@ -1,0 +1,6 @@
+{
+	"identifier": "default",
+	"description": "Setup wizard.",
+	"windows": ["init"],
+	"permissions": ["core:default", "core:event:default"]
+}

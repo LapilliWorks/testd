@@ -1,0 +1,9 @@
+{
+	"$schema": "../gen/schemas/desktop-schema.json",
+	"identifier": "init",
+	"description": "Permissions for the init wizard",
+	"windows": ["init"],
+	"permissions": [
+		"core:default"
+	]
+}

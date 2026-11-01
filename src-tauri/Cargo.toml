@@ -1,0 +1,27 @@
+[package]
+name = "testd-gui"
+version = "0.1.0"
+edition.workspace = true
+# tauri 2.12 requires 1.90; the CLI and daemon stay at the workspace MSRV.
+rust-version = "1.90"
+license.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+open = "5"
+serde = { workspace = true }
+serde_json = { workspace = true }
+testd-client = { workspace = true }
+testd-core = { workspace = true }
+testd-daemon = { workspace = true }
+testd-setup = { workspace = true }
+# 2.12 ships tray-icon 0.25, which pops the tray menu on mouse-up. Older
+# tray-icon opened it on mouse-down, so the matching mouse-up dismissed the menu
+# immediately on Windows.
+tauri = { version = "2.12", features = ["tray-icon", "image-png"] }
+tokio = { workspace = true }
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-autostart = "2"
