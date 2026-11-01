@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/testd-core"]
+members = ["crates/testd-core", "crates/testd-pki"]
 resolver = "3"
 
 [workspace.package]
@@ -14,6 +14,18 @@ tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macro
 toml = "1"
 getrandom = "0.3"
 covo = "0.1"
+anyhow = "1"
+base64 = "0.22"
+bytes = "1"
+fs2 = "0.4"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+futures-util = "0.3"
+tempfile = "3"
 
 [package]
 name = "testd"

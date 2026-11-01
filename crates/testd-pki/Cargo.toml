@@ -1,0 +1,19 @@
+[package]
+name = "testd-pki"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1"
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+sha2 = "0.10"
+x509-parser = "0.18"
+getrandom = "0.3"
+serde = { workspace = true }
+time = "0.3"
+
+[dev-dependencies]
+tempfile = { workspace = true }
