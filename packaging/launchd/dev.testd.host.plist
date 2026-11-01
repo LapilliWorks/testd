@@ -6,7 +6,9 @@
 	<string>dev.testd.host</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/opt/homebrew/bin/testd</string>
+		<string>/usr/bin/env</string>
+		<string>PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<string>testd</string>
 		<string>host</string>
 	</array>
 	<key>RunAtLoad</key>

@@ -7,8 +7,7 @@ Older majors keep working but do not receive fixes.
 
 ## Reporting a vulnerability
 
-Email the maintainer listed on the project page. Do not open a public issue for
-a suspected vulnerability. Include:
+Use [GitHub private vulnerability reporting](https://github.com/testd/testd/security/advisories/new). Do not open a public issue for a suspected vulnerability. Private reporting must be enabled on the public repository before its first release. Include:
 
 - affected version and platform
 - reproduction steps or a proof of concept
@@ -22,7 +21,9 @@ days. Credit is given unless you ask otherwise.
 - The daemon never needs root at runtime; privileged setup is limited to the OS
   resolver, the root CA trust store, and `/etc/hosts`.
 - The root CA key stays in the host config directory and is never copied to a dev environment.
-- Leaf certificates live 24 hours; the local intermediate lives one year.
+- Leaf certificates live 24 hours; the local intermediate lives one year and renews near expiry without replacing the root. Renewal requires the root key and backs up the previous intermediate first.
 - Leaf tokens are approved only over the node's loopback dashboard or control channel, stored with mode `0600`, and revocable. A token request never receives the operator secret.
-- TLS is rustls with the ring provider. There is no OpenSSL in the dependency tree.
+- Browser-facing TLS is rustls with the ring provider. There is no OpenSSL in the dependency tree.
+- Leaf registration and token issuance use plain TCP, not TLS. Bearer credentials and registration data are visible to the network between the leaf and host. Use only trusted local networks or a separately secured transport, such as an SSH tunnel or encrypted private network. Do not expose intake port 7737 to the internet.
+- Intake accepts at most 256 simultaneous connections. NDJSON frames are limited to 64 KiB, HTTP headers to 32 KiB, setup and started-frame reads to 10 seconds, and reply writes to 5 seconds. Idle authenticated leaves keep their registrations.
 - The product does not send telemetry, usage data, or names anywhere.

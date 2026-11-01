@@ -2,7 +2,9 @@
 
 ## Prerequisites
 
-- Rust toolchain from `rust-toolchain.toml`
+- Rust toolchain from `rust-toolchain.toml`; CLI/daemon MSRV 1.88, tray MSRV 1.90
+- Python 3.12 or newer for release tooling and reports; Bun for browser fixtures
+- `cargo-cyclonedx` for workspace SBOM generation
 - `cargo-nextest` for tests and `cargo-deny` for dependency checks
 - `cargo-tauri` and the platform's Tauri prerequisites for the tray app: Xcode command-line tools on macOS, WebKitGTK/GTK on Linux, MSVC on Windows
 
@@ -15,7 +17,7 @@ cargo build --release -p testd   # CLI and daemon
 cargo tauri build                # tray app
 ```
 
-The workspace excludes `testd-gui` (the Tauri app) from container checks because it needs GTK/WebKit system libraries.
+The workspace includes `testd-gui`. On a machine without GTK/WebKit, add `--exclude testd-gui` to workspace test and clippy commands. CI installs the Tauri system prerequisites and checks the full workspace.
 
 ## Test
 
@@ -25,6 +27,41 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 cargo deny check
 ```
+
+## Release validation
+
+Run against the release candidate on each supported host. Reports, logs, OS information, and the commit id are saved under `~/.local/share/testd/release-checks/` (`%LOCALAPPDATA%/testd/release-checks/` on Windows). Use Python 3.12 or newer; on Windows replace `python3` with `python` or `py -3`.
+
+```sh
+# Automated code/dependency/MSRV checks; omit --gui if Tauri prerequisites are absent
+python3 tests/release/run.py core --strict --gui
+
+# OS integration on a clean disposable VM: sudo -v first on macOS/Linux,
+# or use an elevated shell on Windows. Existing testd integration is not overwritten
+python3 tests/release/run.py host --system --service
+
+# Download the candidate CLI archive, SHA256SUMS, and desired bundles into one directory
+python3 tests/release/run.py artifacts --artifacts ~/Downloads/testd-candidate \
+  --require-checksums --host --system --service
+# Optional upgrade check: add --previous-bin /path/to/previous/testd
+
+# Real browser checks against a configured, running host
+python3 tests/release/run.py browser --tld test
+python3 tests/release/run.py browser --tld localhost
+
+# Interactive desktop checklist, for example on macOS
+python3 tests/release/run.py desktop --app /Applications/Testd.app
+```
+
+Reports contain local PKI and test credentials and are private by default. Do not attach the entire report directory to a public issue; share only reviewed logs/JSON, never private keys or credentials.
+
+The browser suite uses Bun fixtures and publishes `app.releasecheck`, `api.releasecheck`, and a dead-upstream name. It checks HTTPS, WebSocket idle survival, streamed SSE, a 100 MiB upload, and project-cookie scope. Run it in every supported browser, complete the certificate and error-response observations, and save the JSON report from the page. Ctrl+C removes only the fixture processes and registrations. For localhost mode, initialize the test host with `testd init --tld localhost`; for a high edge port, pass `--edge-port 8443`. The suite does not install trust or change the resolver.
+
+The `service` suite (also available as `host --service` or `artifacts --service`) exercises the real launchd/systemd user-session supervisor: start, TLS, forced-crash restart, and stop. It stages a uniquely named service with an isolated home and high ports, retains the generated unit/plist in the report, and removes only that new service when done. Run in a real user session with a working `systemctl --user` or launchd GUI domain; Windows CLI services are not shipped, so Windows supervision is covered by the tray login checks.
+
+The desktop suite launches the supplied app/installer and records each existing GUI checklist item as pass, fail, or not applicable with evidence. Use a clean disposable VM for first-install, setup, actual login, upgrade, and uninstall checks. Padlocks, UAC, tray behavior, and login cannot be proven by an HTTP-only script. Skips and unanswered checks remain visible in `report.json`; they are not counted as passes. An interrupted desktop checklist or browser run without a saved report exits `2` (incomplete); failed checks exit `1`.
+
+`host --system` snapshots integration state before changes and refuses existing testd resolver routes or roots. It requests cleanup of the test route and root. Inspect the host log to verify cleanup; VM snapshots are still recommended. Plain `host` does not change system integration. `--bin /path/to/testd` runs a candidate CLI without rebuilding it.
 
 ## Contents
 
@@ -60,12 +97,12 @@ The quick launch checks need `python3` (or `python` on Windows) to start a local
 
 Each script uses:
 
-- a throwaway `HOME`/`%APPDATA%` under the temp directory,
+- a throwaway `HOME`/`%APPDATA%` retained under the persisted report directory,
 - a throwaway TLD (`testdcheck` by default) so it does not collide with a real `.test` setup,
 - a high HTTPS port (`8443`) so it does not need root for the edge,
 - dedicated upstream ports for registration (`18080`) and quick launches (`18081`).
 
-The scripts do **not** call sudo by default. On Linux and macOS they use `--cacert` for HTTPS; on Windows they use `--insecure` for the edge and proxy checks because Schannel does not treat `--cacert` like OpenSSL. To also test the OS resolver and trust store, set `TESTD_HOST_TEST_SYSTEM=1` and have passwordless sudo (Linux/macOS) or an elevated PowerShell (Windows).
+The scripts do **not** call sudo by default. On Linux and macOS they use `--cacert` for HTTPS; on Windows they use `--insecure` for the edge and proxy checks because Schannel does not treat `--cacert` like OpenSSL. To also test the OS resolver and trust store, use `python3 tests/release/run.py host --system` with a cached sudo credential (Linux/macOS) or an elevated shell (Windows). Direct platform scripts refuse privileged checks without the runner's backup step.
 
 ### Linux
 
@@ -82,10 +119,10 @@ tests/host/linux.sh
 
 # Optional: resolver + trust store on a disposable machine
 sudo -v
-TESTD_HOST_TEST_SYSTEM=1 tests/host/linux.sh
+python3 tests/release/run.py host --system
 
 # Same, and clean up the resolver/trust changes afterwards
-TESTD_HOST_TEST_SYSTEM=1 TESTD_HOST_TEST_CLEANUP=1 tests/host/linux.sh
+python3 tests/release/run.py host --system --bin target/release/testd
 ```
 
 The system check writes `/usr/local/share/ca-certificates/testd-root.crt` and
@@ -112,7 +149,7 @@ cargo build --release -p testd
 tests/host/macos.sh
 
 sudo -v
-TESTD_HOST_TEST_SYSTEM=1 tests/host/macos.sh
+python3 tests/release/run.py host --system
 ```
 
 The system check writes `/etc/resolver/testdcheck` and installs the test root
@@ -152,8 +189,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\host\windows.ps1
 
 # Optional: NRPT + root trust. Open PowerShell with "Run as Administrator",
 # then set the flag in that elevated session.
-$env:TESTD_HOST_TEST_SYSTEM = "1"
-powershell -NoProfile -ExecutionPolicy Bypass -File tests\host\windows.ps1
+python tests\release\run.py host --system
 ```
 
 The non-elevated run intentionally uses `curl --insecure --ssl-no-revoke` for
@@ -208,10 +244,7 @@ scripts stop at the HTTP layer on purpose; they cannot judge a padlock.
 
 ### GUI
 
-Follow `tests/host/gui-checklist.md`. The tray app is a paid distribution
-artifact but the source is public; build it locally and run the checklist
-against the same commit as the CLI. The checklist separates current behavior
-from the still-pending tray attach/detach and remote-host switching.
+The tray is a public source build and an optional free release artifact. Run `python3 tests/release/run.py desktop --app <candidate>` to execute and record `tests/host/gui-checklist.md` against the same commit as the CLI. Attach/detach of existing processes is deferred and does not gate this release.
 
 ### Packaging and signing
 
@@ -223,8 +256,6 @@ These require credentials and hardware that do not belong in this repository:
   `Get-AuthenticodeSignature`.
 - **Linux:** unsigned `.deb`, AppImage, and tarball; verify with `dpkg-deb -I`
   and an AppImage smoke run.
-- **Updater:** Tauri update signing key in the private release repo; verify the
-  manifest signature and a downgrade refusal.
 
 See [Release](#release) for the release checklist and `tests/host/gui-checklist.md`
 for the per-artifact commands.
@@ -287,18 +318,18 @@ Manual checks that a name works in a real browser. Run on the host, or on anothe
 
 | Browser | Store | Import |
 |---|---|---|
-| Chrome, Edge (Linux) | system (`/usr/local/share/ca-certificates`) | `sudo cp root.crt /usr/local/share/ca-certificates/testd-root.crt && sudo update-ca-certificates` |
-| Chrome, Edge (macOS), Safari | login keychain | `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain root.crt` |
+| Chrome, Edge (Linux) | Browser certificate manager or platform integration; varies by package | Import `root.crt` as a trusted authority in the browser certificate manager and verify the actual package's trust behavior |
+| Chrome, Edge (macOS), Safari | system keychain | `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain root.crt` |
 | Chrome, Edge (Windows) | machine store | `certutil -addstore -f Root root.crt` |
-| Firefox (all) | NSS database, independent of the system | `certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n testd-root -i root.crt` |
+| Firefox (all) | Profile NSS store, or system roots when enabled | Settings → Privacy & Security → Certificates → View Certificates → Authorities → Import; trust the root for websites |
 
-Firefox on macOS uses `<profile>/cert9.db`; the same `certutil` command with `-d sql:<profile dir>` applies. Setting `security.enterprise_roots.enabled` to `true` makes Firefox read the system store instead of its own.
+For NSS command-line imports, use `certutil -d sql:<actual browser profile directory> -A -t 'C,,' -n testd-root -i root.crt`. Do not assume `~/.pki/nssdb` is the Firefox profile. Firefox's `security.enterprise_roots.enabled` can use supported OS root stores; validate it on the actual platform/package rather than assuming system installation is sufficient.
 
 ### Checks
 
 Run each in every browser you support: Chrome, Firefox, Safari, Edge.
 
-1. `https://app.example.test` loads with a padlock, no interstitial. The certificate is issued by `testd root`, carries `app.example.test` in its SAN, and expires within 24 hours.
+1. `https://app.example.test` loads with no certificate interstitial or bypass. The leaf is issued by `testd intermediate`, chains to `testd root`, carries `app.example.test` in its SAN, and expires within 24 hours.
 2. Wait for the leaf to be re-minted, or restart the daemon: a reload still shows a valid certificate with a newer validity window.
 3. The local dashboard opens at `http://127.0.0.1:7737/` and lists the live name. `testd.test` is not a special name on the edge.
 4. WebSocket: a dev server using HMR websockets connects over `wss` and survives 60 seconds idle.
@@ -311,8 +342,8 @@ Run each in every browser you support: Chrome, Firefox, Safari, Edge.
 
 On a host initialised with `testd init --tld localhost`:
 
-1. `testd run app.localhost:3000`, then open `https://app.localhost:3000` and `https://app.localhost`.
-2. No resolver change and no sudo were needed.
+1. `testd run app:3000`, then open `https://app.localhost` (or `https://app.localhost:8443` if the edge uses port 8443). Port 3000 is the upstream HTTP port, not the HTTPS edge.
+2. No resolver change was needed. Root trust and port-443 permissions are still required for HTTPS.
 3. Record whether the browser resolves `*.localhost` itself (expected in Chrome, Firefox, and Safari) or sends it to DNS.
 4. glibc caveat: name resolution through `getaddrinfo` for `*.localhost` depends on the resolver; `curl` may need `--resolve`. Browsers are the target, not CLI tools.
 
@@ -322,8 +353,7 @@ For each browser: name and version, OS, pass or fail, and the leaf's SHA-256 fin
 
 ## Release
 
-One release is a tag plus four artifacts. Everything below is repeatable from a
-clean checkout.
+A free release is a version tag, CLI archives, public tray bundles, workspace SBOMs, generated Homebrew definitions, and `SHA256SUMS`. The tag workflow attaches them to a draft GitHub release only after the test, dependency-policy, and MSRV jobs pass. No commercial service or updater participates.
 
 ### Before tagging
 
@@ -331,11 +361,15 @@ clean checkout.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] `cargo nextest run --workspace`
 - [ ] `cargo deny check`
-- [ ] `cargo +1.88.0 check --workspace`
+- [ ] `cargo +1.88.0 check --workspace --exclude testd-gui --locked`
+- [ ] `cargo +1.90.0 check -p testd-gui --locked`
+- [ ] `python3 scripts/release.py verify-version`
+- [ ] Enable GitHub private vulnerability reporting for the public repository
+- [ ] Run the release-validation suites above and retain reports for every claimed platform/browser
 - [ ] `scripts/release-sbom.sh` and attach the SBOMs to the release
-- [ ] Update `CHANGELOG.md`, bump the workspace version, refresh `Cargo.lock`
+- [ ] Finalize the dated changelog entry; synchronize all package and Tauri bundle versions, and refresh `Cargo.lock` when dependencies change
 - [ ] Run `testd doctor --json` against a clean VM and keep the output
-- [ ] Verify a fresh install reaches a working name in one command
+- [ ] Verify the documented fresh-install path reaches a trusted HTTPS name, including Linux port privileges
 
 ### Build
 
@@ -351,7 +385,7 @@ Tray app (per platform):
 cargo tauri build
 ```
 
-Artifacts: `.dmg`/`.app` (macOS), `.exe` (Windows, NSIS), `.AppImage`/`.deb` (Linux).
+Artifacts: CLI `.tar.gz` (Linux/macOS) or `.zip` (Windows), `.dmg` containing `.app` (macOS), `.exe` (Windows NSIS), `.AppImage`/`.deb` (Linux). CI builds macOS Apple Silicon and Intel, Linux x86-64, and Windows x86-64.
 
 Windows ships the NSIS installer only. It installs per user into `%LOCALAPPDATA%\Testd` and asks for no elevation. Tauri's MSI is always per machine (`Program Files`, HKLM uninstall key, UAC prompt) with no option to make it per user, so it is not produced; `src-tauri/tauri.windows.conf.json` narrows the Windows target list. An enterprise deployment that needs a machine-wide install can build one with `cargo tauri build --bundles msi` and install that `.msi` by hand.
 
@@ -375,18 +409,18 @@ cannot produce notarized or Authenticode-signed artifacts.
 
 ### Publish
 
-- [ ] Upload platform artifacts to the storefront
-- [ ] Update the Homebrew tap (`packaging/homebrew/testd.rb`) with the new URL and
-      sha256; keep the cask on the same version
-- [ ] Attach the release notes from `CHANGELOG.md` to the storefront entry
-- [ ] Tag `vX.Y.Z`, push the tag, let CI attach bundles and SBOMs
-- [ ] Announce to existing buyers for a major version
+- [ ] Tag `vX.Y.Z` and push the tag after the pre-tag checks
+- [ ] Let CI build CLI archives and tray bundles, generate SBOMs, Homebrew definitions and checksums, and attach them to a draft GitHub release
+- [ ] Download the draft assets and run artifact, host, browser, and desktop validation on the real supported platforms
+- [ ] Apply signing/notarization separately if shipping signed desktop downloads; regenerate definitions and checksums from the final signed bytes
+- [ ] Copy the generated `testd.rb` and `testd-gui.rb` into the Homebrew tap, then audit and install them locally
+- [ ] Publish the draft with the changelog entry and validation results
+
+The public workflow produces unsigned tray bundles and does not replace existing release assets on rerun. If an upload is already present, retain a backup before explicitly replacing it. Do not move an existing release tag to different source.
 
 ### Rollback
 
-- Storefront: restore the previous version listing and re-upload the artifacts.
-  Open-source installs keep working; they are replaced when the user installs the
-  fixed release.
+- GitHub: mark the broken version as withdrawn and publish a fixed version. Keep the previous good version and its checksums available. Existing installs keep working until the user chooses to replace them.
 - Homebrew: revert the formula commit and `brew update`.
 - macOS and Windows bundles are versioned per release, so a broken version can be
   withdrawn without affecting the previous one.
@@ -405,33 +439,32 @@ homebrew-testd/
   Casks/testd-gui.rb
 ```
 
-The copies in `packaging/homebrew/` are the sources of truth in this repository; the tap holds the published versions with real URLs and digests.
+`packaging/homebrew/*.rb.in` are the source templates. The release generator fills a version and real source/DMG digests and attaches installable `.rb` definitions to the public release. The cask selects Apple Silicon or Intel DMGs explicitly.
 
 ### Local test before publishing
 
 ```sh
-cargo build --release -p testd
-brew install --formula ./packaging/homebrew/testd.rb
-brew install --cask ./packaging/homebrew/testd-gui.rb
-brew audit --strict --online packaging/homebrew/testd.rb
+# Definitions downloaded from the release (or generated locally from its final assets)
+brew install --formula ./dist/testd.rb
+brew install --cask ./dist/testd-gui.rb
+brew test testd
+brew audit --strict --online ./dist/testd.rb
 brew uninstall --formula testd
 brew uninstall --cask testd-gui
 ```
 
-`--cask` install fails on an unsigned app: notarize first, see [Signing and notarization](#signing-and-notarization).
+Verify Gatekeeper behavior on a clean Mac. An unsigned or unnotarized app may require a user override; do not claim a normal signed-install experience until signing and notarization have been verified.
 
 ### Digests
 
-Both files carry `sha256 "TODO"` until a release exists. After uploading the artifacts:
+After the version tag exists and both final DMGs are in `dist/`:
 
 ```sh
-scripts/brew-sha256.sh packaging/homebrew/testd.rb \
-  https://github.com/testd/testd/archive/refs/tags/v0.1.0.tar.gz   # or a local path
-scripts/brew-sha256.sh packaging/homebrew/testd-gui.rb \
-  Testd_0.1.0_aarch64.dmg
+python3 scripts/release.py homebrew --version 0.1.0 --artifacts dist --output dist
+python3 scripts/release.py checksums dist
 ```
 
-The script downloads when given an URL, hashes the file, and rewrites the `sha256` line. It refuses to guess when there is no `sha256` line in the file.
+The source archive is fetched once and cached as `dist/testd-0.1.0-source.tar.gz`. The generator computes digests from that archive and both architecture-specific DMGs. It refuses to overwrite existing output definitions or checksums. Use a new staging directory after signing or changing assets; retain the previous bytes.
 
 ### Formula notes
 
@@ -447,14 +480,14 @@ The script downloads when given an URL, hashes the file, and rewrites the `sha25
 
 ### Bumping a release
 
-1. Replace the artifact URLs with the tagged release or the new dmg.
-2. Run `scripts/brew-sha256.sh` for each file.
-3. `brew audit --strict --online`, then `brew reinstall` both locally.
-4. Push the tap and announce.
+1. Synchronize package and bundle versions and finalize the changelog entry
+2. Tag the release and generate definitions from its final source archive and DMGs
+3. Run `brew audit --strict --online`, `brew test testd`, and fresh formula/cask installs
+4. Publish the matching definitions to the tap
 
 ## Signing and notarization
 
-macOS notarization and Windows Authenticode. Both need credentials that do not live in this repository; everything else is scripted here.
+Optional signing of the public desktop artifacts: macOS notarization and Windows Authenticode need operator-supplied credentials. The public CI workflow does not sign or notarize. Source publication and CLI source builds do not require these credentials.
 
 ### macOS
 

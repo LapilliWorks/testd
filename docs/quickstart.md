@@ -10,7 +10,7 @@ From the repository:
 cargo install --path .
 ```
 
-Or install the Homebrew formula from `packaging/homebrew/testd.rb`. The tray app is separate; see [DEVELOPING.md](DEVELOPING.md#release).
+Or install a CLI archive or the generated Homebrew formula from a public release after verifying `SHA256SUMS`. `packaging/homebrew/*.rb.in` are release templates, not directly installable definitions. The public tray app is separate; see [DEVELOPING.md](../DEVELOPING.md#release).
 
 ## 2. Initialize the host
 
@@ -26,6 +26,8 @@ What it does:
 4. Leaves the OS resolver alone until a remote client registers. Run `testd doctor --fix` to configure it immediately.
 5. Installs the root into the system trust store when stdin is a terminal or `--yes` is passed.
 
+For the default `.test` TLD, run `testd doctor --fix` on every platform to configure the resolver before using a local registration. Otherwise lazy setup does not run until a remote client arrives.
+
 The default TLD is `.test`. For a single-machine setup that needs no resolver change:
 
 ```sh
@@ -39,6 +41,8 @@ testd host
 ```
 
 The daemon owns the TCP intake (`:7737`), the HTTPS edge (`:443`), and the DNS server (`127.0.0.1:7753`, or `:53` on Windows). A second instance fails fast on the instance lock.
+
+On Linux, port 443 needs `CAP_NET_BIND_SERVICE`. The root-managed `testd@.service` grants that capability; a systemd user service must use a high port. For a foreground executable, grant the capability to that executable, or set `[host] edge_addr = '127.0.0.1:8443'` and use `https://app.example.test:8443`. `*.localhost` removes only the DNS setup requirement, not CA trust or privileged-port requirements.
 
 ## 4. Register the first name
 
@@ -71,6 +75,8 @@ testd doctor
 `0` means ready. Exit `2` means the resolver is not configured; `3` means the certificate is not trusted or the edge is not listening. `--json` is stable for scripts.
 
 ## Remote environments
+
+Registration, including bearer tokens, uses plain TCP. Use a trusted local network or a separately secured transport. Do not expose intake port 7737 to the public internet.
 
 On the other machine, register against the host:
 

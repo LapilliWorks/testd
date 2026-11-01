@@ -25,7 +25,7 @@ From source:
 cargo install --path .
 ```
 
-Homebrew formulae live in `packaging/homebrew/`. The tray app is a separate Tauri bundle; [DEVELOPING.md](DEVELOPING.md) covers building it and running the test suites.
+Public releases provide CLI archives, tray bundles, `SHA256SUMS`, and generated Homebrew definitions. Verify the checksums before installing. Homebrew templates live in `packaging/homebrew/`; a release generates installable definitions with real digests. The tray app is a separate, public Tauri build. [DEVELOPING.md](DEVELOPING.md) covers building and release validation. There is no in-app updater or commercial-service requirement.
 
 ## First name
 
@@ -36,11 +36,13 @@ testd init
 testd host
 ```
 
-`init` is idempotent and runs without prompts when stdin is not a terminal. It creates `~/.config/testd/config.toml`, a local CA, and an operator secret. It does not change the system resolver yet: that privileged step is deferred until the first registration arrives from another machine. On macOS and Linux, install the root certificate once with:
+`init` is idempotent and runs without prompts when stdin is not a terminal. It creates `~/.config/testd/config.toml`, a local CA, and an operator secret. It does not change the system resolver yet: that privileged step is deferred until the first registration arrives from another machine. For the default `.test` TLD on every platform, configure the resolver and install root trust once with:
 
 ```sh
 testd doctor --fix
 ```
+
+On Linux, port 443 requires privileges. For a root-managed system service, use `packaging/systemd/testd@.service`, which grants only `CAP_NET_BIND_SERVICE`. For a foreground CLI, run `sudo setcap 'cap_net_bind_service=+ep' "$(readlink -f "$(command -v testd)")"` after installing or replacing the executable. For a tray build, grant it to the actual tray executable, not an AppImage wrapper. Alternatively, set `[host] edge_addr = '127.0.0.1:8443'` and include `:8443` in browser URLs. A systemd user service with `NoNewPrivileges=yes` cannot acquire a file capability: use a high port there. `*.localhost` skips DNS setup, not HTTPS trust or port-443 permissions.
 
 Then, in the project:
 
@@ -68,6 +70,8 @@ testd run 10.0.0.5:myapp:3000 -- npm run dev   # custom target host
 ```
 
 ## Remote dev environments
+
+Registration and token issuance use plain TCP. Use a trusted network or a separately secured transport, such as an encrypted private network or SSH tunnel. Do not expose port 7737 to the public internet. The HTTPS edge encrypts browser traffic; it does not encrypt leaf registration traffic.
 
 From the VM, container, or WSL instance, run:
 
@@ -156,11 +160,13 @@ testd url testd://fix/resolver   # run a scheme action; forwards to the running 
 
 Exit codes: `0` ready, `1` configuration or missing state, `2` resolver, `3` HTTPS edge or trust.
 
-The daemon re-checks the resolver route and root trust every 10 seconds. On a desktop session, a missing prerequisite or a failed repair is posted as a notification; activating the notification runs the repair. Without a notification service the same notices are logged as `[notice]`.
+The daemon re-checks the resolver route every 10 seconds and root trust every 60 seconds, with immediate checks after repairs. On a desktop session, a missing prerequisite or a failed repair is posted as a notification; activating the notification runs the repair. Without a notification service the same notices are logged as `[notice]`.
 
 ## Certificates
 
 The local dashboard's **Certificate** section shows the root certificate's trust state, SHA-256 fingerprint, and expiry, and installs or removes system trust. The local page is the only place that can change trust; the edge exposes no certificate download.
+
+The local intermediate renews near expiry on startup or certificate minting without changing root trust. The previous intermediate certificate and key are retained under `pki/backups/`. If `root.key` was moved offline, restore it before the intermediate expires; `testd doctor` reports expiry and `testd doctor --fix` repairs it when the key is available.
 
 ## Uninstall
 

@@ -36,6 +36,8 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 
 - Token revocation reconciles all live connections even when many revocations arrive together; closure bypasses full reply queues and stalled writers
 - Additional-name requests are cancelled on disconnect, including pipelined connections; partial frames survive approval
+- Access ids beginning with a hyphen are accepted by the CLI and host-test harness
+- Sharing still follows name removal when a registration-event subscriber falls behind
 - Expiring local intermediates renew without changing root trust; their previous certificate and key are backed up before replacement
 
 ### Security
