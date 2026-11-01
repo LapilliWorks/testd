@@ -247,14 +247,15 @@ if ((Curl-Status "testd.$Tld" '/ok.svg') -eq '404') {
 } else {
 	Fail "edge terminates TLS for testd.$Tld"
 }
-$null = Curl-Get "testd.$Tld" '/' 2>$null
-if ($LASTEXITCODE -ne 0) {
+# The dashboard is loopback-only, so the edge answers 404 for its name. Check the
+# status rather than letting --fail write to stderr: PowerShell 5.1 turns native
+# stderr into a terminating error while the error preference is Stop.
+if ((Curl-Status "testd.$Tld" '/') -eq '404') {
 	Pass 'the dashboard is not served through the edge'
 } else {
 	Fail 'the dashboard is not served through the edge'
 }
-$null = Curl-Get "testd.$Tld" '/api/status' 2>$null
-if ($LASTEXITCODE -ne 0) {
+if ((Curl-Status "testd.$Tld" '/api/status') -eq '404') {
 	Pass 'the dashboard is not proxied through the edge'
 } else {
 	Fail 'the dashboard is not proxied through the edge'
@@ -450,8 +451,7 @@ if ($LASTEXITCODE -eq 0) {
 if ($ClientProc) { Stop-Process -Id $ClientProc.Id -Force -ErrorAction SilentlyContinue; $ClientProc = $null }
 $removed = $false
 for ($i = 0; $i -lt 20; $i++) {
-	$null = Curl-Get "app.testdproj.$Tld" '/' 2>$null
-	if ($LASTEXITCODE -ne 0) { $removed = $true; break }
+	if ((Curl-Status "app.testdproj.$Tld" '/') -eq '404') { $removed = $true; break }
 	Start-Sleep -Seconds 1
 }
 if ($removed) { Pass 'disconnect removes the name' } else { Fail 'disconnect removes the name' }
