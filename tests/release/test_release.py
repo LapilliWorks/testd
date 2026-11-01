@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import io
 import pathlib
 import tempfile
@@ -23,6 +24,7 @@ def load(name, path):
 
 release = load('release', ROOT / 'scripts/release.py')
 runner = load('release_checks', ROOT / 'tests/release/run.py')
+state = load('system_state', ROOT / 'tests/release/system_state.py')
 
 
 class ReleaseTests(unittest.TestCase):
@@ -117,6 +119,207 @@ class ReleaseTests(unittest.TestCase):
 	def test_manual_checks_are_not_invented_from_headings(self):
 		items = runner.checklist_items('# Build\n- [ ] First check\n      continued\n\n- [ ] Second check\n')
 		self.assertEqual(items, ['First check continued', 'Second check'])
+
+
+class FakeHost(state.Host):
+	"""In-memory host so the snapshot and restore rules run without root."""
+
+	def __init__(self, system='Linux', tld='testdcheck'):
+		super().__init__(system, tld)
+		self.files = {}
+		self.certificates = {}
+		self.commands = []
+
+	def command(self, argv, privileged=False):
+		argv = [str(item) for item in argv]
+		self.commands.append((argv, privileged))
+		if argv[0] == 'install':
+			self.files[argv[-1]] = pathlib.Path(argv[-2]).read_bytes()
+		elif argv[0] == 'rm':
+			self.files.pop(argv[-1], None)
+		elif argv[:2] == ['security', 'find-certificate']:
+			return ''.join(state.encode_pem(der) for der in self.certificates.values())
+		elif argv[:2] == ['security', 'delete-certificate']:
+			self.certificates.pop(argv[3], None)
+		elif argv[:2] == ['security', 'add-trusted-cert']:
+			for der in state.decode_pem(pathlib.Path(argv[-1]).read_text()):
+				self.certificates[hashlib.sha1(der).hexdigest()] = der
+		return ''
+
+	def exists(self, path):
+		return str(path) in self.files or str(path) == state.KEYCHAIN
+
+	def read(self, path):
+		return self.files[str(path)]
+
+	def mode(self, path):
+		return 0o644
+
+
+class SystemStateTests(unittest.TestCase):
+	def test_linux_restore_returns_the_exact_previous_bytes(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			host = FakeHost()
+			resolver, trusted = state.files(host)[0]['path'], state.files(host)[1]['path']
+			host.files = {resolver: b'[Resolve]\nDNS=1.1.1.1\n', trusted: b'original root'}
+			backup = pathlib.Path(temporary) / 'system-before'
+			state.snapshot(host, backup)
+			host.files = {resolver: b'[Resolve]\nDNS=127.0.0.1:7753\n', trusted: b'test root'}
+			self.assertEqual(state.restore(host, backup), [])
+			self.assertEqual(host.files[resolver], b'[Resolve]\nDNS=1.1.1.1\n')
+			self.assertEqual(host.files[trusted], b'original root')
+			self.assertTrue((backup / state.RESTORED).is_file())
+
+	def test_linux_restore_removes_integration_that_was_absent(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			host = FakeHost()
+			backup = pathlib.Path(temporary) / 'system-before'
+			state.snapshot(host, backup)
+			for item in state.files(host):
+				host.files[item['path']] = b'installed by doctor --fix'
+			self.assertEqual(state.restore(host, backup), [])
+			self.assertEqual(host.files, {})
+			reloads = [argv for argv, _ in host.commands if argv[0] in ('systemctl', 'update-ca-certificates')]
+			self.assertEqual(reloads, [item['reload'] for item in state.files(host)])
+
+	def test_restore_is_idempotent(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			host = FakeHost()
+			host.files = {state.files(host)[1]['path']: b'root'}
+			backup = pathlib.Path(temporary) / 'system-before'
+			state.snapshot(host, backup)
+			host.files[state.files(host)[1]['path']] = b'replaced'
+			self.assertEqual(state.restore(host, backup), [])
+			commands = len(host.commands)
+			self.assertEqual(state.restore(host, backup), [])
+			self.assertEqual(host.files[state.files(host)[1]['path']], b'root')
+			self.assertEqual(len(host.commands), commands, 'a completed restore should not reload again')
+
+	def test_restore_fixes_a_host_that_drifted_after_a_completed_restore(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			host = FakeHost()
+			backup = pathlib.Path(temporary) / 'system-before'
+			state.snapshot(host, backup)
+			self.assertEqual(state.restore(host, backup), [])
+			host.files[state.files(host)[0]['path']] = b'drifted'
+			self.assertEqual(state.restore(host, backup), [])
+			self.assertEqual(host.files, {})
+
+	def test_restore_rejects_a_tampered_backup(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			host = FakeHost()
+			host.files = {state.files(host)[1]['path']: b'root'}
+			backup = pathlib.Path(temporary) / 'system-before'
+			state.snapshot(host, backup)
+			manifest = state.load(backup)
+			(backup / manifest['files'][1]['blob']).write_bytes(b'tampered')
+			problems = state.restore(host, backup)
+			self.assertTrue(any('modified' in problem for problem in problems), problems)
+			self.assertFalse((backup / state.RESTORED).exists())
+
+	def test_verify_reports_drift_after_restore(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			host = FakeHost()
+			backup = pathlib.Path(temporary) / 'system-before'
+			state.snapshot(host, backup)
+			host.files[state.files(host)[0]['path']] = b'drifted'
+			problems = state.verify(host, backup)
+			self.assertEqual([problem.split(':')[0] for problem in problems], [state.files(host)[0]['path']])
+
+	def test_macos_restore_deletes_extras_by_thumbprint(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			host = FakeHost('Darwin')
+			kept, extra = b'kept root', b'extra root'
+			host.certificates = {hashlib.sha1(kept).hexdigest(): kept}
+			backup = pathlib.Path(temporary) / 'system-before'
+			state.snapshot(host, backup)
+			host.certificates[hashlib.sha1(extra).hexdigest()] = extra
+			self.assertEqual(state.restore(host, backup), [])
+			self.assertEqual(list(host.certificates.values()), [kept])
+			deletes = [argv for argv, _ in host.commands if argv[:2] == ['security', 'delete-certificate']]
+			self.assertEqual(deletes, [['security', 'delete-certificate', '-Z',
+				hashlib.sha1(extra).hexdigest(), state.KEYCHAIN]])
+
+	def test_macos_restore_reinstalls_a_missing_root(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			host = FakeHost('Darwin')
+			root = b'pre-existing root'
+			host.certificates = {hashlib.sha1(root).hexdigest(): root}
+			backup = pathlib.Path(temporary) / 'system-before'
+			state.snapshot(host, backup)
+			host.certificates = {}
+			self.assertEqual(state.restore(host, backup), [])
+			self.assertEqual(list(host.certificates.values()), [root])
+			installs = [argv for argv, _ in host.commands if argv[:2] == ['security', 'add-trusted-cert']]
+			self.assertEqual(installs[0][2:6], ['-d', '-r', 'trustRoot', '-k'])
+
+	def test_windows_restore_delegates_to_the_elevated_script(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			host = FakeHost('Windows')
+			backup = pathlib.Path(temporary) / 'system-before'
+			state.snapshot(host, backup)
+			self.assertEqual(state.restore(host, backup), [])
+			actions = [argv[argv.index('-Action') + 1] for argv, _ in host.commands if argv[0] == 'powershell']
+			self.assertEqual(actions, ['Snapshot', 'Restore', 'Verify'])
+			self.assertTrue(all(privileged for argv, privileged in host.commands if argv[0] == 'powershell'))
+
+	def test_snapshot_is_required_and_platform_bound(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			with self.assertRaises(state.HostError):
+				state.load(pathlib.Path(temporary) / 'system-before')
+			host = FakeHost()
+			backup = pathlib.Path(temporary) / 'system-before'
+			state.snapshot(host, backup)
+			with self.assertRaises(state.HostError):
+				state.restore(FakeHost('Darwin'), backup)
+
+
+class HostSystemTests(unittest.TestCase):
+	def create_run(self, directory):
+		args = SimpleNamespace(report=pathlib.Path(directory) / 'report', suite='host',
+			system=True, service=False, bin=None)
+		with redirect_stdout(io.StringIO()):
+			return runner.Run(args)
+
+	def test_failed_host_checks_still_restore_the_snapshot(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			events = []
+
+			def snapshot(*args, **kwargs):
+				events.append('snapshot')
+				return pathlib.Path('system-before')
+
+			with patch.object(runner, 'binary', return_value=pathlib.Path('/bin/true')), \
+				patch.object(runner, 'check_ports'), \
+				patch.object(runner, 'system_snapshot', side_effect=snapshot), \
+				patch.object(runner, 'system_restore', side_effect=lambda *a, **k: events.append('restore')), \
+				patch.object(run, 'command', side_effect=RuntimeError('host checks failed')):
+				with self.assertRaises(RuntimeError):
+					runner.host(run)
+			self.assertEqual(events, ['snapshot', 'restore'])
+
+	def test_busy_fixture_ports_are_refused_before_the_snapshot(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			with patch.object(runner, 'binary', return_value=pathlib.Path('/bin/true')), \
+				patch.object(runner, 'check_ports', side_effect=RuntimeError('port busy')), \
+				patch.object(runner, 'system_snapshot', side_effect=AssertionError('snapshot ran too early')):
+				with self.assertRaises(RuntimeError):
+					runner.host(run)
+
+	def test_plain_host_run_does_not_touch_system_state(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			run.args.system = False
+			with patch.object(runner, 'binary', return_value=pathlib.Path('/bin/true')), \
+				patch.object(runner, 'check_ports'), \
+				patch.object(runner, 'system_snapshot') as snapshot, \
+				patch.object(runner, 'system_restore') as restore, \
+				patch.object(run, 'command', return_value='ok    doctor --fix\n'):
+				runner.host(run)
+			snapshot.assert_not_called()
+			restore.assert_not_called()
 
 
 class CommandOutputTests(unittest.TestCase):
