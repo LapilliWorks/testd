@@ -1,3 +1,4 @@
+import contextlib
 import importlib.util
 import hashlib
 import io
@@ -497,18 +498,38 @@ class BrowserTests(unittest.TestCase):
 		with redirect_stdout(io.StringIO()):
 			return runner.Run(args)
 
-	def test_missing_host_fails_before_the_fixture_or_build_starts(self):
+	def test_missing_host_is_started_for_the_fixture(self):
 		with tempfile.TemporaryDirectory() as directory:
 			run = self.create_run(directory)
+			events = []
+
+			@contextlib.contextmanager
+			def start_host(*args, **kwargs):
+				events.append('start')
+				try:
+					yield 'process', 'output'
+				finally:
+					events.append('stop')
+
 			with patch.object(runner, 'require'), \
 				patch.object(runner, 'check_ports'), \
-				patch.object(runner, 'local_host_status', side_effect=RuntimeError('no testd host is listening')), \
-				patch.object(runner, 'binary') as binary, \
-				patch.object(run, 'command') as command:
-				with self.assertRaisesRegex(RuntimeError, 'no testd host is listening'):
-					runner.browser(run)
-			binary.assert_not_called()
-			command.assert_not_called()
+				patch.object(runner, 'local_host_status', side_effect=runner.HostUnavailable('missing')), \
+				patch.object(runner, 'wait_for_host', return_value={'tld': 'test'}) as wait, \
+				patch.object(runner, 'binary', return_value=pathlib.Path('/bin/true')), \
+				patch.object(run, 'serve', side_effect=start_host) as serve, \
+				patch.object(run, 'command', return_value='') as command, \
+				redirect_stdout(io.StringIO()):
+				runner.browser(run)
+			self.assertEqual(events, ['start', 'stop'])
+			serve.assert_called_once_with('host-fixture', ['/bin/true', 'host'], stop_signal=signal.SIGINT)
+			wait.assert_called_once_with(7737, 'process', 'output')
+			command.assert_called_once()
+
+	def test_a_host_that_exits_while_starting_reports_its_log(self):
+		process = SimpleNamespace(poll=lambda: 1, returncode=1)
+		output = SimpleNamespace(text=lambda: 'failed to load config')
+		with self.assertRaisesRegex(RuntimeError, 'is it initialized with `testd init`'):
+			runner.wait_for_host(7737, process, output)
 
 	def test_a_different_host_tld_is_refused_before_the_fixture_starts(self):
 		with tempfile.TemporaryDirectory() as directory:
@@ -516,11 +537,12 @@ class BrowserTests(unittest.TestCase):
 			with patch.object(runner, 'require'), \
 				patch.object(runner, 'check_ports'), \
 				patch.object(runner, 'local_host_status', return_value={'tld': 'localhost'}), \
-				patch.object(runner, 'binary') as binary, \
+				patch.object(runner, 'binary', return_value=pathlib.Path('/bin/true')), \
+				patch.object(run, 'serve') as serve, \
 				patch.object(run, 'command') as command:
 				with self.assertRaisesRegex(RuntimeError, r'serves \.localhost'):
 					runner.browser(run)
-			binary.assert_not_called()
+			serve.assert_not_called()
 			command.assert_not_called()
 
 	def test_a_reachable_host_starts_the_fixture(self):
@@ -530,16 +552,18 @@ class BrowserTests(unittest.TestCase):
 				patch.object(runner, 'check_ports'), \
 				patch.object(runner, 'local_host_status', return_value={'tld': 'test'}), \
 				patch.object(runner, 'binary', return_value=pathlib.Path('/bin/true')), \
+				patch.object(run, 'serve') as serve, \
 				patch.object(run, 'command', return_value='') as command, \
 				redirect_stdout(io.StringIO()):
 				runner.browser(run)
+			serve.assert_not_called()
 			command.assert_called_once()
 			self.assertTrue(run.metadata['incomplete'])
 
-	def test_a_refused_connection_names_the_missing_host(self):
+	def test_a_refused_connection_is_reported_as_a_missing_host(self):
 		with patch.object(runner.http.client, 'HTTPConnection') as connection:
 			connection.return_value.getresponse.side_effect = ConnectionRefusedError(111, 'Connection refused')
-			with self.assertRaisesRegex(RuntimeError, 'no testd host is listening'):
+			with self.assertRaisesRegex(runner.HostUnavailable, 'no testd host is listening'):
 				runner.local_host_status(7737)
 
 
@@ -592,6 +616,15 @@ class CommandOutputTests(unittest.TestCase):
 			code = "import os; os.write(1, os.environ['TESTD_ENCODING_MARKER'].encode())"
 			with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
 				self.assertEqual(run.command('env', [sys.executable, '-c', code], env=env), 'kept')
+
+	def test_serve_stops_a_long_running_fixture(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+				with run.serve('server', [sys.executable, '-c', 'import time; time.sleep(60)']):
+					pass
+			self.assertEqual(run.results[-1]['status'], 'pass')
+			self.assertIn('exit', run.results[-1]['detail'])
 
 	def test_the_sudo_check_keeps_the_terminal_attached(self):
 		with tempfile.TemporaryDirectory() as directory:

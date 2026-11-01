@@ -3,6 +3,7 @@
 
 import argparse
 import codecs
+import contextlib
 import ctypes
 import datetime
 import functools
@@ -144,7 +145,11 @@ class CommandOutput:
 				raise subprocess.TimeoutExpired(self.process.args, timeout)
 		if self.errors:
 			raise RuntimeError('failed to mirror command output to the terminal or log') from self.errors[0]
-		return self.data.decode(ENCODING, errors='replace')
+		return self.text()
+
+	def text(self):
+		with self.lock:
+			return self.data.decode(ENCODING, errors='replace')
 
 
 def stop_command(process, signal_number):
@@ -172,6 +177,7 @@ class Run:
 		self.output = (args.report or base / 'testd/release-checks' / f'{stamp}-{uuid.uuid4().hex[:8]}').resolve()
 		self.output.mkdir(parents=True, exist_ok=False, mode=0o700)
 		self.results = []
+		self.log_count = 0
 		self.metadata = {'os': platform.platform(), 'python': sys.version, 'suite': args.suite}
 		git = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True,
 			encoding=ENCODING, errors='replace', check=True)
@@ -191,6 +197,11 @@ class Run:
 		self.save()
 		print(f'{status:8} {name}: {detail}', flush=True)
 
+	def log_path(self, name):
+		path = self.output / f'{self.log_count:02d}-{re.sub(r"[^a-zA-Z0-9-]", "-", name)}.log'
+		self.log_count += 1
+		return path
+
 	def command(self, name, command, timeout=300, env=None, expected=0, interrupt_ok=False, terminal=False):
 		"""Run a command and mirror its output.
 
@@ -200,7 +211,7 @@ class Run:
 		same shell. The child still leads its own process group, so a timeout can
 		stop the processes it started.
 		"""
-		log = self.output / f'{len(self.results):02d}-{re.sub(r"[^a-zA-Z0-9-]", "-", name)}.log'
+		log = self.log_path(name)
 		print(f'Running: {" ".join(map(str, command))}', flush=True)
 		# Nested Python tools would otherwise write the ANSI code page on Windows.
 		env = {**(os.environ if env is None else env), 'PYTHONUTF8': '1'}
@@ -229,6 +240,30 @@ class Run:
 		if status == 'fail':
 			raise RuntimeError(f'{name} failed; inspect {log}')
 		return text
+
+	@contextlib.contextmanager
+	def serve(self, name, command, env=None, stop_signal=signal.SIGTERM):
+		"""Run a long-lived fixture and stop it when the block exits."""
+		log = self.log_path(name)
+		print(f'Running: {" ".join(map(str, command))}', flush=True)
+		env = {**(os.environ if env is None else env), 'PYTHONUTF8': '1'}
+		with log.open('xb') as log_file:
+			process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE,
+				stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, start_new_session=SYSTEM != 'Windows')
+			output = CommandOutput(process, log_file)
+			try:
+				yield process, output
+			finally:
+				was_running = process.poll() is None
+				if was_running:
+					stop_command(process, stop_signal)
+				try:
+					output.wait(10)
+				except subprocess.TimeoutExpired:
+					stop_command(process, signal.SIGKILL if SYSTEM != 'Windows' else signal.SIGTERM)
+					output.wait(10)
+				status = 'pass' if was_running or process.returncode == 0 else 'fail'
+				self.record(name, status, f'exit {process.returncode}; {log}')
 
 
 def core(run):
@@ -473,16 +508,19 @@ def service(run):
 	service_checks.run_service(run, binary(run), SYSTEM)
 
 
+class HostUnavailable(RuntimeError):
+	"""The intake endpoint did not answer like a running testd host."""
+
+
 def local_host_status(port):
-	"""Read the running host's status, so a missing host fails before the fixture starts."""
+	"""Read the running host's status."""
 	connection = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
 	try:
 		connection.request('GET', '/api/status')
 		response = connection.getresponse()
 		body = response.read()
 	except OSError as error:
-		raise RuntimeError(f'no testd host is listening at 127.0.0.1:{port}; start `testd host` '
-			'or the tray app on the host and rerun this suite') from error
+		raise HostUnavailable(f'no testd host is listening at 127.0.0.1:{port}') from error
 	finally:
 		connection.close()
 	if response.status != 200:
@@ -494,26 +532,49 @@ def local_host_status(port):
 		raise RuntimeError(f'the host at 127.0.0.1:{port} returned an invalid /api/status document') from error
 
 
+def wait_for_host(port, process, output, timeout=30):
+	"""Wait for a host this suite started to accept connections."""
+	deadline = time.monotonic() + timeout
+	while time.monotonic() < deadline:
+		if process.poll() is not None:
+			detail = output.text().strip()
+			raise RuntimeError(f'the host exited with {process.returncode} before listening on 127.0.0.1:{port}; '
+				f'is it initialized with `testd init`?\n{detail[-4000:]}')
+		try:
+			return local_host_status(port)
+		except HostUnavailable:
+			time.sleep(0.25)
+	raise RuntimeError(f'the host did not listen on 127.0.0.1:{port} within {timeout} seconds')
+
+
 def browser(run):
 	require('bun')
 	check_ports([run.args.port, run.args.port + 1])
-	status = local_host_status(run.args.intake_port)
-	if status.get('tld') != run.args.tld:
-		raise RuntimeError(f'the host at 127.0.0.1:{run.args.intake_port} serves .{status.get("tld")}, '
-			f'but --tld {run.args.tld} was requested; run the host with the same TLD')
 	cli = binary(run)
-	url = f'https://app.releasecheck.{run.args.tld}:{run.args.edge_port}/'
-	print(f'Open {url} in each browser. Do not bypass certificate warnings.\n'
-		'Run the checks and save the JSON report using the page. Ctrl+C stops only the fixtures.', flush=True)
-	env = dict(os.environ, TESTD_BROWSER_REPORT=str(run.output), TESTD_BROWSER_PORT=str(run.args.port),
-		TESTD_BROWSER_TLD=run.args.tld, TESTD_BROWSER_EDGE_PORT=str(run.args.edge_port))
-	command = [str(cli), 'run', '--host', f'127.0.0.1:{run.args.intake_port}',
-		f'app.releasecheck:{run.args.port}', f'api.releasecheck:{run.args.port}',
-		f'dead.releasecheck:{run.args.port + 1}', '--', 'bun', 'tests/release/browser-server.ts']
 	try:
-		run.command('browser-fixture', command, 3600, env, interrupt_ok=True)
-	except KeyboardInterrupt:
-		pass
+		status = local_host_status(run.args.intake_port)
+		host = contextlib.nullcontext()
+	except HostUnavailable:
+		status = None
+		host = run.serve('host-fixture', [str(cli), 'host'], stop_signal=signal.SIGINT)
+	with host as fixture:
+		if fixture:
+			status = wait_for_host(run.args.intake_port, *fixture)
+		if status.get('tld') != run.args.tld:
+			raise RuntimeError(f'the host at 127.0.0.1:{run.args.intake_port} serves .{status.get("tld")}, '
+				f'but --tld {run.args.tld} was requested; run the host with the same TLD')
+		url = f'https://app.releasecheck.{run.args.tld}:{run.args.edge_port}/'
+		print(f'Open {url} in each browser. Do not bypass certificate warnings.\n'
+			'Run the checks and save the JSON report using the page. Ctrl+C stops only the fixtures.', flush=True)
+		env = dict(os.environ, TESTD_BROWSER_REPORT=str(run.output), TESTD_BROWSER_PORT=str(run.args.port),
+			TESTD_BROWSER_TLD=run.args.tld, TESTD_BROWSER_EDGE_PORT=str(run.args.edge_port))
+		command = [str(cli), 'run', '--host', f'127.0.0.1:{run.args.intake_port}',
+			f'app.releasecheck:{run.args.port}', f'api.releasecheck:{run.args.port}',
+			f'dead.releasecheck:{run.args.port + 1}', '--', 'bun', 'tests/release/browser-server.ts']
+		try:
+			run.command('browser-fixture', command, 3600, env, interrupt_ok=True)
+		except KeyboardInterrupt:
+			pass
 	reports = list(run.output.glob('browser-*.json'))
 	if not reports:
 		run.metadata['incomplete'] = True
