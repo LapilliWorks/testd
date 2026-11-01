@@ -37,7 +37,7 @@ cargo deny check
 
 ## Host testing
 
-The container suite covers the protocol, the edge, registration ownership, DNS answers, CLI behavior, and sharing. The checks below cover OS resolver integration, trust stores, privileged ports, packaging, code signing, and the tray.
+The container suite covers the protocol, the edge, registration ownership, DNS answers, CLI behavior, sharing, and the standalone operator secret. The checks below cover OS resolver integration, trust stores, privileged ports, packaging, code signing, and the tray.
 
 Run them on real machines, not inside the dev container. A macOS, Linux, and Windows host are needed for full coverage. Use a dedicated test machine or a VM: the optional system checks change the OS resolver and trust store.
 
