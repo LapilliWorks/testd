@@ -101,7 +101,7 @@ fn curl_binary() -> std::path::PathBuf {
 		if system.is_file() {
 			return system;
 		}
-		return std::path::PathBuf::from("curl.exe");
+		std::path::PathBuf::from("curl.exe")
 	}
 	#[cfg(not(windows))]
 	{

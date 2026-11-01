@@ -24,6 +24,7 @@ use crate::listeners;
 use crate::{Entry, Reader, Writer, connect};
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
+#[cfg(unix)]
 const STOP_GRACE: Duration = Duration::from_secs(5);
 const PROBE_INTERVAL: Duration = Duration::from_millis(200);
 

@@ -176,7 +176,8 @@ pub fn finish_init(app: AppHandle, secret: String) -> Result<(), String> {
 		window.close().ok();
 	}
 	#[cfg(target_os = "macos")]
-	app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+	app.set_activation_policy(tauri::ActivationPolicy::Accessory)
+		.map_err(|e| e.to_string())?;
 
 	let rt = app.state::<Arc<tokio::runtime::Runtime>>();
 	tray::start_daemon(&app, Arc::clone(&rt)).map_err(|e| e.to_string())?;

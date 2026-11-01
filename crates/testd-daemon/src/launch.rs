@@ -137,7 +137,7 @@ impl LaunchBook {
 		}
 		#[cfg(windows)]
 		if path.exists() {
-			std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+			std::fs::remove_file(path).map_err(|e| e.to_string())?;
 		}
 		std::fs::rename(tmp, path).map_err(|e| e.to_string())
 	}

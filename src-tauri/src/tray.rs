@@ -312,7 +312,6 @@ pub fn start_daemon(
 	let mut icon_state = IconState::current(health.healthy(), has_request);
 	let icon = tray_icon(icon_state)?;
 	let click_dashboard = dashboard_url.clone();
-	let loop_dashboard = dashboard_url.clone();
 	let launches_url = format!("{dashboard_url}#launches");
 	let action_daemon = Arc::clone(&daemon);
 	let action_rt = rt.handle().clone();

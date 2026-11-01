@@ -214,12 +214,6 @@ fn is_os_resolver_configured_windows(tld: &str, addr: SocketAddr) -> bool {
 	nrpt_has_name_server(&stdout, addr)
 }
 
-/// NRPT rules route by namespace and name server IP; the port is not configurable.
-#[cfg(any(target_os = "windows", test))]
-fn nrpt_add_command(tld: &str, addr: SocketAddr) -> String {
-	format!("Add-DnsClientNrptRule -Namespace '.{tld}' -NameServers '{}'", addr.ip())
-}
-
 #[cfg(any(target_os = "windows", test))]
 fn nrpt_query_command(tld: &str) -> String {
 	format!(
@@ -248,11 +242,6 @@ fn resolver_commands(tld: &str, addr: SocketAddr) -> Vec<String> {
 		"mkdir -p {RESOLVED_DROPIN_DIR} && printf '%s' {content} > {RESOLVED_DROPIN} \
 		 && systemctl reload systemd-resolved"
 	)]
-}
-
-#[cfg(target_os = "windows")]
-fn resolver_commands(tld: &str, addr: SocketAddr) -> Vec<String> {
-	vec![nrpt_add_command(tld, addr)]
 }
 
 /// How to obtain the privileges for a one-time system change.
@@ -475,7 +464,7 @@ fn teardown_macos(tld: &str) -> io::Result<()> {
 	let path = format!("/etc/resolver/{tld}");
 	let status = silent_command("sudo").args(["rm", "-f", &path]).status()?;
 	if !status.success() {
-		return Err(io::Error::new(io::ErrorKind::Other, format!("sudo rm {path} failed")));
+		return Err(io::Error::other(format!("sudo rm {path} failed")));
 	}
 	Ok(())
 }
@@ -698,14 +687,6 @@ mod tests {
 	}
 
 	#[test]
-	fn nrpt_routes_to_ip_without_port() {
-		let addr: SocketAddr = "127.0.0.1:7753".parse().unwrap();
-		let command = nrpt_add_command("test", addr);
-		assert!(command.contains("-NameServers '127.0.0.1'"));
-		assert!(!command.contains("7753"));
-	}
-
-	#[test]
 	fn nrpt_query_selects_name_servers_for_namespace() {
 		let command = nrpt_query_command("test");
 		assert!(command.contains("Namespace -eq '.test'"));
@@ -757,7 +738,7 @@ mod tests {
 // --- root CA trust ---
 
 /// Common name of the testd root certificate.
-#[cfg_attr(target_os = "linux", allow(dead_code))]
+#[cfg(target_os = "macos")]
 const ROOT_CN: &str = "testd root";
 
 /// Whether the testd root is already in the system trust store.
@@ -883,7 +864,7 @@ pub fn trust_root_gui(cert_pem: &str) -> io::Result<()> {
 	}
 	#[cfg(target_os = "windows")]
 	{
-		return trust_root_windows(cert_pem);
+		trust_root_windows(cert_pem)
 	}
 	#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 	Err(io::Error::new(io::ErrorKind::Unsupported, "unsupported platform for trust installation"))
@@ -988,7 +969,7 @@ pub fn untrust_root_gui(_cert_pem: &str) -> io::Result<()> {
 	}
 	#[cfg(target_os = "windows")]
 	{
-		return untrust_root_windows(_cert_pem);
+		untrust_root_windows(_cert_pem)
 	}
 	#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 	Err(io::Error::new(io::ErrorKind::Unsupported, "unsupported platform for trust removal"))
@@ -1152,6 +1133,7 @@ fn windows_cert_thumbprint(path: &std::path::Path) -> io::Result<String> {
 }
 
 /// Compare certificates ignoring line-ending and trailing-whitespace noise.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn normalize_pem(pem: &str) -> String {
 	pem.lines().map(str::trim_end).collect::<Vec<_>>().join("\n")
 }
