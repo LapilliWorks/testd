@@ -7,7 +7,7 @@ import subprocess
 import sys
 import threading
 from contextlib import redirect_stderr, redirect_stdout
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import json
 from types import SimpleNamespace
 
@@ -34,6 +34,26 @@ class ReleaseTests(unittest.TestCase):
 		self.assertNotIn('unmaintained', policy['advisories'])
 		self.assertEqual(policy['bans']['wildcards'], 'deny')
 		self.assertIn({'name': 'openssl'}, policy['bans']['deny'])
+
+	def test_core_and_ci_checks_match_declared_msrvs(self):
+		run = Mock(args=SimpleNamespace(gui=True, strict=True))
+		with patch.object(runner.shutil, 'which', return_value='installed'):
+			runner.core(run)
+		commands = {call.args[0]: call.args[1] for call in run.command.call_args_list}
+		workspace = release.tomllib.loads((ROOT / 'Cargo.toml').read_text())
+		tray = release.tomllib.loads((ROOT / 'src-tauri/Cargo.toml').read_text())
+		workflow = (ROOT / '.github/workflows/ci.yml').read_text()
+		for name, version in [
+			('msrv-cli', workspace['workspace']['package']['rust-version']),
+			('msrv-tray', tray['package']['rust-version']),
+		]:
+			with self.subTest(name=name):
+				self.assertEqual(commands[name][1], f'+{version}.0')
+				self.assertIn(f"toolchain: '{version}.0'", workflow)
+
+	def test_notification_dependency_is_not_downgraded_to_4_17(self):
+		manifest = release.tomllib.loads((ROOT / 'crates/testd-daemon/Cargo.toml').read_text())
+		self.assertEqual(manifest['dependencies']['notify-rust'], '4.18')
 
 	def test_workspace_versions_match(self):
 		release.check_version('0.1.0')

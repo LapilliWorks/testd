@@ -4,10 +4,14 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 
 ## [Unreleased]
 
+### Changed
+
+- CLI/daemon MSRV raised to Rust 1.89; tray MSRV remains Rust 1.90
+
 ### Fixed
 
 - Windows clippy no longer sees the Unix-only share exposure import
-- Notification dependency pinned to the Rust-1.88-compatible release
+- Restored notify-rust 4.18 so macOS and Windows notification action callbacks compile
 - Explicit, documented exceptions for the three informational zbus merger advisories; vulnerability checks remain enforced
 
 ## [0.1.0] - 2026-11-01

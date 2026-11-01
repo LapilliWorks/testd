@@ -22,4 +22,4 @@ Remove these exceptions once both dependency paths use zbus 6 and the standalone
 
 ## Notification MSRV
 
-The daemon pins `notify-rust` to 4.17.0. Version 4.18 raises its declared minimum Rust version to 1.89, above the CLI/daemon's Rust 1.88 minimum. Revisit the pin when a compatible upstream release is available or the supported minimum Rust version changes.
+The daemon requires `notify-rust` 4.18 for notification action callbacks on macOS and Windows. This release requires Rust 1.89, which is the CLI/daemon MSRV. The tray MSRV remains Rust 1.90. Release-validation and CI checks use these respective toolchains.

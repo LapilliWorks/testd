@@ -27,11 +27,11 @@ tokio-rustls = { workspace = true }
 tokio = { workspace = true }
 base64 = { workspace = true }
 getrandom = { workspace = true }
-# 4.18 requires Rust 1.89; pin the last release compatible with our Rust 1.88 MSRV.
+# 4.18 provides macOS/Windows notification action callbacks and requires Rust 1.89.
 # Its zbus 5 backend includes deprecated zvariant/zbus_names/zvariant_derive:
 # RUSTSEC-2026-0370, RUSTSEC-2026-0371, RUSTSEC-2026-0372: informational merger notices.
 # deny.toml narrowly exempts these IDs; remove the exceptions when this uses zbus 6.
-notify-rust = "=4.17.0"
+notify-rust = "4.18"
 
 [dev-dependencies]
 futures-util = { workspace = true }

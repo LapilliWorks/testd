@@ -43,7 +43,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - toolchain: '1.88.0'
+          - toolchain: '1.89.0'
             packages: '--workspace --exclude testd-gui'
           - toolchain: '1.90.0'
             packages: '-p testd-gui'

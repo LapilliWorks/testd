@@ -181,7 +181,7 @@ def core(run):
 		run.record('browser-fixture-tests', 'skip', 'Bun is not installed')
 	for tool, name, command in [
 		('cargo-deny', 'dependencies', ['cargo', 'deny', 'check']),
-		('rustup', 'msrv-cli', ['cargo', '+1.88.0', 'check', '--workspace', '--exclude', 'testd-gui', '--locked']),
+		('rustup', 'msrv-cli', ['cargo', '+1.89.0', 'check', '--workspace', '--exclude', 'testd-gui', '--locked']),
 	]:
 		if shutil.which(tool):
 			run.command(name, command, 1200)

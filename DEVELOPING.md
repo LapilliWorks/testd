@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Rust toolchain from `rust-toolchain.toml`; CLI/daemon MSRV 1.88, tray MSRV 1.90
+- Rust toolchain from `rust-toolchain.toml`; CLI/daemon MSRV 1.89, tray MSRV 1.90
 - Python 3.12 or newer for release tooling and reports; Bun for browser fixtures
 - `cargo-cyclonedx` for workspace SBOM generation
 - `cargo-nextest` for tests and `cargo-deny` for dependency checks
@@ -361,7 +361,7 @@ A free release is a version tag, CLI archives, public tray bundles, workspace SB
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] `cargo nextest run --workspace`
 - [ ] `cargo deny check`
-- [ ] `cargo +1.88.0 check --workspace --exclude testd-gui --locked`
+- [ ] `cargo +1.89.0 check --workspace --exclude testd-gui --locked`
 - [ ] `cargo +1.90.0 check -p testd-gui --locked`
 - [ ] `python3 scripts/release.py verify-version`
 - [ ] Enable GitHub private vulnerability reporting for the public repository
