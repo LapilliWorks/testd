@@ -157,6 +157,19 @@ class FakeHost(state.Host):
 
 
 class SystemStateTests(unittest.TestCase):
+	def test_restore_targets_match_the_product(self):
+		"""The suite must restore the paths testd-setup writes, not a copy of them."""
+		setup = (ROOT / 'crates/testd-setup/src/lib.rs').read_text()
+		for item in state.files(FakeHost()):
+			self.assertIn(item['path'], setup)
+		macos = state.files(FakeHost('Darwin', 'testdcheck'))[0]['path']
+		self.assertIn(macos.rsplit('/', 1)[0], setup)
+		windows = (ROOT / 'tests/release/windows-system-state.ps1').read_text()
+		elevated = (ROOT / 'scripts/testd-elevated.ps1').read_text()
+		for script in (windows, elevated):
+			self.assertIn('+ $Tld', script, 'NRPT namespaces must stay scoped to the TLD')
+		self.assertIn('testd root', windows)
+
 	def test_linux_restore_returns_the_exact_previous_bytes(self):
 		with tempfile.TemporaryDirectory() as temporary:
 			host = FakeHost()
