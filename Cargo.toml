@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/testd-core", "crates/testd-pki", "crates/testd-setup", "crates/testd-client"]
+members = ["crates/testd-core", "crates/testd-pki", "crates/testd-setup", "crates/testd-client", "crates/testd-daemon"]
 resolver = "3"
 
 [workspace.package]
@@ -14,6 +14,9 @@ tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macro
 toml = "1"
 testd-core = { path = "crates/testd-core", version = "0.1.0" }
 testd-pki = { path = "crates/testd-pki", version = "0.1.0" }
+testd-setup = { path = "crates/testd-setup", version = "0.1.0" }
+testd-client = { path = "crates/testd-client", version = "0.1.0" }
+testd-daemon = { path = "crates/testd-daemon", version = "0.1.0" }
 getrandom = "0.3"
 covo = "0.1"
 anyhow = "1"
