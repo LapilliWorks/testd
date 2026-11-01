@@ -414,7 +414,7 @@ if ($LASTEXITCODE -eq 0) {
 	Fail "testd approve delivers the token: $approveOut"
 }
 for ($i = 0; $i -lt 50 -and $AccessProc -and -not $AccessProc.HasExited; $i++) { Start-Sleep -Milliseconds 200 }
-if ($AccessProc -and -not $AccessProc.HasExited) { Stop-Process -Id $AccessProc.Id -Force -ErrorAction SilentlyContinue }
+if ($AccessProc -and -not $AccessProc.HasExited) { Stop-Process -ErrorAction SilentlyContinue -Id $AccessProc.Id -Force -ErrorAction SilentlyContinue }
 $credential = Join-Path $AppData 'testd\credentials\access-test'
 if ((Test-Path $credential) -and (Get-Item $credential).Length -gt 0) {
 	Pass 'the leaf saves the issued token'
@@ -435,7 +435,7 @@ if ($LASTEXITCODE -eq 0) {
 	Fail "testd tokens --revoke withdraws the token: $revokeOut"
 }
 
-if ($ClientProc) { Stop-Process -Id $ClientProc.Id -Force -ErrorAction SilentlyContinue; $ClientProc = $null }
+if ($ClientProc) { Stop-Process -ErrorAction SilentlyContinue -Id $ClientProc.Id -Force -ErrorAction SilentlyContinue; $ClientProc = $null }
 $removed = $false
 for ($i = 0; $i -lt 20; $i++) {
 	$null = Curl-Get "app.testdproj.$Tld" '/' 2>$null
@@ -650,7 +650,7 @@ if ($env:TESTD_HOST_TEST_SYSTEM -eq '1' -and $env:TESTD_HOST_TEST_CLEANUP -eq '1
 	certutil -delstore Root "testd root" | Out-Null
 }
 
-if ($ClientProc) { Stop-Process -Id $ClientProc.Id -Force -ErrorAction SilentlyContinue; $ClientProc = $null }
+if ($ClientProc) { Stop-Process -ErrorAction SilentlyContinue -Id $ClientProc.Id -Force -ErrorAction SilentlyContinue; $ClientProc = $null }
 if ($AppJob) {
 	Set-Content -LiteralPath $AppStop -Value 'stop' -ErrorAction SilentlyContinue
 	$null = Wait-Job $AppJob -Timeout 5
@@ -660,7 +660,7 @@ if ($AppJob) {
 if ($LaunchId) {
 	try { $null = Dashboard-Post '/api/local/launches/stop' (@{ id = $LaunchId } | ConvertTo-Json -Compress) } catch { }
 }
-if ($Daemon) { Stop-Process -Id $Daemon.Id -Force -ErrorAction SilentlyContinue }
+if ($Daemon) { Stop-Process -ErrorAction SilentlyContinue -Id $Daemon.Id -Force -ErrorAction SilentlyContinue }
 
 Write-Host "`npassed $Passed, failed $Failed, skipped $Skipped"
 if ($Failed -ne 0) { exit 1 }
