@@ -114,6 +114,35 @@ def homebrew(args):
 		print(path)
 
 
+def scan_sbom():
+	manifests = [ROOT / 'Cargo.toml', ROOT / 'src-tauri/Cargo.toml', *sorted(ROOT.glob('crates/*/Cargo.toml'))]
+	expected = {tomllib.loads(path.read_text())['package']['name'] for path in manifests}
+	documents = {}
+	for manifest in manifests:
+		for path in manifest.parent.glob('*.json'):
+			value = json.loads(path.read_text())
+			if not isinstance(value, dict) or value.get('bomFormat') != 'CycloneDX':
+				continue
+			name = value.get('metadata', {}).get('component', {}).get('name')
+			if name not in expected or name in documents:
+				raise ValueError(f'unexpected or duplicate crate SBOM: {path}: {name}')
+			documents[name] = path
+	return expected, documents
+
+
+def collect_sbom(output):
+	expected, documents = scan_sbom()
+	if documents.keys() != expected:
+		raise ValueError(f'missing workspace SBOMs: {expected - documents.keys()}')
+	output.mkdir(parents=True, exist_ok=True)
+	for name, source in sorted(documents.items()):
+		destination = output / f'{name}.cdx.json'
+		if destination.exists():
+			raise FileExistsError(destination)
+		shutil.copy2(source, destination)
+		print(destination)
+
+
 def checksums(directory):
 	path = directory / 'SHA256SUMS'
 	if path.exists():
@@ -140,6 +169,9 @@ def main():
 	brew.add_argument('--version', required=True)
 	brew.add_argument('--artifacts', type=pathlib.Path, required=True)
 	brew.add_argument('--output', type=pathlib.Path, required=True)
+	commands.add_parser('require-clean-sbom')
+	sbom = commands.add_parser('collect-sbom')
+	sbom.add_argument('--output', type=pathlib.Path, required=True)
 	sums = commands.add_parser('checksums')
 	sums.add_argument('directory', type=pathlib.Path)
 	args = parser.parse_args()
@@ -156,6 +188,12 @@ def main():
 		package(args)
 	elif args.command == 'homebrew':
 		homebrew(args)
+	elif args.command == 'require-clean-sbom':
+		_, documents = scan_sbom()
+		if documents:
+			raise FileExistsError('retain existing SBOMs before regenerating; use a clean checkout/worktree')
+	elif args.command == 'collect-sbom':
+		collect_sbom(args.output)
 	else:
 		checksums(args.directory)
 
