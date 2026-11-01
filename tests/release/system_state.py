@@ -107,7 +107,9 @@ class Host:
 	def _run(self, argv):
 		result = subprocess.run(argv, capture_output=True)
 		if result.returncode != 0:
-			detail = result.stderr.decode(errors='replace').strip() or f'exit {result.returncode}'
+			# windows_command makes the PowerShell child emit UTF-8 whatever the
+			# console code page is, so this decode is exact rather than lossy.
+			detail = result.stderr.decode('utf-8', errors='replace').strip() or f'exit {result.returncode}'
 			raise HostError(f'{" ".join(argv)}: {detail}')
 		return result.stdout
 
@@ -179,14 +181,34 @@ def snapshot(host, directory, artifacts=None):
 	return directory / MANIFEST
 
 
+def powershell_quote(value):
+	"""Quote one PowerShell literal; inside single quotes a quote is doubled."""
+	return "'" + str(value).replace("'", "''") + "'"
+
+
+def windows_script(script, parameters):
+	"""Run a .ps1 with UTF-8 messages, whatever code page the console uses.
+
+	Windows PowerShell 5.1 writes the messages it generates itself in the
+	console code page (cp936 on a Chinese system), so a localized parse error
+	reached this suite as GBK bytes, was decoded as UTF-8 with replacement
+	characters, and rendered as unreadable garbage. Setting the encoding inside
+	the child makes 5.1 and 7 emit the same bytes. `-File` cannot do this,
+	because a parse error is printed before any of the script has run.
+	"""
+	arguments = ' '.join(f'-{name} {powershell_quote(value)}' for name, value in parameters)
+	return (f'[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); '
+		f'& {powershell_quote(script)} {arguments}')
+
+
 def windows_command(action, directory, tld):
-	return ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(WINDOWS_SCRIPT),
-		'-Action', action, '-Destination', str(directory), '-Tld', tld]
+	return ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+		windows_script(WINDOWS_SCRIPT, [('Action', action), ('Destination', directory), ('Tld', tld)])]
 
 
 def windows_fixture_command(tld):
-	return ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(WINDOWS_FIXTURE),
-		'-Tld', tld]
+	return ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+		windows_script(WINDOWS_FIXTURE, [('Tld', tld)])]
 
 
 def load(directory):

@@ -165,7 +165,7 @@ function Get-PropertyDifferences($snapshot) {
 	$differences = @()
 	$restored = Get-NamespaceRules
 	if ($restored.Count -ne $snapshot.Rules.Count) {
-		return @("NRPT rules for $Namespace: expected $($snapshot.Rules.Count), found $($restored.Count)")
+		return @("NRPT rules for ${Namespace}: expected $($snapshot.Rules.Count), found $($restored.Count)")
 	}
 	$actual = @($restored | ForEach-Object { Get-RuleSignature $_ })
 	foreach ($rule in $snapshot.Rules) {

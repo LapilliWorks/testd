@@ -3,6 +3,7 @@
 
 import argparse
 import codecs
+import ctypes
 import datetime
 import functools
 import hashlib
@@ -36,6 +37,44 @@ def require(tool):
 	if not path:
 		raise RuntimeError(f'please install {tool} before running this suite')
 	return path
+
+
+def console_code_page():
+	"""The console output code page, or zero when no console is attached."""
+	kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+	return kernel32.GetConsoleOutputCP()
+
+
+def console_encoding():
+	"""The encoding the shell capturing our redirected output will decode with.
+
+	PowerShell 7 decodes a child's output with [Console]::OutputEncoding, which
+	follows the console code page (cp936 on a Chinese system). Python 3.15
+	writes UTF-8 for redirected streams, so a captured run shows the report and
+	every localized error as mojibake even though the bytes are right. Writing
+	the console code page instead keeps the mirror readable; a UTF-8 console
+	(65001) needs nothing, and the console itself is written through the
+	Windows console API whatever we choose here.
+	"""
+	if SYSTEM != 'Windows':
+		return None
+	code_page = console_code_page()
+	if not code_page or code_page == 65001:
+		return None
+	return f'cp{code_page}'
+
+
+def match_redirected_encoding():
+	"""Print redirected streams in the code page the console expects."""
+	encoding = console_encoding()
+	if not encoding:
+		return
+	for stream in (sys.stdout, sys.stderr):
+		try:
+			if stream is not None and not stream.isatty():
+				stream.reconfigure(encoding=encoding, errors='replace')
+		except (AttributeError, ValueError):
+			continue
 
 
 @functools.cache
@@ -541,6 +580,7 @@ def main():
 	parser.add_argument('--edge-port', type=int, default=443)
 	parser.add_argument('--intake-port', type=int, default=7737)
 	args = parser.parse_args()
+	match_redirected_encoding()
 	if args.restore_report:
 		return restore_report(args.restore_report)
 	if not args.suite:

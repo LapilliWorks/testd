@@ -2,6 +2,8 @@ import importlib.util
 import hashlib
 import io
 import pathlib
+import re
+import shutil
 import tempfile
 import unittest
 import subprocess
@@ -119,6 +121,35 @@ class ReleaseTests(unittest.TestCase):
 	def test_manual_checks_are_not_invented_from_headings(self):
 		items = runner.checklist_items('# Build\n- [ ] First check\n      continued\n\n- [ ] Second check\n')
 		self.assertEqual(items, ['First check continued', 'Second check'])
+
+
+class ConsoleOutputTests(unittest.TestCase):
+	"""PowerShell decodes a child's bytes with the console code page, not UTF-8."""
+
+	def test_redirected_output_follows_the_console_code_page(self):
+		stream = Mock()
+		stream.isatty.return_value = False
+		with patch.object(runner, 'SYSTEM', 'Windows'), \
+			patch.object(runner, 'console_code_page', return_value=936), \
+			patch.object(runner.sys, 'stdout', stream), patch.object(runner.sys, 'stderr', stream):
+			runner.match_redirected_encoding()
+		self.assertEqual(stream.reconfigure.call_count, 2)
+		stream.reconfigure.assert_called_with(encoding='cp936', errors='replace')
+
+	def test_utf8_console_and_attached_terminals_keep_utf8(self):
+		for code_page, terminal in [(65001, False), (936, True), (0, False)]:
+			with self.subTest(code_page=code_page, terminal=terminal):
+				stream = Mock()
+				stream.isatty.return_value = terminal
+				with patch.object(runner, 'SYSTEM', 'Windows'), \
+					patch.object(runner, 'console_code_page', return_value=code_page), \
+					patch.object(runner.sys, 'stdout', stream), patch.object(runner.sys, 'stderr', stream):
+					runner.match_redirected_encoding()
+				stream.reconfigure.assert_not_called()
+
+	def test_other_platforms_are_untouched(self):
+		with patch.object(runner, 'SYSTEM', 'Linux'):
+			self.assertIsNone(runner.console_encoding())
 
 
 class FakeHost(state.Host):
@@ -312,9 +343,24 @@ class SystemStateTests(unittest.TestCase):
 			backup = pathlib.Path(temporary) / 'system-before'
 			state.snapshot(host, backup)
 			self.assertEqual(state.restore(host, backup), [])
-			actions = [argv[argv.index('-Action') + 1] for argv, _ in host.commands if argv[0] == 'powershell']
+			commands = [argv for argv, _ in host.commands if argv[0] == 'powershell']
+			actions = [re.search(r"-Action '([^']+)'", argv[-1]).group(1) for argv in commands]
 			self.assertEqual(actions, ['Snapshot', 'Restore', 'Verify'])
 			self.assertTrue(all(privileged for argv, privileged in host.commands if argv[0] == 'powershell'))
+
+	def test_windows_commands_force_utf8_and_quote_their_arguments(self):
+		# The child has to emit UTF-8 itself: a parse error is printed before the
+		# script runs, and 5.1 otherwise uses the console code page for messages.
+		script = state.windows_command('Snapshot', "C:\\Users\\o'brien\\state", 'testdcheck')
+		self.assertEqual(script[:5], ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command'])
+		command = script[-1]
+		self.assertIn('[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)', command)
+		self.assertIn("-Action 'Snapshot'", command)
+		self.assertIn("-Destination 'C:\\Users\\o''brien\\state'", command)
+		self.assertIn("-Tld 'testdcheck'", command)
+		fixture = state.windows_fixture_command('testdcheck')[-1]
+		self.assertIn('[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)', fixture)
+		self.assertIn("-Tld 'testdcheck'", fixture)
 
 	def test_snapshot_is_required_and_platform_bound(self):
 		with tempfile.TemporaryDirectory() as temporary:
@@ -476,6 +522,43 @@ class CommandOutputTests(unittest.TestCase):
 			self.assertEqual(text, 'ready')
 			self.assertEqual((run.output / '00-interrupt.log').read_text(), 'ready')
 			self.assertEqual(run.results[-1]['status'], 'pass')
+
+
+POWERSHELLS = [engine for engine in (shutil.which('powershell'), shutil.which('pwsh')) if engine]
+PARSE_COMMAND = (
+	'$errors = $null;'
+	'[void][System.Management.Automation.Language.Parser]::ParseInput('
+	'[IO.File]::ReadAllText({path}, [Text.UTF8Encoding]::new($false)), [ref]$null, [ref]$errors);'
+	'$errors | ForEach-Object { "line {0}, column {1}: {2}" -f '
+	'$_.Extent.StartLineNumber, $_.Extent.StartColumnNumber, $_.Message };'
+	'if ($errors.Count -gt 0) { exit 1 }'
+)
+
+
+def script_syntax_errors(engine, path):
+	command = PARSE_COMMAND.replace('{path}', state.powershell_quote(path))
+	result = subprocess.run([engine, '-NoProfile', '-NonInteractive', '-Command', command], capture_output=True)
+	return result.returncode, (result.stdout + result.stderr).decode('utf-8', errors='replace').strip()
+
+
+@unittest.skipUnless(POWERSHELLS, 'PowerShell is not installed')
+class PowerShellScriptTests(unittest.TestCase):
+	"""A broken script only fails when the release suite runs, so parse it here.
+
+	The parser is the one the child actually uses: a literal such as
+	"NRPT rules for $Namespace: expected" is read as a drive-qualified variable
+	and rejected while parsing, which took the whole Windows snapshot down.
+	"""
+
+	def test_every_release_script_parses(self):
+		scripts = sorted(path for folder in ('scripts', 'tests')
+			for path in (ROOT / folder).rglob('*.ps1'))
+		self.assertTrue(scripts, 'no PowerShell scripts under scripts/ or tests/')
+		for engine in POWERSHELLS:
+			for script in scripts:
+				with self.subTest(engine=pathlib.Path(engine).name, script=str(script.relative_to(ROOT))):
+					code, output = script_syntax_errors(engine, script)
+					self.assertEqual(code, 0, f'{script.relative_to(ROOT)}: {output}')
 
 
 if __name__ == '__main__':
