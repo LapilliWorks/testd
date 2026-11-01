@@ -386,6 +386,19 @@ mod tests {
 	}
 
 	#[test]
+	fn mints_without_the_root_key_after_reload() {
+		let dir = temp_dir();
+		let ca = Ca::load_or_init(&dir).unwrap();
+		drop(ca);
+		std::fs::remove_file(dir.join("root.key")).unwrap();
+
+		let ca = Ca::load_or_init(&dir).unwrap();
+		let (der, _) = ca.mint_der("app.test").unwrap();
+		assert_eq!(der.len(), 2, "leaf plus intermediate");
+		std::fs::remove_dir_all(&dir).ok();
+	}
+
+	#[test]
 	fn secrets_are_private() {
 		use std::os::unix::fs::PermissionsExt;
 		let dir = temp_dir();
