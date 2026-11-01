@@ -1,0 +1,22 @@
+[Unit]
+Description=testd host daemon (user)
+Documentation=https://github.com/testd/testd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env testd host
+Restart=on-failure
+RestartSec=2
+# The daemon never needs root at runtime. The one-time resolver and CA
+# installs happen through `testd init` / `testd doctor --fix`.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/testd
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=testd host daemon for %i
+Documentation=https://github.com/testd/testd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+ExecStart=/usr/bin/env testd host
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
