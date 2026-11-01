@@ -12,6 +12,7 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 
 - Windows clippy no longer sees the Unix-only share exposure import
 - Restored notify-rust 4.18 so macOS and Windows notification action callbacks compile
+- Windows supervisor test fixtures use noninteractive sleep instead of timeout, which exits with redirected stdin
 - Explicit, documented exceptions for the three informational zbus merger advisories; vulnerability checks remain enforced
 
 ## [0.1.0] - 2026-11-01

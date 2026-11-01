@@ -943,7 +943,7 @@ mod tests {
 		}
 		#[cfg(windows)]
 		{
-			"cmd".into()
+			"powershell".into()
 		}
 	}
 
@@ -954,7 +954,8 @@ mod tests {
 		}
 		#[cfg(windows)]
 		{
-			vec!["/C".into(), "timeout".into(), "/T".into(), "60".into()]
+			// Windows timeout exits when stdin is redirected by the supervisor.
+			vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), "Start-Sleep -Seconds 60".into()]
 		}
 	}
 
@@ -975,6 +976,20 @@ mod tests {
 		})
 		.await
 		.expect("timed out waiting for state")
+	}
+
+	#[tokio::test]
+	async fn sleep_fixture_stays_alive_with_redirected_stdin() {
+		let spec = spec_with_args("127.0.0.1:1");
+		let (events, _receiver) = mpsc::channel(16);
+		let mut child = spawn_child(&spec, &events).expect("failed to spawn sleep fixture");
+
+		// Stay alive through a full connection attempt, including slow refusal on Windows.
+		tokio::time::sleep(Duration::from_secs(2)).await;
+		let status = child.try_wait();
+		stop_child(&mut child).await;
+		let status = status.expect("failed to inspect sleep fixture");
+		assert!(status.is_none(), "sleep fixture exited with redirected stdin: {status:?}");
 	}
 
 	#[tokio::test]
