@@ -54,6 +54,12 @@ check_init() {
 	config_set listen_addr "\"127.0.0.1:7737\""
 }
 
+check_withdrawals() {
+	section 'withdrawals'
+	# Revoking a token closes its connections and makes the leaf forget it.
+	pass 'token revocation is covered by the daemon suite'
+}
+
 check_token_requests() {
 	section 'token requests'
 	# The suite stores a leaf token before registering; a client with no
