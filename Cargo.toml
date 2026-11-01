@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/testd-core", "crates/testd-pki", "crates/testd-setup", "crates/testd-client", "crates/testd-daemon"]
+members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
@@ -12,17 +12,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "signal", "process", "time", "sync"] }
 toml = "1"
-testd-core = { path = "crates/testd-core", version = "0.1.0" }
-testd-pki = { path = "crates/testd-pki", version = "0.1.0" }
-testd-setup = { path = "crates/testd-setup", version = "0.1.0" }
 testd-client = { path = "crates/testd-client", version = "0.1.0" }
+testd-core = { path = "crates/testd-core", version = "0.1.0" }
 testd-daemon = { path = "crates/testd-daemon", version = "0.1.0" }
-getrandom = "0.3"
-covo = "0.1"
-anyhow = "1"
-base64 = "0.22"
-bytes = "1"
+testd-setup = { path = "crates/testd-setup", version = "0.1.0" }
+testd-pki = { path = "crates/testd-pki", version = "0.1.0" }
 fs2 = "0.4"
+anyhow = "1"
+bytes = "1"
 http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "client", "http1"] }
@@ -31,6 +28,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 futures-util = "0.3"
 tempfile = "3"
+base64 = "0.22"
+getrandom = "0.3"
+covo = "0.1"
 
 [package]
 name = "testd"
@@ -43,3 +43,19 @@ description = "Local dev domain manager"
 [[bin]]
 name = "testd"
 path = "src/main.rs"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+if-addrs = "0.15"
+serde_json = { workspace = true }
+toml = { workspace = true }
+testd-client = { workspace = true }
+testd-core = { workspace = true }
+testd-daemon = { workspace = true }
+testd-setup = { workspace = true }
+testd-pki = { workspace = true }
+tokio = { workspace = true }
