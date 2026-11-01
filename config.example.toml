@@ -21,7 +21,7 @@ tld = "{tld}"
 # Path to the global Caddyfile (for `caddy reload --config`).
 caddy_config_path = "{caddy_config_path}"
 
-# Local CA and node intermediate directories.
+# Local CA and host intermediate directories.
 # pki_dir = "~/.config/testd/pki"
 
 # The operator secret: the bootstrap credential for this machine and for

@@ -53,7 +53,7 @@ pub struct HostConfig {
 	/// Path to the hosts helper script (invoked via sudo).
 	#[serde(default = "defaults::hosts_helper_path")]
 	pub hosts_helper_path: PathBuf,
-	/// Local CA and node intermediate.
+	/// Local CA and host intermediate.
 	#[serde(default = "defaults::pki_dir")]
 	pub pki_dir: PathBuf,
 	/// Address the built-in HTTPS edge binds. Needs port 443 privileges.
