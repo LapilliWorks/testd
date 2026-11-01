@@ -12,14 +12,18 @@ machine root store are delegated to `windows-system-state.ps1`, which keeps the
 privileged PowerShell in one audited place.
 """
 
+import argparse
 import base64
 import datetime
 import hashlib
 import json
 import os
 import pathlib
+import platform
+import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 
 MANIFEST = 'manifest.json'
@@ -28,10 +32,18 @@ RESTORED = 'restored.json'
 KEYCHAIN = '/Library/Keychains/System.keychain'
 KEYCHAIN_NAME = 'testd root'
 WINDOWS_SCRIPT = pathlib.Path(__file__).resolve().with_name('windows-system-state.ps1')
+WINDOWS_FIXTURE = pathlib.Path(__file__).resolve().with_name('windows-system-fixture.ps1')
+SELF_TEST_TLD = 'testdrestore'
+SELF_TEST_RESOLVER = b'# testd restore self-test fixture\n'
 
 
 class HostError(RuntimeError):
 	"""A command or file operation the suite needs did not succeed."""
+
+
+def is_root():
+	"""True where privileged commands need no sudo, including root containers."""
+	return getattr(os, 'geteuid', lambda: 1)() == 0
 
 
 class Host:
@@ -78,7 +90,7 @@ class Host:
 		self.command(['rm', '-f', str(path)], True)
 
 	def argv(self, argv, privileged=False):
-		if not privileged or self.system == 'Windows':
+		if not privileged or self.system == 'Windows' or is_root():
 			return list(argv)
 		if self.interactive:
 			return ['sudo', '--', *argv]
@@ -86,6 +98,8 @@ class Host:
 		return ['sudo', '-n', '--', *argv]
 
 	def require_sudo(self):
+		if self.system == 'Windows' or is_root():
+			return
 		result = subprocess.run(['sudo', '-n', '-v'], capture_output=True)
 		if result.returncode != 0:
 			raise HostError('sudo credentials are not cached; run `sudo -v` before the system checks')
@@ -138,14 +152,14 @@ def keychain_certificates(host):
 	return {hashlib.sha1(der).hexdigest(): der for der in decode_pem(text)}
 
 
-def snapshot(host, directory):
+def snapshot(host, directory, artifacts=None):
 	"""Record the current integration; the run restores it when the suite finishes."""
 	directory = pathlib.Path(directory)
 	(directory / BLOBS).mkdir(parents=True, exist_ok=True)
 	manifest = {'system': host.system, 'tld': host.tld, 'created':
 		datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
 		'files': [], 'certificates': []}
-	for index, item in enumerate(files(host)):
+	for index, item in enumerate(files(host) if artifacts is None else artifacts):
 		entry = {'path': item['path'], 'reload': item.get('reload'), 'exists': host.exists(item['path'])}
 		if entry['exists']:
 			data = host.read(item['path'])
@@ -168,6 +182,11 @@ def snapshot(host, directory):
 def windows_command(action, directory, tld):
 	return ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(WINDOWS_SCRIPT),
 		'-Action', action, '-Destination', str(directory), '-Tld', tld]
+
+
+def windows_fixture_command(tld):
+	return ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(WINDOWS_FIXTURE),
+		'-Tld', tld]
 
 
 def load(directory):
@@ -270,3 +289,136 @@ def verify(host, directory, manifest=None):
 		except HostError as error:
 			problems.append(str(error))
 	return problems
+
+
+def occupied(directory):
+	"""Return the integration a snapshot found; the self-test needs a host with none."""
+	directory = pathlib.Path(directory)
+	manifest = load(directory)
+	found = [entry['path'] for entry in manifest['files'] if entry['exists']]
+	found += [f'{KEYCHAIN} {entry["sha1"]}' for entry in manifest['certificates']]
+	if manifest['system'] == 'Windows':
+		nrpt = directory / 'nrpt.json'
+		rules = json.loads(nrpt.read_text()) if nrpt.is_file() else []
+		found += [f'NRPT rule for {rule["Signature"]["Namespace"]}' for rule in rules]
+		roots = directory / 'roots'
+		if roots.is_dir():
+			found += [f'machine root {path.stem}' for path in sorted(roots.glob('*.cer'))]
+	return found
+
+
+def self_test_artifacts(host):
+	"""The real artifact paths, minus the reload that needs a running resolver.
+
+	The trust reload is kept: it is the one that proves the certificate store,
+	and it only needs the distro tool. The resolver reload belongs to the full
+	`host --system` run, which is why the resolver drop-in is exercised as a file.
+	"""
+	artifacts = []
+	for entry in files(host):
+		reload = entry.get('reload')
+		if reload and (reload[0] == 'systemctl' or not shutil.which(reload[0])):
+			reload = None
+		artifacts.append({'path': entry['path'], 'reload': reload})
+	return artifacts
+
+
+def install_fixture(host, directory, workdir):
+	"""Install what `doctor --fix` would, through the same privileged operations."""
+	if host.system == 'Windows':
+		try:
+			host.command(windows_fixture_command(host.tld), privileged=True)
+		except HostError as error:
+			return [str(error)]
+		return []
+	certificate = pathlib.Path(workdir) / 'fixture.pem'
+	try:
+		host.command(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+			'-subj', f'/CN={KEYCHAIN_NAME}', '-keyout', str(pathlib.Path(workdir) / 'fixture.key'),
+			'-out', str(certificate)])
+	except HostError as error:
+		return [f'openssl cannot build the fixture certificate: {error}']
+	problems = []
+	for entry in load(directory)['files']:
+		is_certificate = entry['path'].endswith('.crt')
+		try:
+			host.write(entry['path'], certificate.read_bytes() if is_certificate else SELF_TEST_RESOLVER, 0o644)
+			if entry.get('reload'):
+				host.command(entry['reload'], privileged=True)
+		except HostError as error:
+			# Later steps cannot work either, and the caller still restores.
+			return [str(error)]
+	if host.system == 'Darwin':
+		try:
+			host.command(['security', 'add-trusted-cert', '-d', '-r', 'trustRoot', '-k', KEYCHAIN,
+				str(certificate)], privileged=True)
+		except HostError as error:
+			problems.append(str(error))
+	return problems
+
+
+def fixture_present(host, directory):
+	"""Assert the fixture landed, so the restore is not a no-op round trip."""
+	manifest = load(directory)
+	missing = [entry['path'] for entry in manifest['files'] if not host.exists(entry['path'])]
+	if missing:
+		return [f'the fixture did not install {path}' for path in missing]
+	if manifest['system'] == 'Darwin' and not keychain_certificates(host):
+		return [f'the fixture did not reach {KEYCHAIN}']
+	if manifest['system'] == 'Windows':
+		# Verify fails exactly while the machine differs from the snapshot, so a
+		# passing verify here means the fixture never landed.
+		try:
+			host.command(windows_command('Verify', directory, host.tld), privileged=True)
+		except HostError:
+			return []
+		return ['the fixture did not change the machine']
+	return []
+
+
+def self_test(system=None, tld=SELF_TEST_TLD):
+	"""Snapshot, install a fixture, restore, verify on a host with no integration.
+
+	This is the check CI runs on disposable runners: it exercises the real
+	privileged writes and stores, which unit tests replace with an in-memory host.
+	It refuses to run where testd integration already exists, because the fixture
+	would replace a live root or route for the duration of the round trip.
+	"""
+	host = Host(system or platform.system(), tld)
+	with tempfile.TemporaryDirectory(prefix='testd-restore-') as temporary:
+		workdir = pathlib.Path(temporary)
+		directory = workdir / 'system-before'
+		print(f'host: {host.system}, snapshot: {directory}', flush=True)
+		snapshot(host, directory, self_test_artifacts(host))
+		present = occupied(directory)
+		if present:
+			return [f'{item} is already installed; the self-test needs a host without testd integration'
+				for item in present]
+		problems = install_fixture(host, directory, workdir)
+		if not problems:
+			problems = fixture_present(host, directory)
+		if problems:
+			# A fixture that only partly landed still has to be taken back out.
+			return list(dict.fromkeys(problems + restore(host, directory)))
+		print('fixture installed; restoring', flush=True)
+		return restore(host, directory)
+
+
+def main(argv=None):
+	parser = argparse.ArgumentParser(description=__doc__)
+	parser.add_argument('--self-test', action='store_true',
+		help='snapshot, fixture, restore, and verify the real integration paths')
+	args = parser.parse_args(argv)
+	if not args.self_test:
+		parser.error('nothing to do; pass --self-test')
+	problems = self_test()
+	for problem in problems:
+		print(f'fail     {problem}', flush=True)
+	if problems:
+		return 1
+	print('ok       snapshot, fixture, restore, and verify', flush=True)
+	return 0
+
+
+if __name__ == '__main__':
+	sys.exit(main())

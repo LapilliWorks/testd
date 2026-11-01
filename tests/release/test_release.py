@@ -157,6 +157,46 @@ class FakeHost(state.Host):
 
 
 class SystemStateTests(unittest.TestCase):
+	def test_snapshot_accepts_an_artifact_override(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			host = FakeHost()
+			backup = pathlib.Path(temporary) / 'system-before'
+			state.snapshot(host, backup, [{'path': '/tmp/self-test-only'}])
+			self.assertEqual([entry['path'] for entry in state.load(backup)['files']], ['/tmp/self-test-only'])
+			self.assertEqual(len(state.files(host)), 2)
+
+	def test_self_test_artifacts_keep_the_paths_but_drop_the_resolver_reload(self):
+		host = FakeHost()
+		artifacts = state.self_test_artifacts(host)
+		self.assertEqual([entry['path'] for entry in artifacts], [entry['path'] for entry in state.files(host)])
+		self.assertEqual([entry['reload'] for entry in artifacts if entry['reload'] and entry['reload'][0] == 'systemctl'], [])
+
+	def test_occupied_reports_integration_the_self_test_cannot_use(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			host = FakeHost()
+			host.files = {state.files(host)[0]['path']: b'live route'}
+			backup = pathlib.Path(temporary) / 'linux'
+			state.snapshot(host, backup)
+			self.assertEqual(state.occupied(backup), [state.files(host)[0]['path']])
+			host = FakeHost('Darwin')
+			host.certificates = {hashlib.sha1(b'live root').hexdigest(): b'live root'}
+			backup = pathlib.Path(temporary) / 'darwin'
+			state.snapshot(host, backup)
+			self.assertEqual(len(state.occupied(backup)), 1)
+			host = FakeHost('Windows')
+			backup = pathlib.Path(temporary) / 'windows'
+			state.snapshot(host, backup)
+			self.assertEqual(state.occupied(backup), [])
+			(backup / 'nrpt.json').write_text(json.dumps([{'Signature': {'Namespace': '.testdrestore'}}]))
+			self.assertEqual(state.occupied(backup), ['NRPT rule for .testdrestore'])
+
+	def test_self_test_refuses_a_host_that_already_has_integration(self):
+		host = FakeHost()
+		host.files = {state.files(host)[0]['path']: b'live route'}
+		with patch.object(state, 'Host', return_value=host), redirect_stdout(io.StringIO()):
+			problems = state.self_test('Linux')
+		self.assertTrue(any('already installed' in problem for problem in problems), problems)
+
 	def test_restore_targets_match_the_product(self):
 		"""The suite must restore the paths testd-setup writes, not a copy of them."""
 		setup = (ROOT / 'crates/testd-setup/src/lib.rs').read_text()
