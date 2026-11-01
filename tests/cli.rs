@@ -144,6 +144,16 @@ fn share_rejects_an_unknown_provider_before_asking_the_daemon() {
 }
 
 #[test]
+fn version_matches_the_package() {
+	let output = std::process::Command::new(env!("CARGO_BIN_EXE_testd"))
+		.arg("--version")
+		.output()
+		.unwrap();
+	assert!(output.status.success());
+	assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), concat!("testd ", env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
 fn doctor_missing_config_exits_1_with_json() {
 	let home = TempDir::new().unwrap();
 	let out = testd(home.path(), &["doctor", "--json"]);

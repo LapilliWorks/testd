@@ -22,14 +22,12 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use testd_core::config::{config_dir, write_private};
-use tokio::sync::{broadcast, oneshot, watch};
+use tokio::sync::{oneshot, watch};
 
 /// How long a request waits for an operator before the client is told it expired.
 pub const REQUEST_TTL: Duration = Duration::from_secs(120);
 /// Requests held at once, so an unauthenticated client cannot fill memory.
 const MAX_PENDING: usize = 32;
-/// Revocation ids kept for a listener that falls behind.
-const REVOCATION_DEPTH: usize = 32;
 /// Labels come from the client and are shown to the approver.
 const MAX_LABEL: usize = 120;
 /// Names one request may carry. A client cannot flood the approver.
@@ -109,8 +107,9 @@ pub struct Access {
 	state: Mutex<State>,
 	/// Waiting requests, published to frontends that show approval state.
 	changes: watch::Sender<Vec<PendingView>>,
-	/// Token ids published on revocation so live connections can be closed.
-	revocations: broadcast::Sender<String>,
+	/// Wake the engine to reconcile live connections against the token store.
+	/// Changes may coalesce, but no revoked credential can be missed.
+	revocations: watch::Sender<()>,
 }
 
 #[derive(Default)]
@@ -161,7 +160,7 @@ impl Access {
 			Err(e) => return Err(e),
 		};
 		let (changes, _) = watch::channel(Vec::new());
-		let (revocations, _) = broadcast::channel(REVOCATION_DEPTH);
+		let (revocations, _) = watch::channel(());
 		Ok(Self { path, state: Mutex::new(state), changes, revocations })
 	}
 
@@ -170,9 +169,18 @@ impl Access {
 		self.changes.subscribe()
 	}
 
-	/// Token ids as they are revoked. The engine closes their connections.
-	pub fn revocations(&self) -> broadcast::Receiver<String> {
+	/// Changes requiring the engine to reconcile its authenticated connections.
+	pub fn revocations(&self) -> watch::Receiver<()> {
 		self.revocations.subscribe()
+	}
+
+	pub fn has_token(&self, id: &str) -> bool {
+		self.state
+			.lock()
+			.expect("access lock poisoned")
+			.tokens
+			.iter()
+			.any(|token| token.id == id)
 	}
 
 	/// Queue a token request for the operator. The returned receiver resolves
@@ -343,8 +351,7 @@ impl Access {
 			return Err(format!("failed to save the token store: {e}"));
 		}
 		drop(state);
-		// Nobody listening only means no live connection used it.
-		let _ = self.revocations.send(id.to_owned());
+		self.revocations.send_replace(());
 		Ok(())
 	}
 
@@ -547,7 +554,8 @@ mod tests {
 		let mut revocations = access.revocations();
 
 		access.revoke(&issued.id).unwrap();
-		assert_eq!(revocations.recv().await.unwrap(), issued.id);
+		revocations.changed().await.unwrap();
+		assert!(!access.has_token(&issued.id));
 	}
 
 	#[tokio::test]

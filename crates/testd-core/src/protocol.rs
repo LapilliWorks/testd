@@ -58,7 +58,7 @@ pub enum Request {
 }
 
 /// Response sent from the host daemon back to the client.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Response {
 	Ok,
@@ -111,13 +111,68 @@ pub async fn send<W: AsyncWrite + Unpin>(writer: &mut W, msg: &impl Serialize) -
 	writer.flush().await
 }
 
+/// Maximum NDJSON frame, including its newline.
+pub const MAX_FRAME_BYTES: usize = 64 * 1024;
+
+/// Read one bounded line. Returns `None` on EOF; partial lines are refused.
+pub async fn read_line<R: AsyncBufRead + Unpin>(reader: &mut R, limit: usize) -> std::io::Result<Option<Vec<u8>>> {
+	let mut line = Vec::new();
+	if read_line_into(reader, &mut line, limit).await? { Ok(Some(line)) } else { Ok(None) }
+}
+
+/// Keep partial bytes in caller-owned state when the read can be cancelled.
+pub async fn read_line_into<R: AsyncBufRead + Unpin>(
+	reader: &mut R,
+	line: &mut Vec<u8>,
+	limit: usize,
+) -> std::io::Result<bool> {
+	loop {
+		let buffer = reader.fill_buf().await?;
+		if buffer.is_empty() {
+			return if line.is_empty() {
+				Ok(false)
+			} else {
+				Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "incomplete frame"))
+			};
+		}
+		let count = buffer
+			.iter()
+			.position(|byte| *byte == b'\n')
+			.map_or(buffer.len(), |index| index + 1);
+		if count > limit.saturating_sub(line.len()) {
+			return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "frame size limit exceeded"));
+		}
+		line.extend_from_slice(&buffer[..count]);
+		reader.consume(count);
+		if line.last() == Some(&b'\n') {
+			return Ok(true);
+		}
+	}
+}
+
 /// Read one JSON line and deserialize. Returns `None` on EOF.
 pub async fn recv<R: AsyncBufRead + Unpin, T: DeserializeOwned>(reader: &mut R) -> std::io::Result<Option<T>> {
-	let mut line = String::new();
-	let n = reader.read_line(&mut line).await?;
-	if n == 0 {
-		return Ok(None);
-	}
-	let msg = serde_json::from_str(&line).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+	let Some(line) = read_line(reader, MAX_FRAME_BYTES).await? else { return Ok(None) };
+	let msg = serde_json::from_slice(&line).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 	Ok(Some(msg))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn frames_are_bounded_and_newline_terminated() {
+		let mut reader = &b"1234\nnext\n"[..];
+		assert_eq!(read_line(&mut reader, 5).await.unwrap().unwrap(), b"1234\n");
+		assert!(read_line(&mut reader, 4).await.is_err());
+		assert!(read_line(&mut &b"partial"[..], 64).await.is_err());
+		assert!(read_line(&mut &b""[..], 64).await.unwrap().is_none());
+	}
+
+	#[tokio::test]
+	async fn oversized_authentication_is_refused() {
+		let bytes = vec![b'{'; MAX_FRAME_BYTES + 1];
+		assert!(recv::<_, Auth>(&mut bytes.as_slice()).await.is_err());
+	}
 }

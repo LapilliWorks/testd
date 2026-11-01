@@ -547,3 +547,130 @@ async fn the_loopback_dashboard_is_local_and_exposes_local_actions() {
 	let rebinding = http(harness.addr, &get("/", &[])).await;
 	assert!(rebinding.starts_with("HTTP/1.1 403"), "a foreign Host is refused: {rebinding}");
 }
+
+#[tokio::test]
+async fn silent_and_partial_authentication_connections_have_deadlines() {
+	use tokio::io::{AsyncReadExt, AsyncWriteExt};
+	let harness = start().await;
+	let mut silent = TcpStream::connect(harness.addr).await.unwrap();
+	let mut partial = TcpStream::connect(harness.addr).await.unwrap();
+	partial.write_all(b"{\"token\":").await.unwrap();
+	let check = async {
+		let mut byte = [0];
+		assert!(matches!(silent.read(&mut byte).await, Ok(0) | Err(_)));
+		assert!(matches!(partial.read(&mut byte).await, Ok(0) | Err(_)));
+	};
+	tokio::time::timeout(std::time::Duration::from_secs(12), check)
+		.await
+		.expect("intake deadlines");
+}
+
+#[tokio::test]
+async fn oversized_http_headers_are_refused() {
+	use tokio::io::{AsyncReadExt, AsyncWriteExt};
+	let harness = start().await;
+	let mut stream = TcpStream::connect(harness.addr).await.unwrap();
+	let head = format!("GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Large: {}\r\n\r\n", "a".repeat(40 * 1024));
+	stream.write_all(head.as_bytes()).await.unwrap();
+	let mut byte = [0];
+	let closed = tokio::time::timeout(std::time::Duration::from_secs(3), stream.read(&mut byte))
+		.await
+		.unwrap();
+	assert!(matches!(closed, Ok(0) | Err(_)));
+}
+
+async fn approved_leaf(harness: &Harness, names: &[&str]) -> (Client, testd_daemon::access::IssuedToken) {
+	let (mut leaf, request) = request_access(harness, "release-check", names).await;
+	let Approved::Token(token) = harness.access.approve(&request).unwrap() else { panic!("expected token") };
+	assert!(matches!(recv::<_, Response>(&mut leaf.reader).await.unwrap(), Some(Response::Token { .. })));
+	(leaf, token)
+}
+
+#[tokio::test]
+async fn revocation_bursts_cannot_leave_old_claims_alive() {
+	let harness = start().await;
+	let mut leaves = Vec::new();
+	for index in 0..40 {
+		let name = format!("app{index}");
+		let (mut leaf, token) = approved_leaf(&harness, &[&name]).await;
+		assert!(matches!(leaf.request(register(&name, "3000", false)).await, Response::Ok));
+		leaves.push((leaf, token));
+	}
+	/* No await: revocations coalesce before the engine gets scheduled again. */
+	for (_, token) in &leaves {
+		harness.access.revoke(&token.id).unwrap();
+	}
+	for (leaf, _) in &mut leaves {
+		let notice = tokio::time::timeout(std::time::Duration::from_secs(3), recv::<_, Response>(&mut leaf.reader))
+			.await
+			.expect("revocation notice")
+			.unwrap();
+		assert!(matches!(notice, Some(Response::GrantRevoked)), "{notice:?}");
+	}
+	assert!(harness.registrations.lock().await.snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn disconnect_during_a_name_request_cancels_even_a_pipelined_request() {
+	let harness = start().await;
+	let (mut leaf, _) = approved_leaf(&harness, &["app"]).await;
+	send(&mut leaf.writer, &register("api", "3000", false)).await.unwrap();
+	assert!(matches!(recv::<_, Response>(&mut leaf.reader).await.unwrap(), Some(Response::PendingGrant { .. })));
+	send(&mut leaf.writer, &register("app", "4000", false)).await.unwrap();
+	drop(leaf);
+	tokio::time::timeout(std::time::Duration::from_secs(3), async {
+		while !harness.access.pending().is_empty() {
+			tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("disconnected request is cancelled");
+	assert!(harness.registrations.lock().await.snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn approval_preserves_a_partially_received_pipelined_frame() {
+	use tokio::io::AsyncWriteExt;
+	let harness = start().await;
+	let (mut leaf, _) = approved_leaf(&harness, &["app"]).await;
+	send(&mut leaf.writer, &register("api", "3000", false)).await.unwrap();
+	let Some(Response::PendingGrant { id, .. }) = recv::<_, Response>(&mut leaf.reader).await.unwrap() else {
+		panic!("expected name request")
+	};
+	let frame = serde_json::to_vec(&register("app", "4000", false)).unwrap();
+	let middle = frame.len() / 2;
+	leaf.writer.write_all(&frame[..middle]).await.unwrap();
+	tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+	harness.access.approve(&id).unwrap();
+	assert!(matches!(recv::<_, Response>(&mut leaf.reader).await.unwrap(), Some(Response::Ok)));
+	leaf.writer.write_all(&frame[middle..]).await.unwrap();
+	leaf.writer.write_all(b"\n").await.unwrap();
+	let reply = tokio::time::timeout(std::time::Duration::from_secs(3), recv::<_, Response>(&mut leaf.reader))
+		.await
+		.expect("pipeline survives approval")
+		.unwrap();
+	assert!(matches!(reply, Some(Response::Ok)), "{reply:?}");
+}
+
+#[tokio::test]
+async fn oversized_authentication_closes_only_the_offending_connection() {
+	use tokio::io::{AsyncReadExt, AsyncWriteExt};
+	let harness = start().await;
+	let mut stream = TcpStream::connect(harness.addr).await.unwrap();
+	stream
+		.write_all(&vec![b'{'; testd_core::protocol::MAX_FRAME_BYTES + 1])
+		.await
+		.unwrap();
+	let mut byte = [0];
+	let closed = tokio::time::timeout(std::time::Duration::from_secs(3), stream.read(&mut byte))
+		.await
+		.unwrap();
+	assert!(matches!(closed, Ok(0) | Err(_)));
+	assert!(matches!(
+		Client::connect(harness.addr, &harness.token)
+			.await
+			.request(register("app", "3000", false))
+			.await,
+		Response::Ok
+	));
+}

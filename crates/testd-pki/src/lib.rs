@@ -8,8 +8,8 @@
 //! root key lives in an offline seed serves from `node.crt` / `node.key` alone
 //! and only needs `root.key` to recreate a lost intermediate.
 
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result};
 use rcgen::{
@@ -27,8 +27,14 @@ pub const LEAF_LIFETIME_HOURS: i64 = 24;
 /// The local certificate authority.
 pub struct Ca {
 	root_cert_pem: String,
-	node_cert_pem: String,
-	node_issuer: Issuer<'static, KeyPair>,
+	dir: PathBuf,
+	intermediate: Mutex<Intermediate>,
+}
+
+struct Intermediate {
+	cert_pem: String,
+	issuer: Issuer<'static, KeyPair>,
+	not_after: i64,
 }
 
 impl Ca {
@@ -84,7 +90,15 @@ impl Ca {
 			(cert_pem, issuer)
 		};
 
-		Ok(Self { root_cert_pem, node_cert_pem, node_issuer })
+		let not_after = certificate_expiry(&node_cert_pem)?;
+		let ca = Self {
+			root_cert_pem,
+			dir: dir.to_owned(),
+			intermediate: Mutex::new(Intermediate { cert_pem: node_cert_pem, issuer: node_issuer, not_after }),
+		};
+		/* Validate and renew before serving, including after a long shutdown. */
+		drop(ca.intermediate()?);
+		Ok(ca)
 	}
 
 	pub fn root_cert_pem(&self) -> &str {
@@ -98,29 +112,60 @@ impl Ca {
 
 	/// Mint a leaf for `hostname`, returning the PEM chain (leaf, intermediate).
 	pub fn mint_pem(&self, hostname: &str) -> Result<(String, String)> {
-		let (cert_pem, key) = self.mint(hostname)?;
-		let mut chain = cert_pem;
-		chain.push_str(&self.node_cert_pem);
+		let intermediate = self.intermediate()?;
+		let params = leaf_params(hostname)?;
+		let key = KeyPair::generate().context("generate leaf key")?;
+		let cert = params.signed_by(&key, &intermediate.issuer).context("sign leaf")?;
+		let chain = cert.pem() + &intermediate.cert_pem;
 		Ok((chain, key.serialize_pem()))
 	}
 
 	/// Mint a leaf for `hostname`, returning the DER chain and key for rustls.
 	pub fn mint_der(&self, hostname: &str) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+		let intermediate = self.intermediate()?;
 		let params = leaf_params(hostname)?;
 		let key = KeyPair::generate().context("generate leaf key")?;
-		let cert = params.signed_by(&key, &self.node_issuer).context("sign leaf")?;
+		let cert = params.signed_by(&key, &intermediate.issuer).context("sign leaf")?;
 
 		let leaf = cert.der().clone();
-		let intermediate = pem_to_der(&self.node_cert_pem)?;
+		let intermediate = pem_to_der(&intermediate.cert_pem)?;
 		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
 		Ok((vec![leaf, intermediate], key))
 	}
 
-	fn mint(&self, hostname: &str) -> Result<(String, KeyPair)> {
-		let params = leaf_params(hostname)?;
-		let key = KeyPair::generate().context("generate leaf key")?;
-		let cert = params.signed_by(&key, &self.node_issuer).context("sign leaf")?;
-		Ok((cert.pem(), key))
+	fn intermediate(&self) -> Result<MutexGuard<'_, Intermediate>> {
+		let mut intermediate = self.intermediate.lock().expect("CA lock poisoned");
+		let now = time::OffsetDateTime::now_utc().unix_timestamp();
+		let leaf_lifetime = LEAF_LIFETIME_HOURS * 3600;
+		anyhow::ensure!(
+			certificate_expiry(&self.root_cert_pem)? > now + leaf_lifetime,
+			"the local root has expired or is expiring; back up {}, reinitialize the PKI and reinstall root trust",
+			self.dir.display()
+		);
+		if intermediate.not_after <= now + leaf_lifetime * 2 {
+			let root_key = self.dir.join("root.key");
+			if root_key.exists() {
+				let key = KeyPair::from_pem(&std::fs::read_to_string(&root_key)?)?;
+				let root = Issuer::from_ca_cert_pem(&self.root_cert_pem, key)?;
+				/* Retain the signing key: renewal replaces only the certificate atomically. */
+				let key = KeyPair::from_pem(&intermediate.issuer.key().serialize_pem())?;
+				let renewed = generate_intermediate_with_key(&root, key)?;
+				backup_intermediate(&self.dir)?;
+				let path = self.dir.join("node.crt");
+				let temporary = self.dir.join("node.crt.new");
+				write_private(&temporary, renewed.0.as_bytes())?;
+				std::fs::rename(temporary, path).context("replace renewed intermediate")?;
+				*intermediate =
+					Intermediate { not_after: certificate_expiry(&renewed.0)?, cert_pem: renewed.0, issuer: renewed.1 };
+			} else {
+				anyhow::ensure!(
+					intermediate.not_after > now + leaf_lifetime,
+					"local intermediate expired or is expiring; restore {} and restart testd (or run testd doctor --fix)",
+					root_key.display()
+				);
+			}
+		}
+		Ok(intermediate)
 	}
 
 	/// Build a rustls `CertifiedKey` for `hostname`.
@@ -155,7 +200,13 @@ fn generate_root() -> Result<(String, Issuer<'static, KeyPair>)> {
 
 /// Generate a node intermediate signed by `root`.
 fn generate_intermediate(root: &Issuer<'_, KeyPair>) -> Result<(String, Issuer<'static, KeyPair>)> {
-	let key = KeyPair::generate().context("generate node key")?;
+	generate_intermediate_with_key(root, KeyPair::generate().context("generate node key")?)
+}
+
+fn generate_intermediate_with_key(
+	root: &Issuer<'_, KeyPair>,
+	key: KeyPair,
+) -> Result<(String, Issuer<'static, KeyPair>)> {
 	let mut params = CertificateParams::new(vec!["testd-intermediate".to_owned()])?;
 	params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
 	params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign, KeyUsagePurpose::DigitalSignature];
@@ -167,6 +218,41 @@ fn generate_intermediate(root: &Issuer<'_, KeyPair>) -> Result<(String, Issuer<'
 
 	let cert = params.signed_by(&key, root).context("sign node intermediate")?;
 	Ok((cert.pem(), Issuer::new(params, key)))
+}
+
+/// Inspect existing files without creating or modifying the CA.
+pub fn check_validity(dir: &Path) -> Result<()> {
+	let minimum = time::OffsetDateTime::now_utc().unix_timestamp() + LEAF_LIFETIME_HOURS * 3600;
+	for name in ["root.crt", "node.crt"] {
+		let path = dir.join(name);
+		let pem = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+		anyhow::ensure!(
+			certificate_expiry(&pem)? > minimum,
+			"{} is expired or expiring; run testd doctor --fix and restart the daemon; restore root.key if needed",
+			path.display()
+		);
+	}
+	Ok(())
+}
+
+fn certificate_expiry(pem: &str) -> Result<i64> {
+	let der = pem_to_der(pem)?;
+	let (_, cert) = x509_parser::parse_x509_certificate(der.as_ref())
+		.map_err(|error| anyhow::anyhow!("parse CA validity: {error}"))?;
+	Ok(cert.validity().not_after.timestamp())
+}
+
+fn backup_intermediate(dir: &Path) -> Result<()> {
+	let timestamp = time::OffsetDateTime::now_utc().unix_timestamp_nanos();
+	let backup = dir.join("backups").join(timestamp.to_string());
+	std::fs::create_dir_all(&backup)?;
+	for name in ["node.crt", "node.key"] {
+		let path = dir.join(name);
+		if path.exists() {
+			write_private(&backup.join(name), &std::fs::read(path)?)?;
+		}
+	}
+	Ok(())
 }
 
 fn leaf_params(hostname: &str) -> Result<CertificateParams> {
@@ -398,6 +484,55 @@ mod tests {
 		std::fs::remove_dir_all(&dir).ok();
 	}
 
+	#[test]
+	fn renews_an_expired_intermediate_without_changing_root_trust() {
+		let dir = tempfile::tempdir().unwrap();
+		let ca = Ca::load_or_init(dir.path()).unwrap();
+		let root = ca.root_cert_pem().to_owned();
+		let old_cert = ca.intermediate.lock().unwrap().cert_pem.clone();
+		ca.intermediate.lock().unwrap().not_after = 0;
+		ca.mint_der("app.test").unwrap();
+		assert_eq!(ca.root_cert_pem(), root);
+		assert_ne!(ca.intermediate.lock().unwrap().cert_pem, old_cert);
+		let backups = std::fs::read_dir(dir.path().join("backups")).unwrap().collect::<Vec<_>>();
+		assert_eq!(backups.len(), 1);
+		let saved = backups[0].as_ref().unwrap().path();
+		assert_eq!(std::fs::read_to_string(saved.join("node.crt")).unwrap(), old_cert);
+		Ca::load_or_init(dir.path()).unwrap().mint_der("app.test").unwrap();
+	}
+
+	#[test]
+	fn expiry_without_the_root_key_has_an_actionable_error() {
+		let dir = tempfile::tempdir().unwrap();
+		let ca = Ca::load_or_init(dir.path()).unwrap();
+		std::fs::remove_file(dir.path().join("root.key")).unwrap();
+		ca.intermediate.lock().unwrap().not_after = 0;
+		let error = ca.mint_der("app.test").unwrap_err().to_string();
+		assert!(error.contains("restore") && error.contains("root.key"), "{error}");
+	}
+
+	#[test]
+	fn startup_renews_an_expired_certificate_on_disk() {
+		let dir = tempfile::tempdir().unwrap();
+		let ca = Ca::load_or_init(dir.path()).unwrap();
+		let root_key = KeyPair::from_pem(&std::fs::read_to_string(dir.path().join("root.key")).unwrap()).unwrap();
+		let root = Issuer::from_ca_cert_pem(ca.root_cert_pem(), root_key).unwrap();
+		let key = KeyPair::from_pem(&std::fs::read_to_string(dir.path().join("node.key")).unwrap()).unwrap();
+		let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+		params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+		params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+		params.not_before = time::OffsetDateTime::now_utc() - time::Duration::days(2);
+		params.not_after = time::OffsetDateTime::now_utc() - time::Duration::days(1);
+		let expired = params.signed_by(&key, &root).unwrap().pem();
+		write_private(&dir.path().join("node.crt"), expired.as_bytes()).unwrap();
+		assert!(check_validity(dir.path()).is_err());
+		let renewed = Ca::load_or_init(dir.path()).unwrap();
+		assert_eq!(renewed.root_cert_pem(), ca.root_cert_pem());
+		check_validity(dir.path()).unwrap();
+		renewed.mint_der("app.test").unwrap();
+	}
+
+	#[cfg(unix)]
 	#[test]
 	fn secrets_are_private() {
 		use std::os::unix::fs::PermissionsExt;

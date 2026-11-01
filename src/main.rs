@@ -10,7 +10,7 @@ use testd_daemon::health::{self, Action};
 use testd_setup::Elevation;
 
 #[derive(Parser)]
-#[command(name = "testd", about = "Local dev domain manager")]
+#[command(name = "testd", version, about = "Local dev domain manager")]
 struct Cli {
 	#[command(subcommand)]
 	command: Command,
@@ -660,7 +660,22 @@ async fn doctor(fix: bool, json: bool) -> anyhow::Result<i32> {
 		}
 	}
 
-	let pki_dir = config_dir().join("pki");
+	let pki_dir = config.pki_dir.clone();
+	if config.edge_enabled {
+		let validity =
+			if fix { testd_pki::Ca::load_or_init(&pki_dir).map(|_| ()) } else { testd_pki::check_validity(&pki_dir) };
+		match validity {
+			Ok(()) => checks.push(Check::ok("pki", "root and intermediate can issue a valid leaf".into())),
+			Err(error) => {
+				exit = exit.max(3);
+				checks.push(Check::fail(
+					"pki",
+					format!("{error:#}"),
+					"run `testd doctor --fix`; restore root.key if needed",
+				));
+			},
+		}
+	}
 	let root_cert = pki_dir.join("root.crt");
 	let root_pem = std::fs::read_to_string(&root_cert).ok();
 	match &root_pem {

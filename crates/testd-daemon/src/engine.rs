@@ -3,15 +3,16 @@
 //! A client authenticates with the host's operator secret, or with the
 //! daemon's loopback control token for local supervised launches.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tokio::io::{AsyncBufRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
+use std::time::Duration;
 
 use testd_core::Registration;
 use testd_core::config::HostConfig;
@@ -26,6 +27,11 @@ use crate::resolver::Resolver;
 
 /// Replies buffered for one connection before its writer task stalls the caller.
 const OUTBOX_DEPTH: usize = 16;
+/// Idle authenticated connections remain valid; setup and writes are bounded.
+const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_INTAKE_CONNECTIONS: usize = 256;
 
 /// Event emitted when the registration set changes.
 #[derive(Debug, Clone)]
@@ -116,6 +122,7 @@ impl HostEngine {
 		let (operator_tx, mut operator_rx) = mpsc::channel::<OperatorRequest>(16);
 		let mut revocations = self.access.revocations();
 		let connections = Arc::new(Connections::default());
+		let capacity = Arc::new(tokio::sync::Semaphore::new(MAX_INTAKE_CONNECTIONS));
 
 		let http_ctx = Arc::new(HttpContext {
 			tld: self.config.tld.clone(),
@@ -146,10 +153,15 @@ impl HostEngine {
 			tokio::select! {
 				result = listener.accept() => {
 					let (stream, addr) = result?;
+					let Ok(permit) = Arc::clone(&capacity).try_acquire_owned() else {
+						eprintln!("[warn]   intake connection limit reached: {}", addr.ip());
+						continue;
+					};
 					let shared = shared.clone();
 					let http_ctx = http_ctx.clone();
 
 					tokio::spawn(async move {
+						let _permit = permit;
 						if let Err(e) = dispatch(stream, addr, shared, http_ctx).await {
 							eprintln!("[error]  {}: {e}", addr.ip());
 						}
@@ -162,9 +174,13 @@ impl HostEngine {
 					};
 					let _ = request.respond.send(result);
 				}
-				id = revoked_token(&mut revocations) => {
-					// Covers every revocation path, including `testd tokens`.
-					close_grant(&shared, &id).await;
+				changed = revocations.changed() => {
+					changed.map_err(io::Error::other)?;
+					for grant in shared.connections.grants() {
+						if !shared.access.has_token(&grant) {
+							close_grant(&shared, &grant).await;
+						}
+					}
 				}
 			}
 		}
@@ -204,12 +220,8 @@ async fn stop_leaf(shared: &Shared, fqdn: &str) -> Result<(), String> {
 	}
 	// Tell the owner so it stops instead of reconnecting. The credential is
 	// untouched, so a later run publishes the names again.
-	if let Some(out) = shared.connections.outbox(connection) {
-		let notice = Response::Stopped { domain: fqdn.to_owned() };
-		// Best effort: a stalled client must not stall the daemon.
-		if out.try_send(Outbound::Reply(notice)).is_err() {
-			eprintln!("[warn]   connection {connection} could not be told to stop");
-		}
+	if let Some(connection) = shared.connections.take(connection) {
+		connection.close(Some(Response::Stopped { domain: fqdn.to_owned() }));
 	}
 	apply(shared)
 		.await
@@ -256,8 +268,11 @@ async fn delete_grant(shared: &Shared, fqdn: &str) -> Result<(), String> {
 		&& let Some(out) = shared.connections.outbox(claim.connection)
 	{
 		let notice = Response::NameRevoked { domain: fqdn.to_owned() };
-		if out.try_send(Outbound::Reply(notice)).is_err() {
-			eprintln!("[warn]   connection {} could not be told that {fqdn} lost its grant", claim.connection);
+		if out.try_send(notice).is_err() {
+			/* A stalled leaf cannot hold up deletion; its other grants remain valid on reconnect. */
+			if let Some(connection) = shared.connections.take(claim.connection) {
+				connection.close(None);
+			}
 		}
 	}
 	apply(shared)
@@ -276,39 +291,19 @@ async fn close_grant(shared: &Shared, grant: &str) {
 	{
 		let mut registrations = shared.registrations.lock().await;
 		for connection in shared.connections.with_token(grant) {
-			if let Some(out) = shared.connections.take(connection) {
-				closing.push((connection, out));
+			if let Some(closing_connection) = shared.connections.take(connection) {
+				closing.push(closing_connection);
 			}
 			for registration in registrations.release(connection) {
 				eprintln!("[evict]  {} (grant deleted)", registration.domain);
 			}
 		}
 	}
-	for (connection, out) in closing {
-		// Tell the leaf why, when the queue has room, then end the connection.
-		if out.try_send(Outbound::Close(Some(Response::GrantRevoked))).is_err() {
-			eprintln!(
-				"[warn]   connection {connection} could not be closed after its grant was deleted; it ends on its own"
-			);
-		}
+	for connection in closing {
+		connection.close(Some(Response::GrantRevoked));
 	}
 	if let Err(e) = apply(shared).await {
 		eprintln!("[error]  grant deletion could not update the edge: {e}");
-	}
-}
-
-/// Wait for the next revoked token id. A lagged listener has already missed
-/// ids, whose connections then linger until they disconnect on their own.
-async fn revoked_token(revocations: &mut broadcast::Receiver<String>) -> String {
-	loop {
-		match revocations.recv().await {
-			Ok(id) => return id,
-			Err(broadcast::error::RecvError::Lagged(skipped)) => {
-				eprintln!("[warn]   missed {skipped} token revocations; affected connections may linger");
-			},
-			// The access store outlives the engine; wait instead of spinning.
-			Err(broadcast::error::RecvError::Closed) => std::future::pending::<()>().await,
-		}
 	}
 }
 
@@ -328,18 +323,24 @@ struct Shared {
 	connections: Arc<Connections>,
 }
 
-/// What the connection's writer task should do next.
-enum Outbound {
-	Reply(Response),
-	/// Send the notice when there is one, then shut the write side down so the
-	/// peer sees the connection end.
-	Close(Option<Response>),
+/// Closure is independent of the bounded reply queue and preempts stalled I/O.
+#[derive(Clone)]
+enum ConnectionState {
+	Open,
+	Closing { notice: Option<Response> },
 }
 
 struct Connection {
 	/// The issued token that authorizes this connection, if it has one.
 	grant: Option<String>,
-	out: mpsc::Sender<Outbound>,
+	out: mpsc::Sender<Response>,
+	closing: watch::Sender<ConnectionState>,
+}
+
+impl Connection {
+	fn close(self, notice: Option<Response>) {
+		self.closing.send_replace(ConnectionState::Closing { notice });
+	}
 }
 
 /// Connections reachable from the dashboard, keyed by connection id.
@@ -352,24 +353,34 @@ pub struct Connections {
 }
 
 impl Connections {
-	fn add(&self, id: u64, grant: Option<String>, out: mpsc::Sender<Outbound>) {
+	fn add(
+		&self,
+		id: u64,
+		grant: Option<String>,
+		out: mpsc::Sender<Response>,
+		closing: watch::Sender<ConnectionState>,
+	) {
 		self.inner
 			.lock()
 			.expect("connection map poisoned")
-			.insert(id, Connection { grant, out });
+			.insert(id, Connection { grant, out, closing });
 	}
 
 	fn remove(&self, id: u64) {
 		self.inner.lock().expect("connection map poisoned").remove(&id);
 	}
 
-	/// Take a connection out of the map, returning its outbox.
-	fn take(&self, id: u64) -> Option<mpsc::Sender<Outbound>> {
+	fn take(&self, id: u64) -> Option<Connection> {
+		self.inner.lock().expect("connection map poisoned").remove(&id)
+	}
+
+	fn grants(&self) -> HashSet<String> {
 		self.inner
 			.lock()
 			.expect("connection map poisoned")
-			.remove(&id)
-			.map(|connection| connection.out)
+			.values()
+			.filter_map(|entry| entry.grant.clone())
+			.collect()
 	}
 
 	/// Ids of the connections admitted with a given issued token.
@@ -383,7 +394,7 @@ impl Connections {
 			.collect()
 	}
 
-	fn outbox(&self, id: u64) -> Option<mpsc::Sender<Outbound>> {
+	fn outbox(&self, id: u64) -> Option<mpsc::Sender<Response>> {
 		let inner = self.inner.lock().expect("connection map poisoned");
 		inner.get(&id).map(|connection| connection.out.clone())
 	}
@@ -440,7 +451,9 @@ async fn dispatch(
 	sock_ref.set_tcp_keepalive(&keepalive).ok();
 
 	let mut first = [0u8; 1];
-	stream.read_exact(&mut first).await?;
+	tokio::time::timeout(AUTH_TIMEOUT, stream.read_exact(&mut first))
+		.await
+		.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "intake greeting timed out"))??;
 	let peeked = PeekedStream::new(first[0], stream);
 
 	if first[0] == b'{' {
@@ -457,10 +470,14 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 
 	// The writer lives in its own task so the operator can reach the client at
 	// any time, not only in reply to a request.
-	let (out, outbox) = mpsc::channel::<Outbound>(OUTBOX_DEPTH);
-	let writer = tokio::spawn(write_outbox(writer, outbox));
+	let (out, outbox) = mpsc::channel::<Response>(OUTBOX_DEPTH);
+	let (closing, mut closing_rx) = watch::channel(ConnectionState::Open);
+	let writer = tokio::spawn(write_outbox(writer, outbox, closing_rx.clone(), closing.clone()));
 
-	let auth_msg: Auth = match recv(&mut reader).await? {
+	let auth_msg: Auth = match tokio::time::timeout(AUTH_TIMEOUT, recv(&mut reader))
+		.await
+		.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "authentication frame timed out"))??
+	{
 		Some(a) => a,
 		None => return Ok(()),
 	};
@@ -492,141 +509,155 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 
 	let connection = shared.registrations.lock().await.connection_id();
 	let grant = credential.issued();
-	shared.connections.add(connection, grant.clone(), out.clone());
+	shared.connections.add(connection, grant.clone(), out.clone(), closing.clone());
 	let guard = ConnectionGuard { connections: Arc::clone(&shared.connections), connection };
+	/* Authentication can race revocation before this connection enters the map. */
+	if grant.as_ref().is_some_and(|id| !shared.access.has_token(id)) {
+		closing.send_replace(ConnectionState::Closing { notice: Some(Response::GrantRevoked) });
+	}
 
-	loop {
-		let request: Request = match recv(&mut reader).await {
-			Ok(Some(r)) => r,
-			_ => break,
-		};
+	let mut reader = RequestReader { reader, frame: Vec::new(), deferred: VecDeque::new() };
+	let processing = async {
+		loop {
+			let request: Request = match reader.next().await {
+				Ok(Some(r)) => r,
+				_ => break,
+			};
 
-		match request {
-			Request::Register { domain, target, force } => {
-				let domain = validate::normalize_bare_domain(&domain, &shared.tld);
-				if let Err(message) = validate::validate_domain(&domain, &shared.tld) {
-					if reply(&out, Response::Error { message }).await.is_err() {
-						break;
-					}
-					continue;
-				}
-				if let Err(message) = validate::validate_target(&target) {
-					if reply(&out, Response::Error { message }).await.is_err() {
-						break;
-					}
-					continue;
-				}
-
-				let fqdn = format!("{domain}.{}", shared.tld);
-				// The dashboard's own name is never registrable, so refuse it
-				// before asking the operator for a grant.
-				let reserved = [format!("testd.{}", shared.tld)];
-				if reserved.iter().any(|name| name == &fqdn) {
-					let message = format!("{fqdn} is a reserved name.");
-					if reply(&out, Response::Error { message }).await.is_err() {
-						break;
-					}
-					continue;
-				}
-				// A leaf on the operator secret is trusted; an issued token only
-				// covers the names the operator granted it.
-				if let Some(grant) = &grant
-					&& !shared.access.allows(grant, &fqdn)
-					&& !request_name_grant(&shared, grant, &fqdn, addr, &out).await?
-				{
-					continue;
-				}
-				// Bare port → prepend client IP. Full host:port → use as-is.
-				let target = if target.contains(':') { target } else { format!("{}:{target}", addr.ip()) };
-				let registration = Registration { domain: fqdn.clone(), target: target.clone() };
-
-				let reserved: Vec<&str> = reserved.iter().map(String::as_str).collect();
-				let result =
-					shared
-						.registrations
-						.lock()
-						.await
-						.register(connection, registration.clone(), force, &reserved);
-
-				match result {
-					Err(RegisterError::Duplicate { owner }) => {
-						let message =
-							format!("{fqdn} is already registered by connection {owner}. Use --force to take it over.");
-						eprintln!("[warn]   {message}");
+			match request {
+				Request::Register { domain, target, force } => {
+					let domain = validate::normalize_bare_domain(&domain, &shared.tld);
+					if let Err(message) = validate::validate_domain(&domain, &shared.tld) {
 						if reply(&out, Response::Error { message }).await.is_err() {
 							break;
 						}
-					},
-					Err(RegisterError::Reserved) => {
+						continue;
+					}
+					if let Err(message) = validate::validate_target(&target) {
+						if reply(&out, Response::Error { message }).await.is_err() {
+							break;
+						}
+						continue;
+					}
+
+					let fqdn = format!("{domain}.{}", shared.tld);
+					// The dashboard's own name is never registrable, so refuse it
+					// before asking the operator for a grant.
+					let reserved = [format!("testd.{}", shared.tld)];
+					if reserved.iter().any(|name| name == &fqdn) {
 						let message = format!("{fqdn} is a reserved name.");
 						if reply(&out, Response::Error { message }).await.is_err() {
 							break;
 						}
-					},
-					Ok(registered) => {
-						ensure_resolver_for(&shared, addr).await;
-						if let Err(e) = apply(&shared).await {
-							let mut regs = shared.registrations.lock().await;
-							regs.restore(connection, &fqdn, registered.displaced);
-							drop(regs);
-							let _ = apply(&shared).await;
-							eprintln!("[error]  {fqdn} apply failed: {e}");
-							if reply(&out, Response::Error { message: format!("{e}") }).await.is_err() {
+						continue;
+					}
+					// A leaf on the operator secret is trusted; an issued token only
+					// covers the names the operator granted it.
+					if let Some(grant) = &grant
+						&& !shared.access.allows(grant, &fqdn)
+						&& !request_name_grant(&shared, grant, &fqdn, addr, &mut reader, &out).await?
+					{
+						continue;
+					}
+					// Bare port → prepend client IP. Full host:port → use as-is.
+					let target = if target.contains(':') { target } else { format!("{}:{target}", addr.ip()) };
+					let registration = Registration { domain: fqdn.clone(), target: target.clone() };
+
+					let reserved: Vec<&str> = reserved.iter().map(String::as_str).collect();
+					let result =
+						shared
+							.registrations
+							.lock()
+							.await
+							.register(connection, registration.clone(), force, &reserved);
+
+					match result {
+						Err(RegisterError::Duplicate { owner }) => {
+							let message = format!(
+								"{fqdn} is already registered by connection {owner}. Use --force to take it over."
+							);
+							eprintln!("[warn]   {message}");
+							if reply(&out, Response::Error { message }).await.is_err() {
 								break;
 							}
-						} else {
-							if validate::is_single_label(&domain) {
-								eprintln!("[warn]   {fqdn}: {}", validate::SINGLE_LABEL_HINT);
-							}
-							eprintln!("[reg]    {fqdn} -> {target}");
-							if reply(&out, Response::Ok).await.is_err() {
+						},
+						Err(RegisterError::Reserved) => {
+							let message = format!("{fqdn} is a reserved name.");
+							if reply(&out, Response::Error { message }).await.is_err() {
 								break;
 							}
+						},
+						Ok(registered) => {
+							ensure_resolver_for(&shared, addr).await;
+							if let Err(e) = apply(&shared).await {
+								let mut regs = shared.registrations.lock().await;
+								regs.restore(connection, &fqdn, registered.displaced);
+								drop(regs);
+								let _ = apply(&shared).await;
+								eprintln!("[error]  {fqdn} apply failed: {e}");
+								if reply(&out, Response::Error { message: format!("{e}") }).await.is_err() {
+									break;
+								}
+							} else {
+								if validate::is_single_label(&domain) {
+									eprintln!("[warn]   {fqdn}: {}", validate::SINGLE_LABEL_HINT);
+								}
+								eprintln!("[reg]    {fqdn} -> {target}");
+								if reply(&out, Response::Ok).await.is_err() {
+									break;
+								}
+							}
+						},
+					}
+				},
+				Request::Deregister { domain } => {
+					let domain = validate::normalize_bare_domain(&domain, &shared.tld);
+					if let Err(message) = validate::validate_domain(&domain, &shared.tld) {
+						if reply(&out, Response::Error { message }).await.is_err() {
+							break;
 						}
-					},
-				}
-			},
-			Request::Deregister { domain } => {
-				let domain = validate::normalize_bare_domain(&domain, &shared.tld);
-				if let Err(message) = validate::validate_domain(&domain, &shared.tld) {
-					if reply(&out, Response::Error { message }).await.is_err() {
+						continue;
+					}
+
+					let fqdn = format!("{domain}.{}", shared.tld);
+					let removed = shared.registrations.lock().await.deregister(connection, &fqdn);
+
+					let error = match removed {
+						Ok(registration) => match apply(&shared).await {
+							Ok(()) => {
+								eprintln!("[dereg]  {fqdn}");
+								if reply(&out, Response::Ok).await.is_err() {
+									break;
+								}
+								continue;
+							},
+							Err(e) => {
+								// Restore the entry if it could not be unpublished.
+								let mut regs = shared.registrations.lock().await;
+								regs.register(connection, registration.clone(), true, &[]).ok();
+								drop(regs);
+								let _ = apply(&shared).await;
+								eprintln!("[error]  {fqdn} apply failed: {e}");
+								format!("{e}")
+							},
+						},
+						Err(DeregisterError::NotFound) => format!("{fqdn} is not registered."),
+						Err(DeregisterError::NotOwner { owner }) => format!("{fqdn} is owned by connection {owner}."),
+					};
+
+					if reply(&out, Response::Error { message: error }).await.is_err() {
 						break;
 					}
-					continue;
-				}
-
-				let fqdn = format!("{domain}.{}", shared.tld);
-				let removed = shared.registrations.lock().await.deregister(connection, &fqdn);
-
-				let error = match removed {
-					Ok(registration) => match apply(&shared).await {
-						Ok(()) => {
-							eprintln!("[dereg]  {fqdn}");
-							if reply(&out, Response::Ok).await.is_err() {
-								break;
-							}
-							continue;
-						},
-						Err(e) => {
-							// Restore the entry if it could not be unpublished.
-							let mut regs = shared.registrations.lock().await;
-							regs.register(connection, registration.clone(), true, &[]).ok();
-							drop(regs);
-							let _ = apply(&shared).await;
-							eprintln!("[error]  {fqdn} apply failed: {e}");
-							format!("{e}")
-						},
-					},
-					Err(DeregisterError::NotFound) => format!("{fqdn} is not registered."),
-					Err(DeregisterError::NotOwner { owner }) => format!("{fqdn} is owned by connection {owner}."),
-				};
-
-				if reply(&out, Response::Error { message: error }).await.is_err() {
-					break;
-				}
-			},
+				},
+			}
 		}
-	}
+		Ok::<_, io::Error>(())
+	};
+	let result = tokio::select! {
+		biased;
+		_ = wait_for_close(&mut closing_rx) => Ok(()),
+		result = processing => result,
+	};
 
 	// Connection closed: evict only the claims this connection owns.
 	let evicted = shared.registrations.lock().await.release(connection);
@@ -642,36 +673,56 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 	drop(guard);
 	drop(out);
 	let _ = writer.await;
-	Ok(())
+	result
 }
 
-/// Drain one connection's outbox. Closes the write side when the engine asks
-/// for the connection to end.
-async fn write_outbox<W: AsyncWrite + Unpin>(mut writer: W, mut outbox: mpsc::Receiver<Outbound>) {
-	while let Some(out) = outbox.recv().await {
-		match out {
-			Outbound::Reply(response) => {
-				if send(&mut writer, &response).await.is_err() {
-					return;
-				}
-			},
-			Outbound::Close(notice) => {
-				if let Some(notice) = notice
-					&& send(&mut writer, &notice).await.is_err()
-				{
-					return;
-				}
-				let _ = writer.shutdown().await;
-				return;
-			},
+async fn wait_for_close(closing: &mut watch::Receiver<ConnectionState>) -> Option<Response> {
+	loop {
+		if let ConnectionState::Closing { notice } = closing.borrow_and_update().clone() {
+			return notice;
+		}
+		if closing.changed().await.is_err() {
+			/* Ordinary disconnects drain queued replies when the sender is dropped. */
+			std::future::pending::<()>().await;
 		}
 	}
 }
 
-/// Queue one reply. Fails when the writer task is gone.
-async fn reply(out: &mpsc::Sender<Outbound>, response: Response) -> io::Result<()> {
-	out.send(Outbound::Reply(response))
+async fn write_outbox<W: AsyncWrite + Unpin>(
+	mut writer: W,
+	mut outbox: mpsc::Receiver<Response>,
+	mut closing: watch::Receiver<ConnectionState>,
+	closing_signal: watch::Sender<ConnectionState>,
+) {
+	let notice = tokio::select! {
+		biased;
+		notice = wait_for_close(&mut closing) => notice,
+		_ = async {
+			while let Some(response) = outbox.recv().await {
+				if !matches!(tokio::time::timeout(WRITE_TIMEOUT, send(&mut writer, &response)).await, Ok(Ok(()))) {
+					break;
+				}
+			}
+		} => {
+			closing_signal.send_replace(ConnectionState::Closing { notice: None });
+			None
+		},
+	};
+	/* Closure delivery is best effort; dropping both halves is unconditional. */
+	let _ = tokio::time::timeout(CLOSE_TIMEOUT, async {
+		if let Some(notice) = notice {
+			let _ = send(&mut writer, &notice).await;
+		}
+		let _ = writer.shutdown().await;
+	})
+	.await;
+}
+
+/// Queue one reply without letting a stalled peer trap its reader task.
+async fn reply(out: &mpsc::Sender<Response>, response: Response) -> io::Result<()> {
+	tokio::time::timeout(WRITE_TIMEOUT, out.send(response))
 		.await
+		.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "reply queue stalled"))?
 		.map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "connection closed"))
 }
 
@@ -722,7 +773,7 @@ async fn request_access<R>(
 	request: TokenRequest,
 	addr: SocketAddr,
 	reader: &mut R,
-	out: &mpsc::Sender<Outbound>,
+	out: &mpsc::Sender<Response>,
 ) -> io::Result<Option<IssuedToken>>
 where
 	R: AsyncBufRead + Unpin,
@@ -793,12 +844,13 @@ where
 /// Ask the operator for a grant on one name and wait for the answer. The
 /// register request that triggered it stays open until the operator decides or
 /// the request expires.
-async fn request_name_grant(
+async fn request_name_grant<R: AsyncBufRead + Unpin>(
 	shared: &Shared,
 	grant: &str,
 	fqdn: &str,
 	addr: SocketAddr,
-	out: &mpsc::Sender<Outbound>,
+	reader: &mut RequestReader<R>,
+	out: &mpsc::Sender<Response>,
 ) -> io::Result<bool> {
 	let (id, mut decision) = match shared.access.request_name(grant, fqdn, &addr.to_string()) {
 		Ok(waiting) => waiting,
@@ -813,6 +865,10 @@ async fn request_name_grant(
 
 	let outcome = tokio::select! {
 		decision = &mut decision => decision.ok(),
+		closed = reader.buffer_until_disconnect() => {
+			closed?;
+			return Ok(false);
+		},
 		_ = tokio::time::sleep(crate::access::REQUEST_TTL) => None,
 	};
 	match outcome {
@@ -837,6 +893,56 @@ async fn request_name_grant(
 			eprintln!("[auth]   {} grant request for {fqdn} expired ({id})", addr.ip());
 			Ok(false)
 		},
+	}
+}
+
+/// Partial frames survive cancellation when a grant decision interrupts reads.
+struct RequestReader<R> {
+	reader: R,
+	frame: Vec<u8>,
+	deferred: VecDeque<Request>,
+}
+
+impl<R: AsyncBufRead + Unpin> RequestReader<R> {
+	async fn next(&mut self) -> io::Result<Option<Request>> {
+		match self.deferred.pop_front() {
+			Some(request) => Ok(Some(request)),
+			None => self.read().await,
+		}
+	}
+
+	async fn read(&mut self) -> io::Result<Option<Request>> {
+		/* Idle leaves keep their claims; started frames have a deadline. */
+		if self.frame.is_empty() && self.reader.fill_buf().await?.is_empty() {
+			return Ok(None);
+		}
+		let complete = tokio::time::timeout(
+			AUTH_TIMEOUT,
+			testd_core::protocol::read_line_into(
+				&mut self.reader,
+				&mut self.frame,
+				testd_core::protocol::MAX_FRAME_BYTES,
+			),
+		)
+		.await
+		.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "request frame timed out"))??;
+		if !complete {
+			return Ok(None);
+		}
+		let request = serde_json::from_slice(&self.frame).map_err(io::Error::other)?;
+		self.frame.clear();
+		Ok(Some(request))
+	}
+
+	/// Detect EOF during approval while preserving a bounded pipeline.
+	async fn buffer_until_disconnect(&mut self) -> io::Result<()> {
+		while let Some(request) = self.read().await? {
+			if self.deferred.len() >= OUTBOX_DEPTH {
+				return Err(io::Error::new(io::ErrorKind::InvalidData, "too many pipelined requests"));
+			}
+			self.deferred.push_back(request);
+		}
+		Ok(())
 	}
 }
 
@@ -868,4 +974,27 @@ async fn apply(shared: &Shared) -> io::Result<()> {
 	let _ = shared.event_tx.send(EngineEvent::Changed(regs));
 	let _ = shared.answer_addr;
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn closure_preempts_a_full_reply_queue_and_a_blocked_writer() {
+		let (writer, _unread_peer) = tokio::io::duplex(1);
+		let (out, outbox) = mpsc::channel(OUTBOX_DEPTH);
+		let (closing, receiver) = watch::channel(ConnectionState::Open);
+		for _ in 0..OUTBOX_DEPTH {
+			out.try_send(Response::Ok).unwrap();
+		}
+		let task = tokio::spawn(write_outbox(writer, outbox, receiver, closing.clone()));
+		tokio::task::yield_now().await;
+		closing.send_replace(ConnectionState::Closing { notice: Some(Response::GrantRevoked) });
+		tokio::time::timeout(CLOSE_TIMEOUT + Duration::from_secs(1), task)
+			.await
+			.expect("closure bypasses the reply queue")
+			.unwrap();
+		assert!(out.is_closed());
+	}
 }

@@ -8,7 +8,7 @@ use std::task::{Context, Poll};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
 use tokio::net::TcpStream;
 
 use testd_core::Registration;
@@ -18,7 +18,6 @@ use crate::engine::{Connections, OperatorAction, OperatorRequest};
 use crate::launch::LaunchBook;
 use crate::registry::Claim;
 
-#[cfg(debug_assertions)]
 #[cfg(debug_assertions)]
 const DASHBOARD_TEMPLATE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/dashboard.html");
 
@@ -41,6 +40,8 @@ pub struct HttpContext {
 
 /// Launch definitions, JSON mutations, and certificate output all fit.
 const MAX_BODY: usize = 256 * 1024;
+const MAX_HEAD: usize = 32 * 1024;
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// A custom header cannot be sent by a cross-site form and forces a CORS
 /// preflight, which this server does not grant.
 const REQUEST_HEADER: &str = "x-testd-request";
@@ -60,20 +61,19 @@ where
 	let (reader, mut writer) = tokio::io::split(stream);
 	let mut reader = BufReader::new(reader);
 
-	let mut request_line = String::new();
-	if reader.read_line(&mut request_line).await? == 0 {
-		return Ok(());
-	}
+	let deadline = tokio::time::Instant::now() + REQUEST_TIMEOUT;
+	let Some(request_line) = read_http_line(&mut reader, 8 * 1024, deadline).await? else { return Ok(()) };
 	let mut parts = request_line.split_whitespace();
 	let method = parts.next().unwrap_or("").to_owned();
 	let target = parts.next().unwrap_or("/").to_owned();
 
 	let mut headers: Vec<(String, String)> = Vec::new();
+	let mut remaining = MAX_HEAD.saturating_sub(request_line.len());
 	loop {
-		let mut line = String::new();
-		if reader.read_line(&mut line).await? == 0 {
-			break;
-		}
+		let line = read_http_line(&mut reader, remaining, deadline)
+			.await?
+			.ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "incomplete HTTP headers"))?;
+		remaining -= line.len();
 		let line = line.trim_end();
 		if line.is_empty() {
 			break;
@@ -100,7 +100,13 @@ where
 		return respond(&mut writer, "403 Forbidden", "text/plain", b"A dashboard request header is required.").await;
 	}
 
-	let body = if method == "POST" { read_body(&mut reader, &headers).await? } else { Vec::new() };
+	let body = if method == "POST" {
+		tokio::time::timeout(REQUEST_TIMEOUT, read_body(&mut reader, &headers))
+			.await
+			.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "HTTP body timed out"))??
+	} else {
+		Vec::new()
+	};
 
 	match (method.as_str(), path.as_str()) {
 		("GET", "/") => serve_dashboard(&mut writer, ctx).await,
@@ -128,6 +134,18 @@ where
 		("POST", p) if p.starts_with("/delete/") => handle_delete_grant(&mut writer, ctx, &p["/delete/".len()..]).await,
 		_ => respond(&mut writer, "404 Not Found", "text/plain", b"Not Found").await,
 	}
+}
+
+async fn read_http_line<R: tokio::io::AsyncBufRead + Unpin>(
+	reader: &mut R,
+	limit: usize,
+	deadline: tokio::time::Instant,
+) -> io::Result<Option<String>> {
+	let line = tokio::time::timeout_at(deadline, testd_core::protocol::read_line(reader, limit))
+		.await
+		.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "HTTP headers timed out"))??;
+	line.map(|bytes| String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)))
+		.transpose()
 }
 
 fn is_loopback_host(host: Option<&str>) -> bool {
