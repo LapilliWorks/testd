@@ -1,0 +1,19 @@
+cask "testd-gui" do
+  version '@VERSION@'
+  arch arm: 'aarch64', intel: 'x64'
+  on_arm do
+    sha256 '@ARM_SHA256@'
+  end
+  on_intel do
+    sha256 '@INTEL_SHA256@'
+  end
+
+  url "https://github.com/testd/testd/releases/download/v#{version}/Testd_#{version}_#{arch}.dmg"
+  name "Testd"
+  desc "Tray app for the testd local dev domain manager"
+  homepage "https://github.com/testd/testd"
+
+  depends_on macos: ">= :ventura"
+
+  app "Testd.app"
+end

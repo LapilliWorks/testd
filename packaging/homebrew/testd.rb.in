@@ -1,8 +1,11 @@
+require 'json'
+
 class Testd < Formula
   desc "Local dev domain manager: stable HTTPS names from any dev environment"
   homepage "https://github.com/testd/testd"
-  url "https://github.com/testd/testd/archive/refs/tags/v#{version}.tar.gz"
-  sha256 "TODO"
+  version '@VERSION@'
+  url 'https://github.com/testd/testd/archive/refs/tags/v@VERSION@.tar.gz'
+  sha256 '@SOURCE_SHA256@'
   license "ISC"
   head "https://github.com/testd/testd.git", branch: "master"
 
@@ -20,7 +23,10 @@ class Testd < Formula
   end
 
   test do
+    ENV['HOME'] = testpath.to_s
     assert_match "testd", shell_output("#{bin}/testd --help")
-    system bin/"testd", "doctor", "--json"
+    assert_match 'testd @VERSION@', shell_output("#{bin}/testd --version")
+    summary = JSON.parse(shell_output("#{bin}/testd doctor --json", 1))
+    assert_equal 1, summary.fetch('exit_code')
   end
 end
