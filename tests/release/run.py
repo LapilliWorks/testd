@@ -15,6 +15,7 @@ import socket
 import subprocess
 import sys
 import tarfile
+import tomllib
 import uuid
 import zipfile
 
@@ -180,7 +181,8 @@ def host(run):
 	state = run.output / 'host-state'
 	state.mkdir(mode=0o700)
 	env = dict(os.environ, TESTD_HOST_OUTPUT_DIR=str(state),
-		TESTD_HOST_SNAPSHOT=str(run.output / 'system-before'), TESTD_BIN=str(cli), TESTD_HOST_TEST_SYSTEM='1' if run.args.system else '0',
+		TESTD_HOST_SNAPSHOT=str(run.output / 'system-before'), TESTD_BIN=str(cli),
+		TESTD_HOST_TEST_SYSTEM='1' if run.args.system else '0',
 		TESTD_HOST_TEST_CLEANUP='1', TESTD_HOST_TLD='testdcheck')
 	if SYSTEM == 'Windows':
 		command = ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'tests/host/windows.ps1']
@@ -300,16 +302,28 @@ def fresh_install(run, cli, index, expected_version):
 	run.command('upgrade-base-init' if run.args.previous_bin else 'fresh-init',
 		[str(initial), 'init', '--caddyfile', '', '--tld', 'localhost'], env=env)
 	root_before = file_digest(self_config / 'pki/root.crt')
-	before = file_digest(self_config / 'config.toml')
+	before = tomllib.loads((self_config / 'config.toml').read_text())
 	run.command('re-init', [str(cli), 'init', '--caddyfile', '', '--tld', 'localhost'], env=env)
-	if file_digest(self_config / 'config.toml') != before or file_digest(self_config / 'pki/root.crt') != root_before:
-		raise RuntimeError('re-init or upgrade changed configuration/root trust')
+	after = tomllib.loads((self_config / 'config.toml').read_text())
+	assert_preserved_config(before, after)
+	if file_digest(self_config / 'pki/root.crt') != root_before:
+		raise RuntimeError('re-init or upgrade changed root trust')
 	with tarfile.open(run.output / f'fresh-state-before-purge-{index}.tar.gz', 'w:gz') as backup:
 		backup.add(self_config, arcname='testd')
-	run.command('uninstall-local-state', [str(cli), 'uninstall', '--purge', '--keep-resolver', '--keep-certificate'], env=env)
+	run.command('uninstall-local-state',
+		[str(cli), 'uninstall', '--purge', '--keep-resolver', '--keep-certificate'], env=env)
 	if self_config.exists():
 		raise RuntimeError('purge left the local config directory')
 	run.record('fresh-install-and-uninstall', 'pass', version)
+
+
+def assert_preserved_config(before, after, section=''):
+	for key, value in before.items():
+		path = f'{section}.{key}' if section else key
+		if isinstance(value, dict) and isinstance(after.get(key), dict):
+			assert_preserved_config(value, after[key], path)
+		elif key not in after or after[key] != value:
+			raise RuntimeError(f'configuration value changed during upgrade: {path}')
 
 
 def service(run):
@@ -339,7 +353,8 @@ def browser(run):
 		run.record('browser-results', 'skip', 'no browser report was saved')
 	for report in reports:
 		result = json.loads(report.read_text())
-		status = 'pass' if result.get('manualConfirmed') and all(item['status'] == 'pass' for item in result['checks']) else 'fail'
+		has_passed = result.get('manualConfirmed') and all(item['status'] == 'pass' for item in result['checks'])
+		status = 'pass' if has_passed else 'fail'
 		run.record('browser-results', status, str(report))
 
 

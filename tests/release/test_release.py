@@ -74,6 +74,12 @@ class ReleaseTests(unittest.TestCase):
 				runner.safe_members([path])
 		runner.safe_members(['testd-0.1.0/testd', 'testd-0.1.0/README.md'])
 
+	def test_upgrade_preserves_values_but_allows_new_defaults(self):
+		before = {'host': {'tld': 'localhost', 'secret': 'original'}}
+		runner.assert_preserved_config(before, {'host': {**before['host'], 'new_default': 1}})
+		with self.assertRaises(RuntimeError):
+			runner.assert_preserved_config(before, {'host': {'tld': 'localhost', 'secret': 'changed'}})
+
 	def test_manual_checks_are_not_invented_from_headings(self):
 		items = runner.checklist_items('# Build\n- [ ] First check\n      continued\n\n- [ ] Second check\n')
 		self.assertEqual(items, ['First check continued', 'Second check'])

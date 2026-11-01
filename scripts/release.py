@@ -53,7 +53,8 @@ def package(args):
 	archive = args.output / (base + ('.zip' if platform == 'windows' else '.tar.gz'))
 	if archive.exists():
 		raise FileExistsError(archive)
-	files = [(binary, binary.name), *[(ROOT / name, name) for name in ['LICENSE', 'NOTICE', 'README.md', 'DEVELOPING.md', 'SECURITY.md', 'docs/quickstart.md']]]
+	documents = ['LICENSE', 'NOTICE', 'README.md', 'DEVELOPING.md', 'SECURITY.md', 'docs/quickstart.md']
+	files = [(binary, binary.name), *[(ROOT / name, name) for name in documents]]
 	files += [(path, str(path.relative_to(ROOT))) for path in ROOT.glob('packaging/systemd/*.service')]
 	files += [(ROOT / 'packaging/launchd/dev.testd.host.plist', 'packaging/launchd/dev.testd.host.plist')]
 	if platform == 'windows':
@@ -156,7 +157,8 @@ def main():
 	parser = argparse.ArgumentParser(description=__doc__)
 	commands = parser.add_subparsers(dest='command', required=True)
 	verify = commands.add_parser('verify-version')
-	verify.add_argument('version', nargs='?', default=tomllib.loads((ROOT / 'Cargo.toml').read_text())['package']['version'])
+	version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['package']['version']
+	verify.add_argument('version', nargs='?', default=version)
 	notes = commands.add_parser('release-notes')
 	notes.add_argument('version')
 	build = commands.add_parser('package')
