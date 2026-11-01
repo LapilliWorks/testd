@@ -87,27 +87,38 @@ ${DOMAINS}${END_MARKER}"
 
 # -- Write to hosts file -------------------------------------------------------
 
-CONTENT=$(cat "$HOSTS_PATH" 2>/dev/null || true)
-
-if echo "$CONTENT" | grep -qF "$START_MARKER" && echo "$CONTENT" | grep -qF "$END_MARKER"; then
-	# Replace existing block. Use awk for multi-line replacement.
-	NEW_CONTENT=$(echo "$CONTENT" | awk -v block="$BLOCK" -v sm="$START_MARKER" -v em="$END_MARKER" '
-		BEGIN { inside = 0 }
-		index($0, sm) == 1 { inside = 1; print block; next }
-		inside && index($0, em) == 1 { inside = 0; next }
-		!inside { print }
-	')
+if grep -qF "$START_MARKER" "$HOSTS_PATH" && grep -qF "$END_MARKER" "$HOSTS_PATH"; then
+	# Replace the block in place. Read line by line with the shell so the result
+	# does not depend on the system awk or on a multi-line -v assignment.
+	NEW_CONTENT=""
+	INSIDE=0
+	while IFS= read -r line || [ -n "$line" ]; do
+		if [ "$INSIDE" = '1' ]; then
+			case "$line" in "$END_MARKER"*) INSIDE=0 ;; esac
+			continue
+		fi
+		case "$line" in
+			"$START_MARKER"*)
+				INSIDE=1
+				NEW_CONTENT="${NEW_CONTENT}${BLOCK}
+" ;;
+			*)
+				NEW_CONTENT="${NEW_CONTENT}${line}
+" ;;
+		esac
+	done < "$HOSTS_PATH"
 else
-	# Append block.
+	# Append the block. Command substitution drops trailing newlines, so the
+	# content always needs exactly one before the block.
+	CONTENT=$(cat "$HOSTS_PATH" 2>/dev/null || true)
 	if [ -z "$CONTENT" ]; then
-		NEW_CONTENT="$BLOCK"
-	elif printf '%s' "$CONTENT" | tail -c 1 | grep -qx ''; then
-		# Content ends with newline.
-		NEW_CONTENT="${CONTENT}${BLOCK}"
+		NEW_CONTENT="${BLOCK}
+"
 	else
 		NEW_CONTENT="${CONTENT}
-${BLOCK}"
+${BLOCK}
+"
 	fi
 fi
 
-printf '%s\n' "$NEW_CONTENT" > "$HOSTS_PATH"
+printf '%s' "$NEW_CONTENT" > "$HOSTS_PATH"

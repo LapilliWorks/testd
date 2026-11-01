@@ -16,6 +16,10 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 
 ### Fixed
 
+- `host --system` runs the platform script on the operator's terminal, so its own sudo check and `doctor --fix` find the cached ticket
+- Windows host checks read the expected 404s as status codes instead of letting `curl --fail` write to stderr, which PowerShell 5.1 turns into a terminating error
+- System restore reloads a consumer only when its file changed, follows the Debian/Ubuntu or Fedora/RHEL CA anchor, and times out a privileged command instead of stalling silently
+- The hosts helper replaces its managed block in the shell instead of awk, and its host check uses a fixed hosts file instead of the system one
 - Linux and macOS host checks probe the cached sudo credential through the operator's terminal, so a ticket from `sudo -v` in the same shell is recognised
 - Windows system-state checks read the machine root store through .NET instead of the `Cert:` provider, which `-Command` does not always load, and the restore fixture imports that module before using its path
 - Windows release checks stay readable on a non-English console: PowerShell children and the host scripts emit UTF-8, captured streams, logs, and reports decode and write as UTF-8, redirected runner output uses the console code page, and the NRPT comparison message parses under PowerShell 5.1
