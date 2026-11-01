@@ -150,12 +150,17 @@ def stop_command(process, signal_number):
 	if SYSTEM == 'Windows':
 		if process.poll() is None:
 			subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'], check=True, capture_output=True)
-	else:
-		try:
+		return
+	try:
+		# A child started in its own session leads its process group; one that kept
+		# the operator's terminal does not, and must not signal the runner's group.
+		if os.getpgid(process.pid) == process.pid:
 			os.killpg(process.pid, signal_number)
-		except ProcessLookupError:
-			# The group can exit between the timeout and cleanup.
-			return
+		else:
+			process.send_signal(signal_number)
+	except ProcessLookupError:
+		# The child can exit between the timeout and cleanup.
+		return
 
 
 class Run:
@@ -185,14 +190,22 @@ class Run:
 		self.save()
 		print(f'{status:8} {name}: {detail}', flush=True)
 
-	def command(self, name, command, timeout=300, env=None, expected=0, interrupt_ok=False):
+	def command(self, name, command, timeout=300, env=None, expected=0, interrupt_ok=False, terminal=False):
+		"""Run a command and mirror its output.
+
+		`terminal` keeps the operator's terminal attached, stdin and session
+		alike. sudo keys its cached credential to that terminal, so a detached
+		check asks for a password even right after `sudo -v` succeeded in the
+		same shell.
+		"""
 		log = self.output / f'{len(self.results):02d}-{re.sub(r"[^a-zA-Z0-9-]", "-", name)}.log'
 		print(f'Running: {" ".join(map(str, command))}', flush=True)
 		# Nested Python tools would otherwise write the ANSI code page on Windows.
 		env = {**(os.environ if env is None else env), 'PYTHONUTF8': '1'}
 		with log.open('xb') as log_file:
 			process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE,
-				stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, start_new_session=SYSTEM != 'Windows')
+				stderr=subprocess.PIPE, stdin=None if terminal else subprocess.DEVNULL,
+				start_new_session=SYSTEM != 'Windows' and not terminal)
 			output = CommandOutput(process, log_file)
 			try:
 				text = output.wait(timeout)
@@ -265,7 +278,7 @@ def system_snapshot(run, tld, interactive=False):
 	state = helper('system_state')
 	if SYSTEM != 'Windows' and not interactive:
 		require('sudo')
-		run.command('sudo-ready', ['sudo', '-n', 'true'])
+		run.command('sudo-ready', ['sudo', '-n', 'true'], terminal=True)
 	backup = run.output / 'system-before'
 	index = 2
 	# Every snapshot stays on disk; a later run must not overwrite the state an

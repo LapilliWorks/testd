@@ -6,6 +6,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import tempfile
 import unittest
 import subprocess
@@ -423,6 +424,18 @@ class HostSystemTests(unittest.TestCase):
 			snapshot.assert_not_called()
 			restore.assert_not_called()
 
+	def test_system_snapshot_checks_sudo_through_the_terminal(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			fake = SimpleNamespace(Host=lambda *args, **kwargs: None,
+				snapshot=lambda host, backup: backup / 'manifest.json')
+			with patch.object(runner, 'SYSTEM', 'Linux'), patch.object(runner, 'require'), \
+				patch.object(runner, 'helper', return_value=fake), \
+				patch.object(run, 'command', return_value='') as command, \
+				redirect_stdout(io.StringIO()):
+				runner.system_snapshot(run, 'testdcheck')
+			command.assert_called_once_with('sudo-ready', ['sudo', '-n', 'true'], terminal=True)
+
 
 class CommandOutputTests(unittest.TestCase):
 	def create_run(self, directory):
@@ -473,6 +486,39 @@ class CommandOutputTests(unittest.TestCase):
 			code = "import os; os.write(1, os.environ['TESTD_ENCODING_MARKER'].encode())"
 			with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
 				self.assertEqual(run.command('env', [sys.executable, '-c', code], env=env), 'kept')
+
+	def test_the_sudo_check_keeps_the_terminal_attached(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			with patch.object(runner.subprocess, 'Popen', wraps=subprocess.Popen) as popen, \
+				redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+				run.command('sudo-ready', [sys.executable, '-c', 'pass'], terminal=True)
+			self.assertIsNone(popen.call_args.kwargs['stdin'])
+			self.assertFalse(popen.call_args.kwargs['start_new_session'])
+
+	def test_other_checks_detach_from_the_terminal(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			with patch.object(runner.subprocess, 'Popen', wraps=subprocess.Popen) as popen, \
+				redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+				run.command('detached', [sys.executable, '-c', 'pass'])
+			self.assertIs(popen.call_args.kwargs['stdin'], subprocess.DEVNULL)
+			self.assertEqual(popen.call_args.kwargs['start_new_session'], runner.SYSTEM != 'Windows')
+
+	def test_a_detached_child_is_signalled_alone(self):
+		process = Mock(pid=4321)
+		with patch.object(runner, 'SYSTEM', 'Linux'), patch.object(runner.os, 'getpgid', return_value=1), \
+			patch.object(runner.os, 'killpg') as killpg:
+			runner.stop_command(process, signal.SIGTERM)
+		process.send_signal.assert_called_once_with(signal.SIGTERM)
+		killpg.assert_not_called()
+
+	def test_a_session_leader_takes_its_group_down(self):
+		process = Mock(pid=4321)
+		with patch.object(runner, 'SYSTEM', 'Linux'), patch.object(runner.os, 'getpgid', return_value=4321), \
+			patch.object(runner.os, 'killpg') as killpg:
+			runner.stop_command(process, signal.SIGTERM)
+		killpg.assert_called_once_with(4321, signal.SIGTERM)
 
 	def test_partial_lines_reach_the_terminal_and_log_before_exit(self):
 		with tempfile.TemporaryDirectory() as directory:

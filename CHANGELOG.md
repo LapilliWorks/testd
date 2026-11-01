@@ -16,6 +16,7 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 
 ### Fixed
 
+- Linux and macOS host checks probe the cached sudo credential through the operator's terminal, so a ticket from `sudo -v` in the same shell is recognised
 - Windows release checks stay readable on a non-English console: PowerShell children and the host scripts emit UTF-8, captured streams, logs, and reports decode and write as UTF-8, redirected runner output uses the console code page, and the NRPT comparison message parses under PowerShell 5.1
 - Windows clippy no longer sees the Unix-only share exposure import
 - Restored notify-rust 4.18 so macOS and Windows notification action callbacks compile
