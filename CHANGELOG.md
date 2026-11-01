@@ -4,6 +4,12 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 
 ## [Unreleased]
 
+### Fixed
+
+- Windows clippy no longer sees the Unix-only share exposure import
+- Notification dependency pinned to the Rust-1.88-compatible release
+- Explicit, documented exceptions for the three informational zbus merger advisories; vulnerability checks remain enforced
+
 ## [0.1.0] - 2026-11-01
 
 ### Added

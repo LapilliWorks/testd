@@ -23,5 +23,9 @@ testd-setup = { workspace = true }
 tauri = { version = "2.12", features = ["tray-icon", "image-png"] }
 tokio = { workspace = true }
 tauri-plugin-deep-link = "2"
+# The Linux backend still requires zbus 5 and its deprecated standalone crates:
+# RUSTSEC-2026-0370, RUSTSEC-2026-0371, RUSTSEC-2026-0372: informational merger notices.
+# Even current plugin releases use zbus 5; keep single-instance/deep-link behavior.
+# Remove the narrow deny.toml exceptions once this and notify-rust migrate to zbus 6.
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-autostart = "2"

@@ -26,6 +26,15 @@ runner = load('release_checks', ROOT / 'tests/release/run.py')
 
 
 class ReleaseTests(unittest.TestCase):
+	def test_advisory_exceptions_are_limited_to_the_dbus_merger(self):
+		policy = release.tomllib.loads((ROOT / 'deny.toml').read_text())
+		self.assertEqual(set(policy['advisories']['ignore']), {
+			'RUSTSEC-2026-0370', 'RUSTSEC-2026-0371', 'RUSTSEC-2026-0372',
+		})
+		self.assertNotIn('unmaintained', policy['advisories'])
+		self.assertEqual(policy['bans']['wildcards'], 'deny')
+		self.assertIn({'name': 'openssl'}, policy['bans']['deny'])
+
 	def test_workspace_versions_match(self):
 		release.check_version('0.1.0')
 		with self.assertRaises(ValueError):
