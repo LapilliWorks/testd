@@ -126,9 +126,12 @@ python3 tests/release/run.py host --system
 python3 tests/release/run.py host --system --bin target/release/testd
 ```
 
-The system check writes `/usr/local/share/ca-certificates/testd-root.crt` and
-`/etc/systemd/resolved.conf.d/90-testd.conf`. Both are the same changes a real
-`testd doctor --fix` makes, and both are restored from the snapshot.
+The system check writes `/etc/systemd/resolved.conf.d/90-testd.conf` and the
+distro's CA anchor: `/usr/local/share/ca-certificates/testd-root.crt` with
+`update-ca-certificates` on Debian and Ubuntu, or
+`/etc/pki/ca-trust/source/anchors/testd-root.crt` with `update-ca-trust extract`
+on Fedora and RHEL. Both are the same changes a real `testd doctor --fix` makes,
+and both are restored from the snapshot.
 
 ### macOS
 
@@ -266,7 +269,8 @@ artifact `doctor --fix` can change in `<report>/system-before/`:
 
 | Platform | Artifacts | Reload |
 |---|---|---|
-| Linux | `/etc/systemd/resolved.conf.d/90-testd.conf`, `/usr/local/share/ca-certificates/testd-root.crt` | `systemctl reload systemd-resolved`, `update-ca-certificates --fresh` |
+| Linux (Debian, Ubuntu) | `/etc/systemd/resolved.conf.d/90-testd.conf`, `/usr/local/share/ca-certificates/testd-root.crt` | `systemctl reload systemd-resolved`, `update-ca-certificates` |
+| Linux (Fedora, RHEL) | `/etc/systemd/resolved.conf.d/90-testd.conf`, `/etc/pki/ca-trust/source/anchors/testd-root.crt` | `systemctl reload systemd-resolved`, `update-ca-trust extract` |
 | macOS | `/etc/resolver/<tld>`, every `CN=testd root` in the System keychain | keychain operations are per SHA-1 |
 | Windows | NRPT rules for `.<tld>`, every `CN=testd root` in the machine root store | per thumbprint |
 

@@ -105,7 +105,11 @@ class Host:
 			raise HostError('sudo credentials are not cached; run `sudo -v` before the system checks')
 
 	def _run(self, argv):
-		result = subprocess.run(argv, capture_output=True)
+		# A hung privileged command must fail the restore, not stall it silently.
+		try:
+			result = subprocess.run(argv, capture_output=True, timeout=300 if self.interactive else 120)
+		except subprocess.TimeoutExpired:
+			raise HostError(f'{" ".join(argv)}: timed out') from None
 		if result.returncode != 0:
 			# windows_command makes the PowerShell child emit UTF-8 whatever the
 			# console code page is, so this decode is exact rather than lossy.
@@ -114,14 +118,33 @@ class Host:
 		return result.stdout
 
 
+# Debian and Ubuntu ship update-ca-certificates and read anchors from the local
+# directory; Fedora and RHEL ship update-ca-trust and read the pki anchors. This
+# mirrors the layout testd-setup picks.
+CA_ANCHOR_TOOLS = ('/usr/sbin/update-ca-certificates', '/usr/bin/update-ca-certificates')
+FEDORA_TRUST_TOOL = '/usr/bin/update-ca-trust'
+FEDORA_ANCHOR_DIR = '/etc/pki/ca-trust/source/anchors'
+
+
+def linux_trust(has_update_ca_certificates=None, has_fedora_anchors=None):
+	if has_update_ca_certificates is None:
+		has_update_ca_certificates = any(pathlib.Path(tool).exists() for tool in CA_ANCHOR_TOOLS)
+	if has_fedora_anchors is None:
+		has_fedora_anchors = (pathlib.Path(FEDORA_TRUST_TOOL).exists()
+			and pathlib.Path(FEDORA_ANCHOR_DIR).is_dir())
+	if has_fedora_anchors and not has_update_ca_certificates:
+		return f'{FEDORA_ANCHOR_DIR}/testd-root.crt', ['update-ca-trust', 'extract']
+	return '/usr/local/share/ca-certificates/testd-root.crt', ['update-ca-certificates']
+
+
 def files(host):
 	"""Plain files `doctor --fix` writes, plus the command that reloads each consumer."""
 	if host.system == 'Linux':
+		anchor, reload = linux_trust()
 		return [
 			{'path': '/etc/systemd/resolved.conf.d/90-testd.conf',
 				'reload': ['systemctl', 'reload', 'systemd-resolved']},
-			{'path': '/usr/local/share/ca-certificates/testd-root.crt',
-				'reload': ['update-ca-certificates', '--fresh']},
+			{'path': anchor, 'reload': reload},
 		]
 	if host.system == 'Darwin':
 		return [{'path': f'/etc/resolver/{host.tld}'}]
@@ -250,14 +273,20 @@ def restore(host, directory):
 def restore_file(host, directory, entry):
 	path = entry['path']
 	try:
+		changed = False
 		if entry['exists']:
 			data = (directory / entry['blob']).read_bytes()
 			if digest(data) != entry['sha256']:
 				return [f'{path}: the backed-up copy was modified']
 			host.write(path, data, entry.get('mode', 0o644))
-		else:
+			changed = True
+		elif host.exists(path):
 			host.remove(path)
-		if entry.get('reload'):
+			changed = True
+		# Only reload a consumer whose file changed: restore also runs when
+		# doctor --fix never got as far as installing it, and the reload tool may
+		# not exist on this distro.
+		if changed and entry.get('reload'):
 			host.command(entry['reload'], privileged=True)
 	except HostError as error:
 		return [str(error)]

@@ -267,8 +267,25 @@ class SystemStateTests(unittest.TestCase):
 				host.files[item['path']] = b'installed by doctor --fix'
 			self.assertEqual(state.restore(host, backup), [])
 			self.assertEqual(host.files, {})
-			reloads = [argv for argv, _ in host.commands if argv[0] in ('systemctl', 'update-ca-certificates')]
-			self.assertEqual(reloads, [item['reload'] for item in state.files(host)])
+			expected = [item['reload'] for item in state.files(host)]
+			reloads = [argv for argv, _ in host.commands if argv in expected]
+			self.assertEqual(reloads, expected)
+
+	def test_linux_trust_layout_follows_the_distro_tool(self):
+		debian = ('/usr/local/share/ca-certificates/testd-root.crt', ['update-ca-certificates'])
+		fedora = ('/etc/pki/ca-trust/source/anchors/testd-root.crt', ['update-ca-trust', 'extract'])
+		self.assertEqual(state.linux_trust(True, False), debian)
+		self.assertEqual(state.linux_trust(False, True), fedora)
+		self.assertEqual(state.linux_trust(False, False), debian, 'unrecognised distros keep the old layout')
+		self.assertEqual(state.linux_trust(True, True), debian)
+
+	def test_restore_leaves_an_untouched_consumer_alone(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			host = FakeHost()
+			backup = pathlib.Path(temporary) / 'system-before'
+			state.snapshot(host, backup)
+			self.assertEqual(state.restore(host, backup), [])
+			self.assertEqual(host.commands, [], 'nothing changed, so nothing needs a privileged reload')
 
 	def test_restore_is_idempotent(self):
 		with tempfile.TemporaryDirectory() as temporary:

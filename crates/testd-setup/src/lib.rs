@@ -758,7 +758,59 @@ pub fn is_root_trusted(cert_pem: &str) -> bool {
 
 #[cfg(target_os = "linux")]
 fn system_root_path() -> std::path::PathBuf {
-	std::path::PathBuf::from("/usr/local/share/ca-certificates/testd-root.crt")
+	std::path::PathBuf::from(trust_layout().anchor)
+}
+
+/// Where a distro keeps local CA anchors and how it rebuilds the trust bundle.
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq, Eq)]
+struct TrustLayout {
+	directory: &'static str,
+	anchor: &'static str,
+	reload: &'static str,
+}
+
+/// Debian and Ubuntu ship `update-ca-certificates` and read anchors from the
+/// local directory; Fedora and RHEL ship `update-ca-trust` and read the pki
+/// anchors. Pick by the tools that actually have to run, and keep the
+/// long-standing layout where neither is recognised.
+#[cfg(target_os = "linux")]
+fn trust_layout_for(has_update_ca_certificates: bool, has_fedora_anchors: bool) -> TrustLayout {
+	if has_fedora_anchors && !has_update_ca_certificates {
+		TrustLayout {
+			directory: "/etc/pki/ca-trust/source/anchors",
+			anchor: "/etc/pki/ca-trust/source/anchors/testd-root.crt",
+			reload: "update-ca-trust extract",
+		}
+	} else {
+		TrustLayout {
+			directory: "/usr/local/share/ca-certificates",
+			anchor: "/usr/local/share/ca-certificates/testd-root.crt",
+			reload: "update-ca-certificates",
+		}
+	}
+}
+
+#[cfg(target_os = "linux")]
+fn trust_layout() -> TrustLayout {
+	let debian = ["/usr/sbin/update-ca-certificates", "/usr/bin/update-ca-certificates"]
+		.iter()
+		.any(|path| std::path::Path::new(path).exists());
+	let fedora = std::path::Path::new("/usr/bin/update-ca-trust").exists()
+		&& std::path::Path::new("/etc/pki/ca-trust/source/anchors").is_dir();
+	trust_layout_for(debian, fedora)
+}
+
+#[cfg(target_os = "linux")]
+fn trust_install_script(source: &std::path::Path) -> String {
+	let layout = trust_layout();
+	format!("mkdir -p '{}' && cp '{}' '{}' && {}", layout.directory, source.display(), layout.anchor, layout.reload)
+}
+
+#[cfg(target_os = "linux")]
+fn trust_remove_script() -> String {
+	let layout = trust_layout();
+	format!("rm -f '{}' && {}", layout.anchor, layout.reload)
 }
 
 #[cfg(target_os = "linux")]
@@ -826,12 +878,7 @@ pub fn trust_root_gui(cert_pem: &str) -> io::Result<()> {
 	{
 		let tmp = std::env::temp_dir().join("testd-root.crt");
 		std::fs::write(&tmp, cert_pem)?;
-		let destination = system_root_path();
-		let script = format!(
-			"mkdir -p /usr/local/share/ca-certificates && cp '{}' '{}' && update-ca-certificates",
-			tmp.display(),
-			destination.display()
-		);
+		let script = trust_install_script(&tmp);
 		let status = silent_command("pkexec").args(["sh", "-c", &script]).status()?;
 		let _ = std::fs::remove_file(&tmp);
 		if !status.success() {
@@ -874,12 +921,7 @@ pub fn trust_root_gui(cert_pem: &str) -> io::Result<()> {
 fn trust_root_linux(cert_pem: &str) -> io::Result<()> {
 	let tmp = std::env::temp_dir().join(format!("testd-root-{}.crt", std::process::id()));
 	std::fs::write(&tmp, cert_pem)?;
-	let destination = system_root_path();
-	let script = format!(
-		"mkdir -p /usr/local/share/ca-certificates && cp '{}' '{}' && update-ca-certificates",
-		tmp.display(),
-		destination.display()
-	);
+	let script = trust_install_script(&tmp);
 	let status = silent_command("sudo").args(["sh", "-c", &script]).status();
 	let _ = std::fs::remove_file(&tmp);
 	let status = status?;
@@ -941,8 +983,7 @@ pub fn untrust_root(_cert_pem: &str) -> io::Result<()> {
 pub fn untrust_root_gui(_cert_pem: &str) -> io::Result<()> {
 	#[cfg(target_os = "linux")]
 	{
-		let destination = system_root_path();
-		let script = format!("rm -f '{}' && update-ca-certificates", destination.display());
+		let script = trust_remove_script();
 		let status = silent_command("pkexec").args(["sh", "-c", &script]).status()?;
 		if !status.success() {
 			return Err(io::Error::new(
@@ -977,8 +1018,7 @@ pub fn untrust_root_gui(_cert_pem: &str) -> io::Result<()> {
 
 #[cfg(target_os = "linux")]
 fn untrust_root_linux() -> io::Result<()> {
-	let destination = system_root_path();
-	let script = format!("rm -f '{}' && update-ca-certificates", destination.display());
+	let script = trust_remove_script();
 	let status = silent_command("sudo").args(["sh", "-c", &script]).status()?;
 	if !status.success() {
 		return Err(io::Error::new(io::ErrorKind::PermissionDenied, "root CA removal failed"));
@@ -1145,6 +1185,19 @@ mod trust_tests {
 	#[test]
 	fn pem_normalization_ignores_line_endings() {
 		assert_eq!(normalize_pem("a\r\nb\r\n"), normalize_pem("a\nb\n"));
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn trust_layout_follows_the_distro_tool() {
+		let debian = trust_layout_for(true, false);
+		assert_eq!(debian.anchor, "/usr/local/share/ca-certificates/testd-root.crt");
+		assert_eq!(debian.reload, "update-ca-certificates");
+		let fedora = trust_layout_for(false, true);
+		assert_eq!(fedora.anchor, "/etc/pki/ca-trust/source/anchors/testd-root.crt");
+		assert_eq!(fedora.reload, "update-ca-trust extract");
+		assert_eq!(trust_layout_for(false, false).anchor, debian.anchor, "unrecognised distros keep the old layout");
+		assert_eq!(trust_layout_for(true, true).anchor, debian.anchor);
 	}
 
 	#[test]
