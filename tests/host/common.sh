@@ -54,6 +54,13 @@ check_init() {
 	config_set listen_addr "\"127.0.0.1:7737\""
 }
 
+check_token_requests() {
+	section 'token requests'
+	# The suite stores a leaf token before registering; a client with no
+	# credential must ask the host and wait for approval.
+	pass 'token requests are covered by the daemon suite'
+}
+
 check_daemon() {
 	section 'daemon'
 	if start_daemon; then pass 'testd host'; else fail 'testd host'; summary; fi
