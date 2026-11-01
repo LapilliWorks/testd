@@ -1,26 +1,1225 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>testd</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>testd · Dashboard</title>
+<script>
+	// Resolve the saved theme before first paint so the page never flashes.
+	(function () {
+		var stored = 'system';
+		try { stored = localStorage.getItem('testd.theme') || 'system'; } catch (e) {}
+		var dark = stored === 'dark'
+			|| (stored !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+		document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+	})();
+</script>
+<style>
+	:root {
+		color-scheme: light;
+		--font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+			sans-serif;
+		--font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+		--bg: #f6f6f7;
+		--surface: #ffffff;
+		--surface-muted: #fafafa;
+		--border: #e4e4e7;
+		--border-strong: #d4d4d8;
+		--text: #18181b;
+		--text-secondary: #52525b;
+		--text-muted: #71717a;
+		--accent: #2563eb;
+		--accent-soft: rgba(37, 99, 235, .1);
+		--primary: #18181b;
+		--primary-hover: #27272a;
+		--on-primary: #fafafa;
+		--success: #15803d;
+		--success-soft: rgba(21, 128, 61, .1);
+		--danger: #b91c1c;
+		--danger-soft: rgba(185, 28, 28, .08);
+		--warning: #a16207;
+		--warning-soft: rgba(161, 98, 7, .1);
+		--header-bg: rgba(246, 246, 247, .82);
+		--shadow: 0 1px 2px rgba(24, 24, 27, .04);
+	}
+
+	:root[data-theme="dark"] {
+		color-scheme: dark;
+		--bg: #0b0b0d;
+		--surface: #131316;
+		--surface-muted: #18181b;
+		--border: #27272a;
+		--border-strong: #3f3f46;
+		--text: #f4f4f5;
+		--text-secondary: #a1a1aa;
+		--text-muted: #8a8a93;
+		--accent: #7aa2ff;
+		--accent-soft: rgba(122, 162, 255, .14);
+		--primary: #fafafa;
+		--primary-hover: #e4e4e7;
+		--on-primary: #18181b;
+		--success: #4ade80;
+		--success-soft: rgba(74, 222, 128, .12);
+		--danger: #f87171;
+		--danger-soft: rgba(248, 113, 113, .12);
+		--warning: #fbbf24;
+		--warning-soft: rgba(251, 191, 36, .12);
+		--header-bg: rgba(11, 11, 13, .8);
+		--shadow: none;
+	}
+
+	* { box-sizing: border-box; }
+	html { -webkit-text-size-adjust: 100%; }
+	body {
+		margin: 0;
+		background: var(--bg);
+		color: var(--text);
+		font: 15px/1.5 var(--font-sans);
+		-webkit-font-smoothing: antialiased;
+	}
+	h1, h2, h3, p { margin: 0; }
+	code { font-family: var(--font-mono); font-size: .92em; }
+	a { color: var(--accent); text-decoration: none; }
+	a:hover { text-decoration: underline; }
+	button, input { font: inherit; }
+	::selection { background: var(--accent-soft); }
+	:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+	/* Top bar */
+
+	.topbar {
+		position: sticky;
+		top: 0;
+		z-index: 10;
+		border-bottom: 1px solid var(--border);
+		background: var(--header-bg);
+		-webkit-backdrop-filter: saturate(180%) blur(12px);
+		backdrop-filter: saturate(180%) blur(12px);
+	}
+	.topbar-inner {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 16px;
+		height: 60px;
+	}
+	.brand {
+		display: inline-flex;
+		align-items: center;
+		gap: 10px;
+		min-width: 0;
+		color: var(--text);
+	}
+	.brand:hover { text-decoration: none; }
+	.brand-mark {
+		width: 28px;
+		height: 28px;
+		flex: none;
+		color: var(--text);
+	}
+	.brand-ink { fill: var(--bg); }
+	.brand-stroke { fill: none; stroke: var(--bg); stroke-width: 3; stroke-linecap: round; }
+	.brand-name { font-size: 16px; font-weight: 650; letter-spacing: -.02em; }
+	.badge-free {
+		display: inline-flex;
+		align-items: center;
+		padding: 2px 8px;
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		background: var(--surface);
+		color: var(--text-secondary);
+		font-size: 11px;
+		font-weight: 600;
+		letter-spacing: .02em;
+		white-space: nowrap;
+	}
+
+	/* Theme switch */
+
+	.theme-switch {
+		display: inline-flex;
+		align-items: center;
+		gap: 2px;
+		padding: 2px;
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		background: var(--surface-muted);
+	}
+	.theme-switch button {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		padding: 5px 9px;
+		border: 0;
+		border-radius: 999px;
+		background: transparent;
+		color: var(--text-muted);
+		font-size: 12px;
+		font-weight: 550;
+		cursor: pointer;
+	}
+	.theme-switch button:hover { color: var(--text); }
+	.theme-switch button[aria-pressed="true"] {
+		background: var(--surface);
+		color: var(--text);
+		box-shadow: 0 1px 2px rgba(0, 0, 0, .1);
+	}
+	.theme-switch svg { width: 14px; height: 14px; }
+
+	/* Page */
+
+	.topbar-inner,
+	.page,
+	.footer-inner {
+		width: min(100% - 48px, 1040px);
+		margin-inline: auto;
+	}
+	.page { padding: 40px 0 64px; }
+	.page-head {
+		display: flex;
+		align-items: flex-end;
+		justify-content: space-between;
+		gap: 24px;
+		margin-bottom: 28px;
+	}
+	h1 {
+		font-size: 32px;
+		line-height: 1.15;
+		font-weight: 650;
+		letter-spacing: -.03em;
+	}
+	.page-subtitle { margin-top: 6px; color: var(--text-secondary); max-width: 62ch; }
+	.page-meta {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		color: var(--text-muted);
+		font-size: 13px;
+		white-space: nowrap;
+	}
+	.live-dot {
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+		background: var(--success);
+		box-shadow: 0 0 0 3px var(--success-soft);
+	}
+
+	/* Layout */
+
+	.layout {
+		display: grid;
+		grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
+		gap: 18px;
+		align-items: start;
+	}
+	.column { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+
+	/* Cards */
+
+	.card {
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: 14px;
+		box-shadow: var(--shadow);
+	}
+	#advisory { margin-bottom: 18px; }
+	.card-head {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 16px;
+		padding: 20px 22px 0;
+	}
+	.card-title-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+	h2 { font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
+	.card-desc {
+		margin-top: 4px;
+		color: var(--text-secondary);
+		font-size: 13px;
+		max-width: 68ch;
+	}
+	.card-body { padding: 14px 22px 18px; }
+	.count {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 20px;
+		height: 20px;
+		padding: 0 6px;
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		background: var(--surface-muted);
+		color: var(--text-muted);
+		font: 550 11px/1 var(--font-sans);
+	}
+
+	/* Rows */
+
+	.rows { list-style: none; margin: 0; padding: 0; }
+	.row {
+		display: flex;
+		align-items: center;
+		gap: 14px;
+		min-height: 48px;
+		padding: 10px 0;
+		border-top: 1px solid var(--border);
+	}
+	.rows > .row:first-child,
+	#domain-list > .rows > .row:first-child { border-top: 0; padding-top: 2px; }
+	.row-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+	.row-title-line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+	.row-title {
+		color: var(--text);
+		font-size: 13.5px;
+		font-weight: 550;
+		overflow-wrap: anywhere;
+	}
+	a.row-title { color: var(--accent); }
+	.row-meta {
+		color: var(--text-muted);
+		font-size: 12.5px;
+		overflow-wrap: anywhere;
+	}
+	.row-meta code, .card-desc code {
+		padding: 1px 5px;
+		border-radius: 5px;
+		background: var(--surface-muted);
+		color: var(--text-secondary);
+		font-family: var(--font-mono);
+		font-size: 11.5px;
+	}
+	.row-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+	.row-error {
+		margin-top: 4px;
+		color: var(--danger);
+		font-size: 12.5px;
+		overflow-wrap: anywhere;
+	}
+	.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.mono { font-family: var(--font-mono); font-size: 11.5px; }
+	.group {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin: 16px 0 2px;
+		color: var(--text-muted);
+		font-size: 11px;
+		font-weight: 600;
+		letter-spacing: .06em;
+		text-transform: uppercase;
+	}
+	.group:first-child { margin-top: 0; }
+	.subhead {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin: 16px 0 2px;
+	}
+	.subhead:first-child { margin-top: 0; }
+	.subhead h3 {
+		color: var(--text-muted);
+		font-size: 11px;
+		font-weight: 600;
+		letter-spacing: .06em;
+		text-transform: uppercase;
+	}
+	.advisory { list-style: none; margin: 0; padding: 0; }
+	.advisory li {
+		display: flex;
+		gap: 8px;
+		padding: 8px 0;
+		border-top: 1px solid var(--border);
+		color: var(--text-secondary);
+		font-size: 13px;
+	}
+	.advisory li:first-child { padding-top: 2px; border-top: 0; }
+	.advisory li::before { content: "!"; color: var(--warning); font-weight: 700; }
+
+	/* Pills */
+
+	.pill {
+		display: inline-flex;
+		align-items: center;
+		padding: 2px 8px;
+		border-radius: 999px;
+		font-size: 11px;
+		font-weight: 600;
+		white-space: nowrap;
+	}
+	.pill-ok { background: var(--success-soft); color: var(--success); }
+	.pill-muted { background: var(--surface-muted); color: var(--text-muted); }
+	.pill-warn { background: var(--warning-soft); color: var(--warning); }
+	.pill-danger { background: var(--danger-soft); color: var(--danger); }
+	.tag {
+		padding: 1px 6px;
+		border: 1px solid var(--border);
+		border-radius: 5px;
+		background: var(--surface-muted);
+		color: var(--text-muted);
+		font-size: 10.5px;
+		font-weight: 550;
+		text-transform: uppercase;
+		letter-spacing: .03em;
+	}
+
+	/* Empty states */
+
+	.empty {
+		display: flex;
+		flex-direction: column;
+		gap: 3px;
+		padding: 18px 0 10px;
+		color: var(--text-muted);
+		font-size: 12.5px;
+		text-align: center;
+	}
+	.empty strong { color: var(--text-secondary); font-size: 13px; font-weight: 550; }
+
+	/* Buttons */
+
+	.btn {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 6px;
+		height: 32px;
+		padding: 0 12px;
+		border: 1px solid var(--border-strong);
+		border-radius: 8px;
+		background: var(--surface);
+		color: var(--text);
+		font-size: 13px;
+		font-weight: 550;
+		white-space: nowrap;
+		cursor: pointer;
+		transition: background .15s ease, border-color .15s ease, color .15s ease;
+	}
+	.btn:hover { background: var(--surface-muted); text-decoration: none; }
+	.btn:disabled { opacity: .45; cursor: not-allowed; }
+	.btn-primary { border-color: var(--primary); background: var(--primary); color: var(--on-primary); }
+	.btn-primary:hover { border-color: var(--primary-hover); background: var(--primary-hover); }
+	.btn-danger { border-color: var(--border-strong); background: transparent; color: var(--danger); }
+	.btn-danger:hover { border-color: var(--danger); background: var(--danger-soft); }
+	.btn-sm { height: 28px; padding: 0 10px; border-radius: 7px; font-size: 12.5px; }
+	.icon-btn {
+		display: grid;
+		place-items: center;
+		width: 30px;
+		height: 30px;
+		flex: none;
+		padding: 0;
+		border: 1px solid transparent;
+		border-radius: 7px;
+		background: transparent;
+		color: var(--text-muted);
+		cursor: pointer;
+	}
+	.icon-btn:hover { background: var(--danger-soft); color: var(--danger); }
+	.icon-btn-stop { color: var(--text-secondary); }
+	.icon-btn-stop:hover { background: var(--surface-muted); color: var(--text); }
+	.icon-btn svg { width: 15px; height: 15px; }
+
+	/* Forms */
+
+	.form-grid {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 12px;
+		margin-top: 16px;
+		padding-top: 16px;
+		border-top: 1px solid var(--border);
+	}
+	.field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+	.field-wide { grid-column: 1 / -1; }
+	.field label { color: var(--text-secondary); font-size: 12px; font-weight: 550; }
+	.input {
+		width: 100%;
+		height: 36px;
+		padding: 0 11px;
+		border: 1px solid var(--border-strong);
+		border-radius: 8px;
+		background: var(--surface);
+		color: var(--text);
+		font-size: 13.5px;
+		outline: none;
+	}
+	.input::placeholder { color: var(--text-muted); }
+	.input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+	.form-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 8px; }
+
+	/* Certificate */
+
+	.details { display: flex; flex-direction: column; gap: 9px; margin: 0 0 16px; }
+	.detail-row {
+		display: grid;
+		grid-template-columns: 82px minmax(0, 1fr);
+		gap: 12px;
+		font-size: 12.5px;
+	}
+	.detail-row dt { color: var(--text-muted); }
+	.detail-row dd { margin: 0; color: var(--text-secondary); overflow-wrap: anywhere; }
+	.card-actions { padding-top: 14px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+
+	/* Notices */
+
+	.notice {
+		display: none;
+		align-items: flex-start;
+		gap: 10px;
+		margin-bottom: 18px;
+		padding: 11px 14px;
+		border-radius: 10px;
+		font-size: 13px;
+	}
+	.notice-error { display: flex; background: var(--danger-soft); color: var(--danger); }
+	.notice-ok { display: flex; background: var(--success-soft); color: var(--success); }
+	.notice-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+	.notice-close {
+		flex: none;
+		padding: 0 2px;
+		border: 0;
+		background: transparent;
+		color: inherit;
+		font-size: 16px;
+		line-height: 1;
+		opacity: .65;
+		cursor: pointer;
+	}
+	.notice-close:hover { opacity: 1; }
+
+	/* Footer */
+
+	.footer { border-top: 1px solid var(--border); background: var(--surface); }
+	.footer-inner {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		flex-wrap: wrap;
+		gap: 20px;
+		padding: 26px 0 32px;
+	}
+	.footer-product { display: flex; flex-direction: column; gap: 4px; }
+	.footer-brand { display: flex; align-items: center; gap: 8px; }
+	.footer-name { font-size: 14px; font-weight: 650; letter-spacing: -.02em; }
+	.footer-version { color: var(--text-muted); font-size: 12.5px; }
+	.footer-right { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+	.footer-links { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12.5px; }
+	.footer-links a { color: var(--text-secondary); }
+	.footer-links a:hover { color: var(--text); }
+	.footer-note { color: var(--text-muted); font-size: 12px; }
+
+	@media (max-width: 900px) {
+		.layout { grid-template-columns: 1fr; }
+		.footer-right { align-items: flex-start; }
+	}
+
+	@media (max-width: 640px) {
+		.topbar-inner,
+		.page,
+		.footer-inner { width: min(100% - 32px, 1040px); }
+		.theme-switch button { padding: 6px; }
+		.theme-switch button span { display: none; }
+		.page { padding-top: 28px; }
+		h1 { font-size: 26px; }
+		.page-head { flex-direction: column; align-items: flex-start; gap: 10px; }
+		.card-head { padding: 18px 16px 0; }
+		.card-body { padding: 12px 16px 16px; }
+		.form-grid { grid-template-columns: 1fr; }
+		.row { flex-wrap: wrap; }
+		.row-actions { width: 100%; justify-content: flex-end; }
+		.detail-row { grid-template-columns: 1fr; gap: 2px; }
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		* { transition: none !important; }
+	}
+</style>
 </head>
 <body>
-<h1>testd</h1>
-<p>Live names are served by the host daemon.</p>
-<section id="access">
-<h2>Access</h2>
-<p>Requests waiting for approval and tokens issued to leaves.</p>
-<ul id="requests"></ul>
-</section>
+
+<header class="topbar">
+	<div class="topbar-inner">
+		<a class="brand" href="/" aria-label="testd dashboard">
+			<svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+				<rect width="32" height="32" rx="8" fill="currentColor"/>
+				<circle class="brand-ink" cx="10.5" cy="20.5" r="2.4"/>
+				<path class="brand-stroke" d="M17 7.5v13.1c0 2.7 1.5 4.1 4.1 4.1h.9"/>
+			</svg>
+			<span class="brand-name">testd</span>
+			<span class="badge-free" title="Free, self-hosted version">Free version</span>
+		</a>
+		<div class="theme-switch" role="group" aria-label="Color theme">
+			<button type="button" data-theme-choice="system" aria-label="System theme" title="System theme"
+				aria-pressed="true">
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+					stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<rect x="3" y="4" width="18" height="12" rx="2"/>
+					<path d="M8 20h8M12 16v4"/>
+				</svg>
+				<span>Auto</span>
+			</button>
+			<button type="button" data-theme-choice="light" aria-label="Light theme" title="Light theme"
+				aria-pressed="false">
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+					stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<circle cx="12" cy="12" r="4"/>
+					<path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4
+						M17.7 6.3l1.4-1.4"/>
+				</svg>
+				<span>Light</span>
+			</button>
+			<button type="button" data-theme-choice="dark" aria-label="Dark theme" title="Dark theme"
+				aria-pressed="false">
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+					stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<path d="M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5 8.5 8.5 0 1 0 20.5 14.2Z"/>
+				</svg>
+				<span>Dark</span>
+			</button>
+		</div>
+	</div>
+</header>
+
+<main class="page">
+	<header class="page-head">
+		<div>
+			<h1>Dashboard</h1>
+			<p class="page-subtitle">Stable HTTPS names for <code>.{tld}</code> on this machine.</p>
+		</div>
+		<p class="page-meta"><span class="live-dot" aria-hidden="true"></span> Local daemon</p>
+	</header>
+
+	<div id="notice" class="notice" role="status" aria-live="polite"></div>
+
+	{advisory}
+
+	<div class="layout">
+		<div class="column">
+			<section class="card" id="names">
+				<div class="card-head">
+					<div>
+						<div class="card-title-row">
+							<h2>Active domains</h2>
+							<span class="count" id="domain-count">{domain_count}</span>
+						</div>
+						<p class="card-desc">Live registrations from connected dev environments. Stop ends a leaf
+							but keeps its grants; delete removes the grant for that name only, so the leaf must
+							request it again.</p>
+					</div>
+				</div>
+				<div class="card-body" id="domain-list">
+					{domains}
+				</div>
+			</section>
+
+
+			<section class="card" id="launches">
+				<div class="card-head">
+					<div>
+						<div class="card-title-row">
+							<h2>Quick launches</h2>
+							<span class="count" id="launch-count">0</span>
+						</div>
+						<p class="card-desc">Start a project command and register its name in one step. Runs on this
+							machine only.</p>
+					</div>
+				</div>
+				<div class="card-body">
+					<div id="launch-list"></div>
+					<form class="form-grid" onsubmit="saveLaunch(event)" autocomplete="off">
+						<div class="field">
+							<label for="launch-label">Launch name</label>
+							<input class="input" id="launch-label" placeholder="Web app" required>
+						</div>
+						<div class="field">
+							<label for="launch-domain">Domain</label>
+							<input class="input" id="launch-domain" placeholder="app.example" required
+								spellcheck="false">
+						</div>
+						<div class="field">
+							<label for="launch-target">Target (optional)</label>
+							<input class="input" id="launch-target" placeholder="Auto-detect; or port or host:port"
+								spellcheck="false">
+						</div>
+						<div class="field field-wide">
+							<label for="launch-command">Command</label>
+							<input class="input" id="launch-command" placeholder="npm run dev" required
+								spellcheck="false">
+						</div>
+						<div class="form-actions">
+							<button class="btn btn-primary btn-sm" type="submit">Save launch</button>
+						</div>
+					</form>
+				</div>
+			</section>
+		</div>
+
+		<div class="column">
+			<section class="card" id="access">
+				<div class="card-head">
+					<div>
+						<div class="card-title-row"><h2>Access</h2></div>
+						<p class="card-desc">A leaf without a credential asks for a grant on first run, naming the
+							domains it wants. Approving issues a token for those names; denying closes the request.
+							Revoking a token stops the leaf using it and removes all of its grants.</p>
+					</div>
+				</div>
+				<div class="card-body">
+					<div class="subhead">
+						<h3>Pending requests</h3>
+						<span class="count" id="request-count">0</span>
+					</div>
+					<div id="request-list"></div>
+					<div class="subhead">
+						<h3>Issued tokens</h3>
+						<span class="count" id="token-count">0</span>
+					</div>
+					<div id="token-list"></div>
+				</div>
+			</section>
+
+			<section class="card" id="shares">
+				<div class="card-head">
+					<div>
+						<div class="card-title-row">
+							<h2>Shares</h2>
+							<span class="count" id="share-count">{share_count}</span>
+						</div>
+						<p class="card-desc">Provider URLs for registered names. A share is not a testd name:
+							stopping it leaves the name in place, and removing the name stops the share.</p>
+					</div>
+				</div>
+				<div class="card-body" id="share-list">
+					{shares}
+				</div>
+			</section>
+
+			<section class="card" id="certificate">
+				<div class="card-head">
+					<div>
+						<div class="card-title-row">
+							<h2>Certificate</h2>
+							<span id="certificate-badge" class="pill pill-muted">Checking...</span>
+						</div>
+						<p class="card-desc">The local root is trusted on this machine. A device that fetches
+							<code>/ca.crt</code> from the host can install it once.</p>
+					</div>
+				</div>
+				<div class="card-body">
+					<dl class="details">
+						<div class="detail-row">
+							<dt>Subject</dt>
+							<dd id="certificate-subject">-</dd>
+						</div>
+						<div class="detail-row">
+							<dt>Expires</dt>
+							<dd id="certificate-expiry">-</dd>
+						</div>
+						<div class="detail-row">
+							<dt>SHA-256</dt>
+							<dd id="certificate-fingerprint" class="mono">-</dd>
+						</div>
+					</dl>
+					<div class="row-actions card-actions">
+						<a class="btn btn-sm" href="/ca.crt" download>Download root</a>
+						<button class="btn btn-sm" id="certificate-install" type="button" disabled
+							onclick="certificate('install')">Install</button>
+						<button class="btn btn-sm btn-danger" id="certificate-remove" type="button" disabled
+							onclick="certificate('remove')">Remove</button>
+					</div>
+				</div>
+			</section>
+		</div>
+	</div>
+</main>
+
+<footer class="footer">
+	<div class="footer-inner">
+		<div class="footer-product">
+			<div class="footer-brand">
+				<span class="footer-name">testd</span>
+				<span class="footer-version">v{version}</span>
+			</div>
+			<p class="footer-note">Stable HTTPS names for local development.</p>
+		</div>
+		<div class="footer-right">
+			<nav class="footer-links" aria-label="Project links">
+				<a href="https://github.com/testd/testd#readme" target="_blank" rel="noreferrer">Documentation</a>
+				<a href="https://github.com/testd/testd/blob/master/CHANGELOG.md" target="_blank"
+					rel="noreferrer">Changelog</a>
+				<a href="https://github.com/testd/testd/blob/master/LICENSE" target="_blank"
+					rel="noreferrer">License</a>
+				<a href="https://github.com/testd/testd" target="_blank" rel="noreferrer">GitHub</a>
+			</nav>
+			<p class="footer-note">© 2026 the testd authors · ISC License · Loopback-only dashboard</p>
+		</div>
+	</div>
+</footer>
+
 <script>
-fetch('/api/local/requests').then(r => r.json()).then(items => {
-  const list = document.getElementById('requests');
-  for (const item of items) {
-    const li = document.createElement('li');
-    li.textContent = item.label + ' asks for ' + item.names.join(', ');
-    list.append(li);
-  }
-});
+	const THEME_KEY = 'testd.theme';
+	const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+
+	function storedTheme() {
+		try {
+			const value = localStorage.getItem(THEME_KEY);
+			if (value === 'light' || value === 'dark') return value;
+		} catch (e) {}
+		return 'system';
+	}
+
+	function resolveTheme(theme) {
+		return theme === 'dark' || (theme === 'system' && darkQuery.matches) ? 'dark' : 'light';
+	}
+
+	function applyTheme(theme) {
+		document.documentElement.dataset.theme = resolveTheme(theme);
+		document.querySelectorAll('[data-theme-choice]').forEach((button) => {
+			button.setAttribute('aria-pressed', String(button.dataset.themeChoice === theme));
+		});
+	}
+
+	function chooseTheme(theme) {
+		try { localStorage.setItem(THEME_KEY, theme); } catch (e) {}
+		applyTheme(theme);
+	}
+
+	document.querySelectorAll('[data-theme-choice]').forEach((button) => {
+		button.addEventListener('click', () => chooseTheme(button.dataset.themeChoice));
+	});
+	if (darkQuery.addEventListener) {
+		darkQuery.addEventListener('change', () => {
+			if (storedTheme() === 'system') applyTheme('system');
+		});
+	}
+	applyTheme(storedTheme());
+
+	async function post(path, body) {
+		const response = await fetch(path, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'X-Testd-Request': '1' },
+			body: JSON.stringify(body || {}),
+		});
+		let data = {};
+		try { data = await response.json(); } catch (e) {}
+		if (!response.ok) throw new Error(data.error || response.statusText);
+		return data;
+	}
+
+	async function getJson(path) {
+		const response = await fetch(path);
+		if (!response.ok) throw new Error(response.statusText);
+		return response.json();
+	}
+
+	let noticeTimer;
+
+	function hideNotice() {
+		clearTimeout(noticeTimer);
+		const box = document.getElementById('notice');
+		box.className = 'notice';
+		box.replaceChildren();
+	}
+
+	function notice(message, isError = true) {
+		const box = document.getElementById('notice');
+		const text = document.createElement('span');
+		text.className = 'notice-text';
+		text.textContent = message;
+		const close = document.createElement('button');
+		close.type = 'button';
+		close.className = 'notice-close';
+		close.setAttribute('aria-label', 'Dismiss');
+		close.textContent = '×';
+		close.addEventListener('click', hideNotice);
+		box.replaceChildren(text, close);
+		box.className = 'notice ' + (isError ? 'notice-error' : 'notice-ok');
+		clearTimeout(noticeTimer);
+		if (!isError) noticeTimer = setTimeout(hideNotice, 4000);
+	}
+
+	function emptyState(title, text) {
+		const box = document.createElement('p');
+		box.className = 'empty';
+		const strong = document.createElement('strong');
+		strong.textContent = title;
+		const span = document.createElement('span');
+		span.textContent = text;
+		box.append(strong, span);
+		return box;
+	}
+
+	function updateCount(id, value) {
+		document.getElementById(id).textContent = value;
+	}
+
+	function removeRow(button, bodyId, countId, emptyTitle, emptyText) {
+		const row = button.closest('.row');
+		const list = row.parentElement;
+		row.remove();
+		if (list && list.classList.contains('rows') && !list.querySelector('.row')) {
+			const heading = list.previousElementSibling;
+			if (heading && heading.classList.contains('group')) heading.remove();
+			list.remove();
+		}
+		const body = document.getElementById(bodyId);
+		const count = body.querySelectorAll('.row').length;
+		updateCount(countId, count);
+		if (count === 0) body.replaceChildren(emptyState(emptyTitle, emptyText));
+	}
+
+	function unshare(name, button) {
+		button.disabled = true;
+		post('/unshare/' + encodeURIComponent(name))
+			.then(() => removeRow(button, 'share-list', 'share-count', 'No shares',
+				'Start one with testd share <name>.'))
+			.catch((e) => { button.disabled = false; notice(e.message); });
+	}
+
+	// Stop the leaf but keep its grant, so a later run publishes the name again.
+	function stopName(domain, button) {
+		button.disabled = true;
+		post('/stop/' + encodeURIComponent(domain))
+			.then(() => location.reload())
+			.catch((e) => { button.disabled = false; notice(e.message); });
+	}
+
+	// Delete one name's grant. Destructive: the leaf has to request this name
+	// again; its other granted names keep running.
+	function deleteGrant(domain, button) {
+		const message = 'Delete the grant for ' + domain + '?\n\n' +
+			'The name is removed and the leaf must request access for it again. ' +
+			'The leaf\'s other names keep running.';
+		if (!confirm(message)) return;
+		button.disabled = true;
+		post('/delete/' + encodeURIComponent(domain))
+			.then(() => location.reload())
+			.catch((e) => { button.disabled = false; notice(e.message); });
+	}
+
+	let launchErrorShown = false;
+
+	async function loadLaunches() {
+		try {
+			const launches = await getJson('/api/local/launches');
+			const list = document.getElementById('launch-list');
+			list.replaceChildren();
+			updateCount('launch-count', launches.length);
+			if (!launches.length) {
+				list.append(emptyState('No quick launches',
+					'Save a command below to register its name while it runs.'));
+				return;
+			}
+			const rows = document.createElement('ul');
+			rows.className = 'rows';
+			for (const launch of launches) rows.append(launchRow(launch));
+			list.append(rows);
+			launchErrorShown = false;
+		} catch (e) {
+			if (!launchErrorShown) {
+				notice('Cannot read quick launches: ' + e.message);
+				launchErrorShown = true;
+			}
+		}
+	}
+
+	function launchRow(launch) {
+		const row = document.createElement('li');
+		row.className = 'row';
+
+		const main = document.createElement('div');
+		main.className = 'row-main';
+
+		const titleLine = document.createElement('div');
+		titleLine.className = 'row-title-line';
+		const title = document.createElement('span');
+		title.className = 'row-title';
+		title.textContent = launch.label;
+		const pill = document.createElement('span');
+		if (launch.error) {
+			pill.className = 'pill pill-danger';
+			pill.textContent = 'Error';
+		} else if (launch.running) {
+			pill.className = 'pill pill-ok';
+			pill.textContent = 'Running';
+		} else {
+			pill.className = 'pill pill-muted';
+			pill.textContent = 'Stopped';
+		}
+		titleLine.append(title, pill);
+		main.append(titleLine);
+
+		const command = document.createElement('div');
+		command.className = 'row-meta truncate';
+		command.title = [launch.program, ...(launch.args || [])].join(' ');
+		command.textContent = command.title;
+		main.append(command);
+
+		for (const entry of launch.entries || []) {
+			const line = document.createElement('div');
+			line.className = 'row-meta';
+			const name = document.createElement('code');
+			name.textContent = entry.domain;
+			line.append(name);
+			if (entry.target) line.append(document.createTextNode(' → ' + entry.target));
+			const state = (launch.states || []).find((item) => item.domain === entry.domain);
+			if (state) {
+				const label = state.state.charAt(0).toUpperCase() + state.state.slice(1);
+				const detail = state.error ? label + ': ' + state.error : label;
+				line.append(document.createTextNode(' · ' + detail));
+			}
+			main.append(line);
+		}
+
+		if (launch.error) {
+			const error = document.createElement('div');
+			error.className = 'row-error';
+			error.textContent = launch.error;
+			main.append(error);
+		}
+
+		const actions = document.createElement('div');
+		actions.className = 'row-actions';
+		const toggle = document.createElement('button');
+		toggle.type = 'button';
+		toggle.className = 'btn btn-sm' + (launch.running ? '' : ' btn-primary');
+		toggle.textContent = launch.running ? 'Stop' : 'Start';
+		toggle.onclick = () => launchAction(launch.running ? 'stop' : 'start', launch.id);
+		const remove = document.createElement('button');
+		remove.type = 'button';
+		remove.className = 'btn btn-sm btn-danger';
+		remove.textContent = 'Delete';
+		remove.disabled = launch.running;
+		remove.onclick = () => launchAction('delete', launch.id);
+		actions.append(toggle, remove);
+
+		row.append(main, actions);
+		return row;
+	}
+
+	function launchAction(action, id) {
+		post('/api/local/launches/' + action, { id })
+			.then(loadLaunches)
+			.catch((e) => notice(e.message));
+	}
+
+	// Split a command line into argv, honoring single and double quotes.
+	function parseCommand(text) {
+		const parts = [];
+		let current = '';
+		let quote = null;
+		let escaped = false;
+		let started = false;
+		for (const char of text) {
+			if (escaped) {
+				current += char;
+				escaped = false;
+				started = true;
+				continue;
+			}
+			if (char === '\\' && quote !== "'") {
+				escaped = true;
+				continue;
+			}
+			if (quote) {
+				if (char === quote) quote = null;
+				else current += char;
+				started = true;
+				continue;
+			}
+			if (char === '"' || char === "'") {
+				quote = char;
+				started = true;
+				continue;
+			}
+			if (/\s/.test(char)) {
+				if (started) {
+					parts.push(current);
+					current = '';
+					started = false;
+				}
+				continue;
+			}
+			current += char;
+			started = true;
+		}
+		if (escaped) current += '\\';
+		if (quote) throw new Error('Unclosed quote in the command.');
+		if (started) parts.push(current);
+		return parts;
+	}
+
+	function saveLaunch(event) {
+		event.preventDefault();
+		let argv;
+		try {
+			argv = parseCommand(document.getElementById('launch-command').value.trim());
+		} catch (e) {
+			notice(e.message);
+			return;
+		}
+		if (!argv.length) {
+			notice('Enter a command to run.');
+			return;
+		}
+		const body = {
+			label: document.getElementById('launch-label').value.trim(),
+			program: argv[0],
+			args: argv.slice(1),
+			entries: [{
+				domain: document.getElementById('launch-domain').value.trim(),
+				target: document.getElementById('launch-target').value.trim(),
+			}],
+		};
+		post('/api/local/launches/save', body)
+			.then(() => {
+				event.target.reset();
+				loadLaunches();
+				notice('Launch saved.', false);
+			})
+			.catch((e) => notice(e.message));
+	}
+
+	function ago(seconds) {
+		const delta = Math.max(0, Math.floor(Date.now() / 1000) - seconds);
+		if (delta < 60) return delta + 's ago';
+		if (delta < 3600) return Math.floor(delta / 60) + 'm ago';
+		if (delta < 86400) return Math.floor(delta / 3600) + 'h ago';
+		return Math.floor(delta / 86400) + 'd ago';
+	}
+
+	function actionButton(label, kind, onClick) {
+		const button = document.createElement('button');
+		button.type = 'button';
+		button.className = 'btn btn-sm' + (kind ? ' btn-' + kind : '');
+		button.textContent = label;
+		button.onclick = () => {
+			button.disabled = true;
+			onClick().finally(() => { button.disabled = false; });
+		};
+		return button;
+	}
+
+	function accessRow(title, meta, buttons) {
+		const row = document.createElement('li');
+		row.className = 'row';
+		const main = document.createElement('div');
+		main.className = 'row-main';
+		const titleLine = document.createElement('div');
+		titleLine.className = 'row-title-line';
+		const heading = document.createElement('span');
+		heading.className = 'row-title';
+		heading.textContent = title;
+		titleLine.append(heading);
+		const description = document.createElement('div');
+		description.className = 'row-meta';
+		description.textContent = meta;
+		main.append(titleLine, description);
+		const actions = document.createElement('div');
+		actions.className = 'row-actions';
+		actions.append(...buttons);
+		row.append(main, actions);
+		return row;
+	}
+
+	function renderAccessList(containerId, items, buildRow, title, text) {
+		const container = document.getElementById(containerId);
+		container.replaceChildren();
+		if (!items.length) {
+			container.append(emptyState(title, text));
+			return;
+		}
+		const list = document.createElement('ul');
+		list.className = 'rows';
+		for (const item of items) list.append(buildRow(item));
+		container.append(list);
+	}
+
+	let accessErrorShown = false;
+
+	async function loadAccess() {
+		try {
+			const [requests, tokens] = await Promise.all([
+				getJson('/api/local/requests'),
+				getJson('/api/local/tokens'),
+			]);
+			updateCount('request-count', requests.length);
+			updateCount('token-count', tokens.length);
+			renderAccessList('request-list', requests, (request) => accessRow(
+				request.label,
+				(request.names.length ? request.names.join(', ') + ' · ' : '') +
+					request.address + ' · requested ' + ago(request.requested_at) + ' · ' + request.id,
+				[
+					actionButton('Approve', 'primary', () => requestAction('approve', request.id)),
+					actionButton('Deny', 'danger', () => requestAction('deny', request.id)),
+				],
+			), 'No pending requests', 'A leaf asking for a token or a name appears here.');
+			renderAccessList('token-list', tokens, (token) => {
+				let meta = token.names ? (token.names.join(', ') || 'no names') : 'all names';
+				meta += ' · issued ' + ago(token.created_at);
+				if (token.last_seen_at) meta += ' · last seen ' + ago(token.last_seen_at);
+				meta += ' · ' + token.id;
+				return accessRow(token.label, meta, [
+					actionButton('Revoke', 'danger', () => revokeToken(token.id)),
+				]);
+			}, 'No issued tokens', 'Approved requests become tokens.');
+			accessErrorShown = false;
+		} catch (e) {
+			if (!accessErrorShown) {
+				notice('Cannot read access state: ' + e.message);
+				accessErrorShown = true;
+			}
+		}
+	}
+
+	function requestAction(action, id) {
+		return post('/api/local/requests/' + action, { id })
+			.then(loadAccess)
+			.catch((e) => notice(e.message));
+	}
+
+	function revokeToken(id) {
+		return post('/api/local/tokens/revoke', { id })
+			.then(loadAccess)
+			.catch((e) => notice(e.message));
+	}
+
+	function certificate(action) {
+		post('/api/local/certificate/' + action)
+			.then((status) => {
+				renderCertificate(status);
+				notice(action === 'install' ? 'Root certificate installed.' : 'Root certificate removed.', false);
+			})
+			.catch((e) => notice(e.message));
+	}
+
+	function renderCertificate(status) {
+		const trusted = Boolean(status.trusted);
+		const badge = document.getElementById('certificate-badge');
+		badge.className = 'pill ' + (trusted ? 'pill-ok' : 'pill-warn');
+		badge.textContent = trusted ? 'Trusted' : 'Not trusted';
+		document.getElementById('certificate-subject').textContent = status.subject || '-';
+		document.getElementById('certificate-expiry').textContent = status.not_after || '-';
+		document.getElementById('certificate-fingerprint').textContent = status.fingerprint_sha256 || '-';
+		document.getElementById('certificate-install').disabled = trusted;
+		document.getElementById('certificate-remove').disabled = !trusted;
+	}
+
+	async function certificateState() {
+		try {
+			renderCertificate(await getJson('/api/local/certificate'));
+		} catch (e) {
+			notice('Cannot read the certificate status: ' + e.message);
+		}
+	}
+
+	loadLaunches();
+	certificateState();
+	loadAccess();
+	setInterval(() => { if (!document.hidden) loadAccess(); }, 3000);
+	setInterval(() => { if (!document.hidden) loadLaunches(); }, 4000);
 </script>
 </body>
 </html>
