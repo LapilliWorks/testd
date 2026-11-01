@@ -6,6 +6,7 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 
 ### Changed
 
+- `tests/release/run.py host --system` snapshots the resolver and trust integration it changes and restores it afterwards instead of refusing to run on a host that already has testd integration; `--restore-report` recovers a report after a hard kill
 - CLI/daemon MSRV raised to Rust 1.89; tray MSRV remains Rust 1.90
 
 ### Fixed

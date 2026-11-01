@@ -36,8 +36,9 @@ Run against the release candidate on each supported host. Child stdout and stder
 # Automated code/dependency/MSRV checks; omit --gui if Tauri prerequisites are absent
 python3 tests/release/run.py core --strict --gui
 
-# OS integration on a clean disposable VM: sudo -v first on macOS/Linux,
-# or use an elevated shell on Windows. Existing testd integration is not overwritten
+# OS integration: sudo -v first on macOS/Linux, or use an elevated shell on
+# Windows. The suite snapshots the integration `doctor --fix` changes and
+# restores it afterwards. No testd daemon may be running.
 python3 tests/release/run.py host --system --service
 
 # Download the candidate CLI archive, SHA256SUMS, and desired bundles into one directory
@@ -59,9 +60,9 @@ The browser suite uses Bun fixtures and publishes `app.releasecheck`, `api.relea
 
 The `service` suite (also available as `host --service` or `artifacts --service`) exercises the real launchd/systemd user-session supervisor: start, TLS, forced-crash restart, and stop. It stages a uniquely named service with an isolated home and high ports, retains the generated unit/plist in the report, and removes only that new service when done. Run in a real user session with a working `systemctl --user` or launchd GUI domain; Windows CLI services are not shipped, so Windows supervision is covered by the tray login checks.
 
-The desktop suite launches the supplied app/installer and records each existing GUI checklist item as pass, fail, or not applicable with evidence. Use a clean disposable VM for first-install, setup, actual login, upgrade, and uninstall checks. Padlocks, UAC, tray behavior, and login cannot be proven by an HTTP-only script. Skips and unanswered checks remain visible in `report.json`; they are not counted as passes. An interrupted desktop checklist or browser run without a saved report exits `2` (incomplete); failed checks exit `1`.
+The desktop suite launches the supplied app/installer and records each existing GUI checklist item as pass, fail, or not applicable with evidence. Use a clean disposable machine for first-install, setup, actual login, upgrade, and uninstall checks; the runner restores any integration the session installs, but not a pre-existing installation. Padlocks, UAC, tray behavior, and login cannot be proven by an HTTP-only script. Skips and unanswered checks remain visible in `report.json`; they are not counted as passes. An interrupted desktop checklist or browser run without a saved report exits `2` (incomplete); failed checks exit `1`.
 
-`host --system` snapshots integration state before changes and refuses existing testd resolver routes or roots. It requests cleanup of the test route and root. Inspect the host log to verify cleanup; VM snapshots are still recommended. Plain `host` does not change system integration. `--bin /path/to/testd` runs a candidate CLI without rebuilding it.
+`host --system` snapshots the integration `doctor --fix` will change, runs the checks, then restores and verifies that snapshot. Nothing outside the throwaway TLD and the `testd root` name is touched, so the suite does not require a clean machine; it requires that no testd daemon is running. See [System integration](#system-integration) for the recorded artifacts and the recovery path. Plain `host` does not change system integration. `--bin /path/to/testd` runs a candidate CLI without rebuilding it.
 
 ## Contents
 
@@ -102,7 +103,7 @@ Each script uses:
 - a high HTTPS port (`8443`) so it does not need root for the edge,
 - dedicated upstream ports for registration (`18080`) and quick launches (`18081`).
 
-The scripts do **not** call sudo by default. On Linux and macOS they use `--cacert` for HTTPS; on Windows they use `--insecure` for the edge and proxy checks because Schannel does not treat `--cacert` like OpenSSL. To also test the OS resolver and trust store, use `python3 tests/release/run.py host --system` with a cached sudo credential (Linux/macOS) or an elevated shell (Windows). Direct platform scripts refuse privileged checks without the runner's backup step.
+The scripts do **not** call sudo themselves. On Linux and macOS they use `--cacert` for HTTPS; on Windows they use `--insecure` for the edge and proxy checks because Schannel does not treat `--cacert` like OpenSSL. To also test the OS resolver and trust store, use `python3 tests/release/run.py host --system` with a cached sudo credential (Linux/macOS) or an elevated shell (Windows). The platform scripts refuse privileged checks without the runner's snapshot.
 
 ### Linux
 
@@ -117,24 +118,17 @@ cargo build --release -p testd
 # Core checks, no system changes
 tests/host/linux.sh
 
-# Optional: resolver + trust store on a disposable machine
+# Optional: resolver + trust store; restored automatically afterwards
 sudo -v
 python3 tests/release/run.py host --system
 
-# Same, and clean up the resolver/trust changes afterwards
+# Same against an existing candidate binary
 python3 tests/release/run.py host --system --bin target/release/testd
 ```
 
 The system check writes `/usr/local/share/ca-certificates/testd-root.crt` and
 `/etc/systemd/resolved.conf.d/90-testd.conf`. Both are the same changes a real
-`testd doctor --fix` makes. The printed cleanup commands are:
-
-```sh
-sudo rm -f /etc/systemd/resolved.conf.d/90-testd.conf
-sudo systemctl reload systemd-resolved
-sudo rm -f /usr/local/share/ca-certificates/testd-root.crt
-sudo update-ca-certificates --fresh
-```
+`testd doctor --fix` makes, and both are restored from the snapshot.
 
 ### macOS
 
@@ -153,16 +147,9 @@ python3 tests/release/run.py host --system
 ```
 
 The system check writes `/etc/resolver/testdcheck` and installs the test root
-into `/Library/Keychains/System.keychain`. Cleanup:
-
-```sh
-sudo rm -f /etc/resolver/testdcheck
-sudo security delete-certificate -c "testd root" /Library/Keychains/System.keychain
-```
-
-If the machine already uses testd for `.test`, do not set
-`TESTD_HOST_TEST_SYSTEM=1` without understanding that the root CA at
-`/usr/local/share/ca-certificates/testd-root.crt` is replaced.
+into `/Library/Keychains/System.keychain`. Both are restored from the snapshot;
+the upstream root is identified by its SHA-1, not by name, so an unrelated
+`testd root` is never deleted.
 
 ### Windows
 
@@ -206,12 +193,11 @@ on Windows. Privileged actions are delegated to
 IPv4 address, certificate thumbprint, and CA constraints. If testd is not
 elevated, Windows shows one UAC prompt for that helper only.
 
-Cleanup:
+Cleanup is automatic: the snapshot taken before the checks removes the NRPT rule
+for `.testdcheck` and the test root by thumbprint. Recovery after a hard kill:
 
 ```powershell
-Get-DnsClientNrptRule | Where-Object { $_.Namespace -eq '.testdcheck' } |
-    ForEach-Object { Remove-DnsClientNrptRule -Name $_.Name -Confirm:$false }
-certutil -delstore Root "testd root"
+python tests\release\run.py --restore-report $env:LOCALAPPDATA\testd\release-checks\<stamp>-<id>
 ```
 
 Windows NRPT rules cannot specify a port, which is why the daemon binds `:53`
@@ -270,7 +256,39 @@ for the per-artifact commands.
 | `TESTD_HOST_APP_PORT` | `18080` | Test upstream port |
 | `TESTD_HOST_LAUNCH_PORT` | `18081` | Quick-launch upstream port |
 | `TESTD_HOST_TEST_SYSTEM` | `0` | Allow resolver and trust changes |
-| `TESTD_HOST_TEST_CLEANUP` | `0` | Revert resolver/trust changes after a system run |
+| `TESTD_HOST_SNAPSHOT` | unset | Snapshot directory written by `run.py --system` |
+
+### System integration
+
+`host --system` assumes no testd daemon is running and that the host's own
+integration comes back afterwards. Before the checks run, `run.py` records every
+artifact `doctor --fix` can change in `<report>/system-before/`:
+
+| Platform | Artifacts | Reload |
+|---|---|---|
+| Linux | `/etc/systemd/resolved.conf.d/90-testd.conf`, `/usr/local/share/ca-certificates/testd-root.crt` | `systemctl reload systemd-resolved`, `update-ca-certificates --fresh` |
+| macOS | `/etc/resolver/<tld>`, every `CN=testd root` in the System keychain | keychain operations are per SHA-1 |
+| Windows | NRPT rules for `.<tld>`, every `CN=testd root` in the machine root store | per thumbprint |
+
+The manifest records file bytes, modes, SHA-256 digests, and every pre-existing
+store entry. Restore puts back what the suite removed, removes what it added,
+reloads each consumer, and then verifies the host against the manifest; the
+result is the `system-restore` check. Restores are idempotent. A report that ran
+system checks more than once keeps each snapshot as `system-before`,
+`system-before-2`, and so on.
+
+A run that is killed outright cannot restore itself. The snapshot stays on disk,
+so recover with the report directory:
+
+```sh
+python3 tests/release/run.py --restore-report ~/.local/share/testd/release-checks/<stamp>-<id>
+```
+
+This works from any shell, needs the same sudo (or elevation) as the original
+run, restores every snapshot in the report newest first, and exits non-zero if
+the host does not match the snapshots afterwards. Direct runs of
+`tests/host/*.sh` and `tests/host/windows.ps1` cannot do privileged checks,
+because they have no snapshot to restore from.
 
 ### System checks need a running daemon
 

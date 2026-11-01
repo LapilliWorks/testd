@@ -1,7 +1,7 @@
 # GUI checklist
 
 These are the checks that need a desktop session and the Tauri bundle. Run them
-against a build from the same commit as the CLI/daemon. `python3 tests/release/run.py desktop --app <candidate>` launches the candidate and records each checkbox below as pass, fail, or not applicable, with evidence. Use a clean disposable VM for system changes.
+against a build from the same commit as the CLI/daemon. `python3 tests/release/run.py desktop --app <candidate>` launches the candidate and records each checkbox below as pass, fail, or not applicable, with evidence. The runner snapshots the system integration first and restores it when the checklist ends.
 
 ## Build
 
