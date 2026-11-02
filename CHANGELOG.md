@@ -22,6 +22,7 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 
 ### Fixed
 
+- The dead-upstream edge test closes its probe port before the request: macOS drops the SYN for a socket that is bound but never listens, so the test received a timeout instead of the refusal it asserts
 - The browser release suite starts a headless host when none is listening and stops only a host it started, so the suite no longer leaves the fixture retrying for an hour; a host with another TLD is refused
 - The browser page can restart a host the suite started and reports the result back to the page, so the certificate-renewal check no longer needs a separate terminal; a pre-started host is left alone
 - The HTTPS edge keeps the WebSocket handshake response headers, including `Sec-WebSocket-Accept`, so upgrades through the edge work in browsers again

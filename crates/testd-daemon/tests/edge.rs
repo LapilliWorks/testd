@@ -16,7 +16,6 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use rustls::pki_types::ServerName;
-use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex as AsyncMutex, Notify};
@@ -267,27 +266,24 @@ async fn client_abort_drops_the_upstream_connection() {
 #[tokio::test]
 async fn dead_upstream_is_502() {
 	let harness = start().await;
-	// Reserve a TCP port without listening; no parallel fixture can reuse it.
-	let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
-	let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-	socket.bind(&addr.into()).unwrap();
-	let port = socket.local_addr().unwrap().as_socket().unwrap().port();
+	// Hold the port while the registration is prepared so no parallel fixture can
+	// claim it, then close it before the request. A socket that stays bound without
+	// listening refuses connections on Linux and Windows, but macOS silently drops
+	// the SYN, which reaches the edge as a timeout instead of a refusal.
+	let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let addr = probe.local_addr().unwrap();
 	let connection = harness.registry.lock().await.connection_id();
 	harness
 		.registry
 		.lock()
 		.await
-		.register(
-			connection,
-			Registration { domain: "dead.test".into(), target: format!("127.0.0.1:{port}") },
-			false,
-			&[],
-		)
+		.register(connection, Registration { domain: "dead.test".into(), target: addr.to_string() }, false, &[])
 		.unwrap();
+	drop(probe);
 
 	let response = raw_request(harness.edge.http_addr, &get("dead.test", "/")).await;
 	assert!(response.starts_with("HTTP/1.1 502"), "{response}");
-	assert!(response.contains(&format!("127.0.0.1:{port}")), "{response}");
+	assert!(response.contains(&addr.to_string()), "{response}");
 }
 
 #[tokio::test]
