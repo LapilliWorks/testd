@@ -61,6 +61,8 @@ The dashboard is served on loopback and checks that the `Host` header is `localh
 
 A bare URL is read-only. Mutations and every `/api/local/*` path need the per-run token from `control.json`; a `POST` also needs `X-Testd-Request: 1`, which a cross-site form cannot set. The token is delivered in the URL fragment, so it is not sent in the HTTP request. It remains in browser history while the page is open; do not paste the authenticated URL into screenshots, issue trackers, or chat.
 
+The page keeps a token-authenticated event stream open for live updates. The stream is loopback-only like the rest of the dashboard, and the browser sends the token in a request header rather than a URL.
+
 The dashboard has no TLS and no user login. It refuses non-loopback peers and enforces a loopback `Host` header. Do not port-forward it or put it behind a reverse proxy. The edge does not proxy it.
 
 ## Certificates and trust

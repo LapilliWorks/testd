@@ -16,6 +16,7 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 
 ### Changed
 
+- The loopback dashboard is live: it reads a token-authenticated event stream, and name, share, launch, request, and token changes are pushed to the page instead of polled
 - The tray menu lists live names with open and stop beneath each one, and saved quick launches with a disabled heading plus start or stop, instead of only opening the dashboard section
 - New root certificates include a random pronounceable covo name in the common name, so multiple installations are distinguishable in the keychain; legacy `testd root` names are still recognised
 - `tests/release/run.py host --system` snapshots the resolver and trust integration it changes and restores it afterwards instead of refusing to run on a host that already has testd integration; `--restore-report` recovers a report after a hard kill

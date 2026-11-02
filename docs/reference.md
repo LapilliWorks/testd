@@ -343,6 +343,8 @@ The token is normally supplied by the dashboard URL fragment (`#token=...`), whi
 | `GET` | `/api/status` | None | Names, targets, projects, advisories, shares |
 | `GET` | `/ca.crt` | None | Root certificate PEM |
 | `GET` | `/ok.svg` | None | Trivial liveness image |
+| `GET` | `/api/local/state` | Token | Live dashboard snapshot: names, shares, launches, requests, tokens |
+| `GET` | `/api/local/events` | Token | Server-sent snapshot stream for live dashboard updates |
 | `GET` | `/api/local/launches` | Token | Quick launch definitions and running state |
 | `POST` | `/api/local/launches/save` | Token | Create or update a definition |
 | `POST` | `/api/local/launches/delete` | Token | Delete a definition |
@@ -362,6 +364,8 @@ The token is normally supplied by the dashboard URL fragment (`#token=...`), whi
 | `POST` | `/unshare/<name>` | Token | Stop a name's tunnel |
 
 All `/api/local/*` paths require the token even for `GET`. The dashboard and API are not served by the edge.
+
+The dashboard keeps one `/api/local/events` request open and replaces its cards whenever a snapshot arrives. A snapshot is sent on connect, then whenever names, shares, launches, access requests, or tokens change; a comment frame is sent every 15 seconds to detect a dead connection. The browser reads the stream with `fetch`, so the token stays in the `X-Testd-Token` header instead of a URL.
 
 ## Tunnels
 
