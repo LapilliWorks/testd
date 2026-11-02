@@ -185,6 +185,7 @@ class FakeHost(state.Host):
 		super().__init__(system, tld)
 		self.files = {}
 		self.certificates = {}
+		self.certificate_names = {}
 		self.commands = []
 
 	def command(self, argv, privileged=False):
@@ -202,6 +203,9 @@ class FakeHost(state.Host):
 			for der in state.decode_pem(pathlib.Path(argv[-1]).read_text()):
 				self.certificates[hashlib.sha1(der).hexdigest()] = der
 		return ''
+
+	def certificate_common_name(self, der):
+		return self.certificate_names.get(der, state.KEYCHAIN_PREFIX)
 
 	def exists(self, path):
 		return str(path) in self.files or str(path) == state.KEYCHAIN
@@ -273,6 +277,16 @@ class SystemStateTests(unittest.TestCase):
 		windows = (ROOT / 'tests/release/windows-system-fixture.ps1').read_text()
 		self.assertIn("CN=testd root testing", windows)
 		self.assertIn('CN=testd root testing', (ROOT / 'tests/release/windows-system-state.ps1').read_text())
+
+	def test_keychain_scope_accepts_new_roots_but_not_the_fixture(self):
+		self.assertTrue(state.is_testd_root_name('testd root'))
+		self.assertTrue(state.is_testd_root_name('testd root 0123abcd'))
+		self.assertTrue(state.is_testd_root_name('testd root 0123ABCD'))
+		self.assertFalse(state.is_testd_root_name('testd root testing'))
+		self.assertFalse(state.is_testd_root_name('testd root 0123abc'))
+		self.assertFalse(state.is_testd_root_name('testd root 0123abcd extra'))
+		self.assertTrue(state.is_snapshot_root_name('testd root testing'))
+		self.assertTrue(state.is_snapshot_root_name('testd root 0123abcd'))
 
 	def test_linux_restore_returns_the_exact_previous_bytes(self):
 		with tempfile.TemporaryDirectory() as temporary:

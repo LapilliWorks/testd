@@ -62,7 +62,7 @@ The `service` suite (also available as `host --service` or `artifacts --service`
 
 The desktop suite launches the supplied app/installer and records each existing GUI checklist item as pass, fail, or not applicable with evidence. Use a clean disposable machine for first-install, setup, actual login, upgrade, and uninstall checks; the runner restores any integration the session installs, but not a pre-existing installation. Padlocks, UAC, tray behavior, and login cannot be proven by an HTTP-only script. Skips and unanswered checks remain visible in `report.json`; they are not counted as passes. An interrupted desktop checklist or browser run without a saved report exits `2` (incomplete); failed checks exit `1`.
 
-`host --system` snapshots the integration `doctor --fix` will change, runs the checks, then restores and verifies that snapshot. Nothing outside the throwaway TLD and the `testd root` name is touched, so the suite does not require a clean machine; it requires that no testd daemon is running. See [System integration](#system-integration) for the recorded artifacts and the recovery path. Plain `host` does not change system integration. `--bin /path/to/testd` runs a candidate CLI without rebuilding it.
+`host --system` snapshots the integration `doctor --fix` will change, runs the checks, then restores and verifies that snapshot. Nothing outside the throwaway TLD and the `testd root` and `testd root testing` names is touched, so the suite does not require a clean machine; it requires that no testd daemon is running. See [System integration](#system-integration) for the recorded artifacts and the recovery path. Plain `host` does not change system integration. `--bin /path/to/testd` runs a candidate CLI without rebuilding it.
 
 ## Contents
 
@@ -152,7 +152,7 @@ python3 tests/release/run.py host --system
 The system check writes `/etc/resolver/testdcheck` and installs the test root
 into `/Library/Keychains/System.keychain`. Both are restored from the snapshot;
 the upstream root is identified by its SHA-1, not by name, so an unrelated
-`testd root` is never deleted.
+`testd root` certificate is never deleted.
 
 To probe only the `/etc/resolver` configure and unconfigure path, run:
 
@@ -282,8 +282,8 @@ artifact `doctor --fix` can change in `<report>/system-before/`:
 |---|---|---|
 | Linux (Debian, Ubuntu) | `/etc/systemd/resolved.conf.d/90-testd.conf`, `/usr/local/share/ca-certificates/testd-root.crt` | `systemctl reload systemd-resolved`, `update-ca-certificates` |
 | Linux (Fedora, RHEL) | `/etc/systemd/resolved.conf.d/90-testd.conf`, `/etc/pki/ca-trust/source/anchors/testd-root.crt` | `systemctl reload systemd-resolved`, `update-ca-trust extract` |
-| macOS | `/etc/resolver/<tld>`, every `CN=testd root` and `CN=testd root testing` in the System keychain | keychain operations are per SHA-1 |
-| Windows | NRPT rules for `.<tld>`, every `CN=testd root` and `CN=testd root testing` in the machine root store | per thumbprint |
+| macOS | `/etc/resolver/<tld>`, every `CN=testd root <8 hex>` (and legacy `CN=testd root` or `CN=testd root testing`) in the System keychain | keychain operations are per SHA-1 |
+| Windows | NRPT rules for `.<tld>`, every `CN=testd root <8 hex>` (and legacy `CN=testd root` or `CN=testd root testing`) in the machine root store | per thumbprint |
 
 The manifest records file bytes, modes, SHA-256 digests, and every pre-existing
 store entry. Restore puts back what the suite removed, removes what it added,

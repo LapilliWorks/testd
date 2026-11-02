@@ -3,8 +3,8 @@
 The host suite assumes no testd daemon is running while it holds this state, and
 that the pre-run integration comes back afterwards. Every artifact `doctor --fix`
 writes is either a plain file or a store entry scoped to the throwaway TLD or to
-the `testd root` and `testd root testing` names, so a byte-exact backup plus a
-manifest restores a host exactly. Restores are idempotent, so a report can be restored again after a hard
+the `testd root` prefix and the separate `testd root testing` fixture name, so a
+byte-exact backup plus a manifest restores a host exactly. Restores are idempotent, so a report can be restored again after a hard
 kill.
 
 Unix files and the macOS keychain are handled here. Windows NRPT rules and the
@@ -20,6 +20,7 @@ import json
 import os
 import pathlib
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -30,7 +31,7 @@ MANIFEST = 'manifest.json'
 BLOBS = 'blobs'
 RESTORED = 'restored.json'
 KEYCHAIN = '/Library/Keychains/System.keychain'
-KEYCHAIN_NAMES = ('testd root', 'testd root testing')
+KEYCHAIN_PREFIX = 'testd root'
 FIXTURE_KEYCHAIN_NAME = 'testd root testing'
 WINDOWS_SCRIPT = pathlib.Path(__file__).resolve().with_name('windows-system-state.ps1')
 WINDOWS_FIXTURE = pathlib.Path(__file__).resolve().with_name('windows-system-fixture.ps1')
@@ -105,6 +106,18 @@ class Host:
 		if result.returncode != 0:
 			raise HostError('sudo credentials are not cached; run `sudo -v` before the system checks')
 
+	def certificate_common_name(self, der):
+		"""Read the CN from DER with the platform openssl tool."""
+		with tempfile.NamedTemporaryFile(suffix='.der', delete=False) as staged:
+			staged.write(der)
+			path = staged.name
+		try:
+			text = self.command(['openssl', 'x509', '-inform', 'DER', '-noout', '-subject', path])
+		finally:
+			pathlib.Path(path).unlink(missing_ok=True)
+		match = re.search(r'CN\s*=\s*([^,/\n]+)', text)
+		return match.group(1).strip() if match else None
+
 	def _run(self, argv):
 		# A hung privileged command must fail the restore, not stall it silently.
 		try:
@@ -169,15 +182,33 @@ def decode_pem(text):
 		for block in blocks if block.strip()]
 
 
+def is_testd_root_name(common_name):
+	"""Match legacy, serial-suffixed, and fixture testd root names."""
+	if common_name == KEYCHAIN_PREFIX:
+		return True
+	if common_name == FIXTURE_KEYCHAIN_NAME:
+		return False
+	suffix = common_name[len(KEYCHAIN_PREFIX):]
+	if not suffix.startswith(' '):
+		return False
+	suffix = suffix[1:]
+	return len(suffix) == 8 and all(character in '0123456789abcdefABCDEF' for character in suffix)
+
+
+def is_snapshot_root_name(common_name):
+	"""Snapshot fixture roots too, so their restore can remove them."""
+	return common_name == FIXTURE_KEYCHAIN_NAME or is_testd_root_name(common_name)
+
+
 def keychain_certificates(host):
 	"""Map SHA-1 to DER for every testd root in the macOS system keychain."""
 	if not host.exists(KEYCHAIN):
 		return {}
+	text = host.command(['security', 'find-certificate', '-a', '-Z', '-p', KEYCHAIN], privileged=True)
 	certificates = {}
-	for name in KEYCHAIN_NAMES:
-		command = ['security', 'find-certificate', '-a', '-c', name, '-p', KEYCHAIN]
-		text = host.command(command, privileged=True)
-		for der in decode_pem(text):
+	for der in decode_pem(text):
+		name = host.certificate_common_name(der)
+		if name and is_snapshot_root_name(name):
 			certificates[hashlib.sha1(der).hexdigest()] = der
 	return certificates
 

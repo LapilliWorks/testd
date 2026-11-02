@@ -663,6 +663,17 @@ mod tests {
 	}
 
 	#[test]
+	fn testd_root_names_accept_legacy_and_serial_suffixes() {
+		assert!(is_testd_root_cn("testd root"));
+		assert!(is_testd_root_cn("testd root 0123abcd"));
+		assert!(is_testd_root_cn("testd root 0123ABCD"));
+		assert!(!is_testd_root_cn("testd root testing"));
+		assert!(!is_testd_root_cn("testd root 0123abc"));
+		assert!(!is_testd_root_cn("testd root 0123abcd extra"));
+		assert!(!is_testd_root_cn("testd intermediate"));
+	}
+
+	#[test]
 	fn macos_root_output_is_split_into_hash_and_pem() {
 		let output = "SHA-1 hash: 1111111111111111111111111111111111111111\n\
 		-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----\n\
@@ -777,8 +788,8 @@ mod tests {
 
 // --- root CA trust ---
 
-/// Common name of the testd root certificate.
-#[cfg(target_os = "macos")]
+/// Prefix of the testd root common name; new roots append eight serial hex digits.
+#[cfg(any(target_os = "macos", test))]
 const ROOT_CN: &str = "testd root";
 
 /// One certificate returned by `security find-certificate`, with the SHA-1
@@ -896,15 +907,36 @@ fn is_root_trusted_linux(cert_pem: &str) -> bool {
 	normalize_pem(&installed) == normalize_pem(cert_pem)
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn is_testd_root_cn(common_name: &str) -> bool {
+	if common_name == ROOT_CN {
+		return true;
+	}
+	let Some(suffix) = common_name.strip_prefix(ROOT_CN).and_then(|rest| rest.strip_prefix(' ')) else {
+		return false;
+	};
+	suffix.len() == 8 && suffix.chars().all(|character| character.is_ascii_hexdigit())
+}
+
+#[cfg(target_os = "macos")]
+fn certificate_common_name(pem: &str) -> Option<String> {
+	let der = pem_to_der(pem).ok()?;
+	let (_, certificate) = x509_parser::parse_x509_certificate(der.as_ref()).ok()?;
+	let name = certificate.subject().iter_common_name().next()?;
+	Some(name.as_str().ok()?.to_owned())
+}
+
 #[cfg(target_os = "macos")]
 fn macos_testd_roots() -> io::Result<Vec<MacRoot>> {
 	let output = silent_command("security")
-		.args(["find-certificate", "-a", "-Z", "-p", "-c", ROOT_CN, "/Library/Keychains/System.keychain"])
+		.args(["find-certificate", "-a", "-Z", "-p", "/Library/Keychains/System.keychain"])
 		.output()?;
 	if !output.status.success() {
 		return Ok(Vec::new());
 	}
-	Ok(parse_macos_roots(&String::from_utf8_lossy(&output.stdout)))
+	let mut roots = parse_macos_roots(&String::from_utf8_lossy(&output.stdout));
+	roots.retain(|root| certificate_common_name(&root.pem).is_some_and(|name| is_testd_root_cn(&name)));
+	Ok(roots)
 }
 
 #[cfg(target_os = "macos")]
@@ -929,13 +961,13 @@ fn delete_macos_roots(roots: &[MacRoot]) -> io::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn delete_macos_roots_script() -> String {
-	format!(
-		"for hash in $(security find-certificate -a -Z -c {} /Library/Keychains/System.keychain | \
-		 awk '/^SHA-1 hash: /{{print $3}}'); do security delete-certificate -Z $hash \
-		 /Library/Keychains/System.keychain || exit 1; done",
-		shell_quote(ROOT_CN)
-	)
+fn delete_macos_roots_script(roots: &[MacRoot]) -> String {
+	roots
+		.iter()
+		.map(|root| {
+			format!("security delete-certificate -Z {} /Library/Keychains/System.keychain || exit 1; ", root.hash)
+		})
+		.collect()
 }
 
 #[cfg(target_os = "windows")]
@@ -995,12 +1027,13 @@ pub fn trust_root_gui(cert_pem: &str) -> io::Result<()> {
 	}
 	#[cfg(target_os = "macos")]
 	{
+		let roots = macos_testd_roots()?;
 		let tmp = std::env::temp_dir().join("testd-root.crt");
 		std::fs::write(&tmp, cert_pem)?;
 		let target = shell_quote(&tmp.display().to_string());
 		let script = format!(
-			"{}; security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {target}",
-			delete_macos_roots_script()
+			"{}security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {target}",
+			delete_macos_roots_script(&roots)
 		);
 		let status = silent_command("osascript")
 			.args(["-e", &format!("do shell script \"{script}\" with administrator privileges")])
@@ -1104,7 +1137,11 @@ pub fn untrust_root_gui(_cert_pem: &str) -> io::Result<()> {
 	}
 	#[cfg(target_os = "macos")]
 	{
-		let script = delete_macos_roots_script();
+		let roots = macos_testd_roots()?;
+		if roots.is_empty() {
+			return Ok(());
+		}
+		let script = delete_macos_roots_script(&roots);
 		let status = silent_command("osascript")
 			.args(["-e", &format!("do shell script \"{script}\" with administrator privileges")])
 			.status()?;
@@ -1155,7 +1192,7 @@ fn untrust_root_windows(cert_pem: &str) -> io::Result<()> {
 }
 
 /// Decode the first CERTIFICATE block in a PEM document to DER.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 fn pem_to_der(pem: &str) -> io::Result<Vec<u8>> {
 	use base64::Engine;
 	use base64::engine::general_purpose::STANDARD;

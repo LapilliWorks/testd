@@ -4325,6 +4325,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "testd-core",
+ "x509-parser",
 ]
 
 [[package]]

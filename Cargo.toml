@@ -29,6 +29,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 futures-util = "0.3"
 tempfile = "3"
 base64 = "0.22"
+x509-parser = "0.18"
 getrandom = "0.3"
 covo = "0.1"
 

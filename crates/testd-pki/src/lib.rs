@@ -185,10 +185,14 @@ impl Ca {
 
 fn root_params() -> Result<CertificateParams> {
 	let mut params = CertificateParams::new(Vec::<String>::new())?;
+	let serial = random_serial_bytes();
+	// The serial prefix distinguishes roots from different installations in a
+	// keychain. It is chosen before signing, unlike the certificate fingerprint.
+	let common_name = format!("testd root {}", hex(&serial[..4]));
 	params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
 	params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign, KeyUsagePurpose::DigitalSignature];
-	params.distinguished_name = distinguished_name("testd root");
-	params.serial_number = Some(random_serial());
+	params.distinguished_name = distinguished_name(&common_name);
+	params.serial_number = Some(SerialNumber::from(serial.to_vec()));
 	params.use_authority_key_identifier_extension = true;
 	params.not_before = time::OffsetDateTime::now_utc() - time::Duration::hours(1);
 	params.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(3650);
@@ -280,12 +284,17 @@ fn distinguished_name(common_name: &str) -> DistinguishedName {
 	name
 }
 
-/// A random 128-bit serial number.
-fn random_serial() -> SerialNumber {
+/// Random bytes for a positive 128-bit serial number.
+fn random_serial_bytes() -> [u8; 16] {
 	let mut bytes = [0u8; 16];
 	getrandom::fill(&mut bytes).expect("random bytes");
 	bytes[0] &= 0x7f; // keep it positive
-	SerialNumber::from(bytes.to_vec())
+	bytes
+}
+
+/// A random 128-bit serial number.
+fn random_serial() -> SerialNumber {
+	SerialNumber::from(random_serial_bytes().to_vec())
 }
 
 fn pem_to_der(pem: &str) -> Result<CertificateDer<'static>> {
@@ -407,6 +416,26 @@ mod tests {
 		let reloaded = Ca::load_or_init(&dir).unwrap();
 		assert_eq!(reloaded.root_cert_pem(), root_pem);
 		std::fs::remove_dir_all(&dir).ok();
+	}
+
+	#[test]
+	fn roots_carry_a_unique_serial_prefix_in_the_common_name() {
+		let first = temp_dir();
+		let second = temp_dir();
+		let one = Ca::load_or_init(&first).unwrap();
+		let two = Ca::load_or_init(&second).unwrap();
+		let name = |ca: &Ca| {
+			let info = inspect_certificate(ca.root_cert_pem()).unwrap();
+			info.subject.rsplit_once(' ').unwrap().1.to_owned()
+		};
+		let one = name(&one);
+		let two = name(&two);
+		assert_eq!(one.len(), 8);
+		assert!(one.chars().all(|character| character.is_ascii_hexdigit()));
+		assert_eq!(two.len(), 8);
+		assert_ne!(one, two, "separate roots must be distinguishable by name");
+		std::fs::remove_dir_all(&first).ok();
+		std::fs::remove_dir_all(&second).ok();
 	}
 
 	#[test]
