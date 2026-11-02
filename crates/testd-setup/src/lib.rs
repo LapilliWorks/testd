@@ -1134,10 +1134,10 @@ fn trust_root_windows(cert_pem: &str) -> io::Result<()> {
 	let thumbprint = sha1_hex(&der);
 	let tmp = std::env::temp_dir().join(format!("testd-root-{}.cer", std::process::id()));
 	std::fs::write(&tmp, &der)?;
-	let result = (|| {
+	let result = {
 		let cert_path = tmp.display().to_string();
 		run_windows_helper("InstallRoot", &[("CertPath", cert_path.as_str()), ("Thumbprint", thumbprint.as_str())])
-	})();
+	};
 	let _ = std::fs::remove_file(&tmp);
 	result
 }
