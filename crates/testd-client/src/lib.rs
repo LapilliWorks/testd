@@ -104,15 +104,49 @@ async fn authenticate(
 /// The client's identity as shown to the operator deciding a request.
 fn client_label() -> String {
 	let user = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default();
-	let host = std::env::var("HOSTNAME")
-		.or_else(|_| std::env::var("COMPUTERNAME"))
-		.unwrap_or_default();
+	format_label(&user, &host_name())
+}
+
+/// `user@host`, or whichever half is known.
+fn format_label(user: &str, host: &str) -> String {
 	match (user.trim(), host.trim()) {
 		("", "") => "unknown client".into(),
 		("", host) => host.into(),
 		(user, "") => user.into(),
 		(user, host) => format!("{user}@{host}"),
 	}
+}
+
+/// The machine's name. Shells set `HOSTNAME` without exporting it, so the
+/// environment often lacks it; ask the kernel when it does.
+fn host_name() -> String {
+	for variable in ["HOSTNAME", "COMPUTERNAME"] {
+		if let Ok(name) = std::env::var(variable)
+			&& !name.trim().is_empty()
+		{
+			return name;
+		}
+	}
+	kernel_host_name().unwrap_or_default()
+}
+
+#[cfg(unix)]
+fn kernel_host_name() -> Option<String> {
+	let mut buffer = [0u8; 256];
+	// SAFETY: the buffer is valid for its length, and gethostname writes at
+	// most that many bytes.
+	if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } != 0 {
+		return None;
+	}
+	let end = buffer.iter().position(|&byte| byte == 0).unwrap_or(buffer.len());
+	String::from_utf8(buffer[..end].to_vec())
+		.ok()
+		.filter(|name| !name.trim().is_empty())
+}
+
+#[cfg(not(unix))]
+fn kernel_host_name() -> Option<String> {
+	None
 }
 
 /// Why one host could not be used. A host that answered but refused us is not
@@ -475,7 +509,16 @@ impl Entry {
 
 #[cfg(test)]
 mod tests {
-	use super::is_published_name;
+	use super::{format_label, is_published_name};
+
+	#[test]
+	fn labels_name_the_user_and_host() {
+		assert_eq!(format_label("bar", "foo"), "bar@foo");
+		assert_eq!(format_label(" bar ", " foo "), "bar@foo");
+		assert_eq!(format_label("", "foo"), "foo");
+		assert_eq!(format_label("bar", ""), "bar");
+		assert_eq!(format_label("", ""), "unknown client");
+	}
 
 	#[test]
 	fn node_credentials_are_used_for_loopback_actions() {
