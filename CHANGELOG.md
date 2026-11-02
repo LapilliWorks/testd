@@ -6,6 +6,7 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 
 ### Added
 
+- `tests/release/macos-resolver-probe.sh` snapshots, configures, checks, removes, and restores a macOS `/etc/resolver` route with evidence kept on disk
 - `tests/release/system_state.py --self-test` snapshots, installs a fixture, restores, and verifies the real resolver and trust artifacts on a disposable host; CI runs it on Linux, macOS, and Windows
 - Gated `host-system` CI job for the full privileged host suite, enabled per dispatch or with the `TESTD_CI_HOST_SYSTEM` repository variable
 

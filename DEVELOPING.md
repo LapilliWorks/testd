@@ -154,6 +154,17 @@ into `/Library/Keychains/System.keychain`. Both are restored from the snapshot;
 the upstream root is identified by its SHA-1, not by name, so an unrelated
 `testd root` is never deleted.
 
+To probe only the `/etc/resolver` configure and unconfigure path, run:
+
+```sh
+tests/release/macos-resolver-probe.sh
+```
+
+It snapshots the current route, runs `doctor --fix`, checks `dscacheutil`,
+`getaddrinfo`, `scutil --dns`, and the DNS server directly, removes the route
+with `uninstall --keep-certificate`, checks again, then restores the original
+file and mode. Evidence stays under `~/Library/Application Support/testd/resolver-probes/`.
+
 ### Windows
 
 Prerequisites: PowerShell 5.1 or later, `curl.exe` (included with Windows 10
