@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>404: no live claim | testd</title>
+		<meta name="robots" content="noindex" />
+		<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+		<style>
+			:root {
+				--basalt: #141414;
+				--paper: #f2eee4;
+				--muted: #5f5c55;
+				--lava: #e4542b;
+				--line: rgb(20 20 20 / 14%);
+				--mono: 'JetBrains Mono', ui-monospace, monospace;
+			}
+			* { box-sizing: border-box; }
+			body {
+				margin: 0;
+				min-height: 100vh;
+				display: grid;
+				align-content: center;
+				background: var(--paper);
+				color: var(--basalt);
+				font-family: system-ui, sans-serif;
+				line-height: 1.6;
+				padding: 2rem;
+			}
+			main { width: min(640px, 100%); margin: 0 auto; }
+			.brand { display: inline-flex; align-items: center; gap: .5rem; color: inherit; text-decoration: none; margin-bottom: 4rem; }
+			.brand svg { width: 18px; height: auto; fill: currentColor; }
+			.brand span { font-size: 1.5rem; font-weight: 700; letter-spacing: -.05em; }
+			.kicker { font-family: var(--mono); font-size: .7rem; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin: 0 0 1rem; }
+			.kicker::before { content: ''; display: inline-block; width: 24px; height: 2px; margin-right: .6rem; background: var(--lava); vertical-align: middle; }
+			h1 { margin: 0 0 1rem; font-size: clamp(2.4rem, 7vw, 4rem); line-height: .98; letter-spacing: -.05em; }
+			p { margin: 0 0 1.5rem; max-width: 46ch; color: var(--muted); }
+			.links { display: flex; flex-wrap: wrap; gap: 1rem 1.5rem; padding-top: 1.25rem; border-top: 1px solid var(--line); }
+			a { color: var(--basalt); font-weight: 600; text-underline-offset: 3px; }
+			a:hover { color: var(--lava); }
+		</style>
+	</head>
+	<body>
+		<main>
+			<a class="brand" href="/" aria-label="testd home">
+				<svg viewBox="500 356 200 372" aria-hidden="true">
+					<path d="M561 374H610V439H668V476H610V560C610 620 614 660 624 677C634 692 650 690 668 684L680 705C668 710 640 714 615 710C590 706 568 692 562 668C561 658 561 620 561 560V476H518V439H561Z" />
+					<path d="M380 634H454V710H380Z" />
+				</svg>
+				<span>testd</span>
+			</a>
+			<p class="kicker">404 / no live claim</p>
+			<h1>This name is not registered.</h1>
+			<p>
+				The page does not exist, or the leaf that owned it closed its connection. Start a name with
+				<code>testd run</code>, or read the docs to find the right command.
+			</p>
+			<div class="links">
+				<a href="/">Home</a>
+				<a href="/docs/">Documentation</a>
+				<a href="/docs/quickstart.html">Quickstart</a>
+				<a href="https://github.com/testd/testd">GitHub</a>
+			</div>
+		</main>
+	</body>
+</html>

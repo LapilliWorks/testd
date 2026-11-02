@@ -1,0 +1,11 @@
+/docs /docs/ 301
+/docs/:page/ /docs/:page.html 301
+/quickstart /docs/quickstart.html 301
+/usage /docs/usage.html 301
+/advanced /docs/advanced.html 301
+/reference /docs/reference.html 301
+/security /docs/security.html 301
+/dependency-policy /docs/dependency-policy.html 301
+/install /install.sh 301
+/download /#install 301
+/download/ /#install 301

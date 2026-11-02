@@ -1,0 +1,19 @@
+{
+	"name": "testd-workspace",
+	"private": true,
+	"type": "module",
+	"workspaces": [
+		"site",
+		"docs"
+	],
+	"scripts": {
+		"dev": "bun run --cwd site dev",
+		"dev:docs": "bun run --cwd docs dev",
+		"build": "bun run build:site && bun run build:docs",
+		"build:site": "bun run --cwd site build",
+		"build:docs": "bun run --cwd docs build",
+		"preview": "bun run --cwd site preview",
+		"check": "bun run --cwd site check && bun run --cwd docs check",
+		"check:links": "bun run --cwd site check:links"
+	}
+}
