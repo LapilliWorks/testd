@@ -22,6 +22,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use testd_core::config::{config_dir, write_private};
+use testd_core::naming::access_label;
 use tokio::sync::{oneshot, watch};
 
 /// How long a request waits for an operator before the client is told it expired.
@@ -54,6 +55,7 @@ pub struct IssuedToken {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenView {
 	pub id: String,
+	/// The leaf's label plus the project(s) this token covers.
 	pub label: String,
 	pub created_at: u64,
 	pub last_seen_at: Option<u64>,
@@ -66,7 +68,7 @@ impl From<&IssuedToken> for TokenView {
 	fn from(token: &IssuedToken) -> Self {
 		Self {
 			id: token.id.clone(),
-			label: token.label.clone(),
+			label: access_label(&token.label, token.names.as_deref()),
 			created_at: token.created_at,
 			last_seen_at: token.last_seen_at,
 			names: token.names.clone(),
@@ -78,6 +80,7 @@ impl From<&IssuedToken> for TokenView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingView {
 	pub id: String,
+	/// The leaf's label plus the project(s) it is asking for.
 	pub label: String,
 	pub address: String,
 	/// Names the operator is asked to grant.
@@ -422,7 +425,7 @@ impl Access {
 			.iter()
 			.map(|(id, pending)| PendingView {
 				id: id.clone(),
-				label: pending.label.clone(),
+				label: access_label(&pending.label, Some(&pending.names)),
 				address: pending.address.clone(),
 				names: pending.names.clone(),
 				requested_at: pending.requested_at,
@@ -534,6 +537,18 @@ mod tests {
 			let mode = std::fs::metadata(reloaded.path()).unwrap().permissions().mode() & 0o777;
 			assert_eq!(mode, 0o600);
 		}
+	}
+
+	#[tokio::test]
+	async fn views_show_the_projects_a_grant_covers() {
+		let (_dir, access) = access();
+		let (id, _decision) = access
+			.request("alex@laptop", "192.168.1.9:5000", names(&["app.example.test"]))
+			.unwrap();
+		assert_eq!(access.pending()[0].label, "alex@laptop:example");
+
+		access.approve(&id).unwrap();
+		assert_eq!(access.tokens()[0].label, "alex@laptop:example");
 	}
 
 	#[tokio::test]

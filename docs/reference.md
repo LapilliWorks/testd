@@ -156,7 +156,7 @@ testd tokens
 testd tokens --revoke <id>
 ```
 
-All require a running daemon. `requests` prints the id, label, requested names, address, and age. Requests expire after two minutes. Token secrets are never printed.
+All require a running daemon. `requests` prints the id, label, requested names, address, and age. The label is `user@host:project` when the requested names carry a project. Requests expire after two minutes. Token secrets are never printed.
 
 ### export-caddyfile
 

@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use testd_core::Registration;
 use testd_core::config::HostConfig;
+use testd_core::naming::access_label;
 use testd_core::protocol::{Auth, Request, Response, TokenRequest, recv, send};
 use testd_core::validate;
 
@@ -841,7 +842,12 @@ fn authenticate(shared: &Shared, token: &str, addr: SocketAddr) -> Option<Creden
 		return Some(Credential::Local);
 	}
 	if let Some(issued) = shared.access.authenticate(token) {
-		eprintln!("[auth]   {} (token {}: {})", addr.ip(), issued.id, issued.label);
+		eprintln!(
+			"[auth]   {} (token {}: {})",
+			addr.ip(),
+			issued.id,
+			access_label(&issued.label, issued.names.as_deref())
+		);
 		return Some(Credential::Token(issued.id));
 	}
 	if shared.secret.is_empty() {
@@ -876,6 +882,7 @@ where
 		.filter(|domain| validate::validate_domain(domain, &shared.tld).is_ok())
 		.map(|domain| format!("{domain}.{}", shared.tld))
 		.collect();
+	let label = access_label(&request.label, Some(&names));
 	let (id, mut decision) = match shared.access.request(&request.label, &addr.to_string(), names) {
 		Ok(waiting) => waiting,
 		Err(message) => {
@@ -886,7 +893,7 @@ where
 	// Any exit from this function, including a dropped connection, clears the
 	// request from the operator's queue.
 	let _cancel = PendingGuard { access: Arc::clone(&shared.access), id: id.clone() };
-	eprintln!("[auth]   {} requested access ({id}): {}", addr.ip(), request.label);
+	eprintln!("[auth]   {} requested access ({id}): {label}", addr.ip());
 	reply(out, Response::Pending { id: id.clone() }).await?;
 
 	let mut byte = [0u8; 1];

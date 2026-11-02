@@ -161,7 +161,7 @@ testd approve <id>
 testd deny <id>
 ```
 
-`requests` lists the request id, leaf label, requested names, source address, and age. The label is supplied by the leaf, for example `user@host`. A request waits up to two minutes. A denied or expired request ends that leaf attempt; run it again to ask again. The dashboard's Access card and the tray notification provide the same decisions.
+`requests` lists the request id, leaf label, requested names, source address, and age. The label comes from the leaf and carries the project its names cover, for example `user@host:example`. A request waits up to two minutes. A denied or expired request ends that leaf attempt; run it again to ask again. The dashboard's Access card and the tray notification provide the same decisions.
 
 A token covers exact names. If a leaf publishes a name outside its grant, the host queues a request for that one name and keeps the registration waiting. Approving adds the name to the existing token without touching its other names.
 
@@ -172,7 +172,7 @@ testd tokens
 testd tokens --revoke <id>
 ```
 
-A token can be used by more than one connection; those connections share its grants. The list shows the token id, label, granted names, issue age, and last use. Secrets are never printed. Revoking closes every connection using that token, releases its names, and makes the leaf forget its stored credential. Run the leaf again to request access.
+A token can be used by more than one connection; those connections share its grants. The list shows the token id, label (`user@host:project`), granted names, issue age, and last use. Secrets are never printed. Revoking closes every connection using that token, releases its names, and makes the leaf forget its stored credential. Run the leaf again to request access.
 
 For unattended clients, the operator secret can be presented as `TESTD_TOKEN`:
 

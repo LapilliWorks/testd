@@ -22,6 +22,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader as Tokio
 use tokio::net::{TcpListener, TcpStream as TokioTcpStream};
 
 use testd_core::config::{ClientConfig, config_dir, write_private};
+use testd_core::naming::access_label;
 
 use crate::access::{Access, Approved, PendingView, TokenView};
 use crate::engine::Registrations;
@@ -523,7 +524,11 @@ async fn handle(
 				Request::Requests { .. } => Response::requests(access.pending()),
 				Request::Approve { id, .. } => match access.approve(&id) {
 					Ok(Approved::Token(token)) => {
-						eprintln!("[access] approved {} ({})", token.label, token.id);
+						eprintln!(
+							"[access] approved {} ({})",
+							access_label(&token.label, token.names.as_deref()),
+							token.id
+						);
 						Response::ok()
 					},
 					Ok(Approved::Name) => {
@@ -797,7 +802,7 @@ mod tests {
 				.unwrap()
 		};
 		assert_eq!(listed.len(), 1);
-		assert_eq!(listed[0].label, "alex@laptop");
+		assert_eq!(listed[0].label, "alex@laptop:example");
 		assert_eq!(listed[0].id, id);
 
 		let approved = {
