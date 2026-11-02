@@ -696,9 +696,9 @@ async fn doctor(fix: bool, json: bool) -> anyhow::Result<i32> {
 	let root_cert = pki_dir.join("root.crt");
 	let root_pem = std::fs::read_to_string(&root_cert).ok();
 	match &root_pem {
-		// On Windows the machine store can contain a stale certificate with the
-		// same CN. Always reinstall the exact root when repairing.
-		Some(pem) if fix && cfg!(windows) => match testd_setup::trust_root(pem) {
+		// Windows and macOS can hold stale certificates with the same CN. Always
+		// reinstall the exact root when repairing.
+		Some(pem) if fix && (cfg!(windows) || cfg!(target_os = "macos")) => match testd_setup::trust_root(pem) {
 			Ok(()) => checks.push(Check::ok("certificate", format!("root installed: {}", certificate_summary(pem)))),
 			Err(e) => {
 				exit = exit.max(3);

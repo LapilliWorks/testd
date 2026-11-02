@@ -57,9 +57,9 @@ pub fn install(pki_dir: &Path) -> Result<CertificateStatus, String> {
 /// Remove the root and remember that the user does not want it reinstalled.
 pub fn remove(pki_dir: &Path) -> Result<CertificateStatus, String> {
 	let pem = load_root_pem(pki_dir)?;
-	if testd_setup::is_root_trusted(&pem) {
-		testd_setup::untrust_root_gui(&pem).map_err(|e| e.to_string())?;
-	}
+	// Removal is repeatable, and it must also clear stale roots that no longer
+	// match the current PEM.
+	testd_setup::untrust_root_gui(&pem).map_err(|e| e.to_string())?;
 	health::set_auto_trust(pki_dir, false).map_err(|e| e.to_string())?;
 	status(pki_dir)
 }

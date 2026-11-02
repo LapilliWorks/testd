@@ -662,6 +662,20 @@ mod tests {
 		assert_eq!(shell_quote("/tmp/it's here"), r"'/tmp/it'\''s here'");
 	}
 
+	#[test]
+	fn macos_root_output_is_split_into_hash_and_pem() {
+		let output = "SHA-1 hash: 1111111111111111111111111111111111111111\n\
+		-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----\n\
+		SHA-1 hash: 2222222222222222222222222222222222222222\n\
+		-----BEGIN CERTIFICATE-----\nBBB\n-----END CERTIFICATE-----\n";
+		let roots = parse_macos_roots(output);
+		assert_eq!(roots.len(), 2);
+		assert_eq!(roots[0].hash, "1111111111111111111111111111111111111111");
+		assert!(roots[0].pem.contains("AAA"));
+		assert_eq!(roots[1].hash, "2222222222222222222222222222222222222222");
+		assert!(roots[1].pem.contains("BBB"));
+	}
+
 	#[cfg(target_os = "linux")]
 	#[test]
 	fn linux_resolver_writes_a_dropin_instead_of_per_link_config() {
@@ -767,6 +781,43 @@ mod tests {
 #[cfg(target_os = "macos")]
 const ROOT_CN: &str = "testd root";
 
+/// One certificate returned by `security find-certificate`, with the SHA-1
+/// used to delete that exact item rather than the first item with its name.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, PartialEq, Eq)]
+struct MacRoot {
+	hash: String,
+	pem: String,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_macos_roots(output: &str) -> Vec<MacRoot> {
+	let mut roots = Vec::new();
+	let mut hash = None;
+	let mut pem = String::new();
+	for line in output.lines() {
+		if let Some(value) = line.strip_prefix("SHA-1 hash: ") {
+			hash = Some(value.trim().to_owned());
+			pem.clear();
+		} else if line == "-----BEGIN CERTIFICATE-----" {
+			pem.clear();
+			pem.push_str(line);
+			pem.push('\n');
+		} else if line == "-----END CERTIFICATE-----" {
+			pem.push_str(line);
+			pem.push('\n');
+			if let Some(hash) = hash.take() {
+				roots.push(MacRoot { hash, pem: normalize_pem(&pem) });
+			}
+			pem.clear();
+		} else if !pem.is_empty() {
+			pem.push_str(line);
+			pem.push('\n');
+		}
+	}
+	roots
+}
+
 /// Whether the testd root is already in the system trust store.
 pub fn is_root_trusted(cert_pem: &str) -> bool {
 	#[cfg(target_os = "linux")]
@@ -846,18 +897,45 @@ fn is_root_trusted_linux(cert_pem: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn is_root_trusted_macos(cert_pem: &str) -> bool {
-	let Ok(output) = silent_command("security")
-		.args(["find-certificate", "-a", "-p", "-c", ROOT_CN, "/Library/Keychains/System.keychain"])
-		.output()
-	else {
-		return false;
-	};
+fn macos_testd_roots() -> io::Result<Vec<MacRoot>> {
+	let output = silent_command("security")
+		.args(["find-certificate", "-a", "-Z", "-p", "-c", ROOT_CN, "/Library/Keychains/System.keychain"])
+		.output()?;
 	if !output.status.success() {
-		return false;
+		return Ok(Vec::new());
 	}
-	let installed = normalize_pem(&String::from_utf8_lossy(&output.stdout));
-	installed.contains(&normalize_pem(cert_pem))
+	Ok(parse_macos_roots(&String::from_utf8_lossy(&output.stdout)))
+}
+
+#[cfg(target_os = "macos")]
+fn is_root_trusted_macos(cert_pem: &str) -> bool {
+	let Ok(roots) = macos_testd_roots() else { return false };
+	// More than one testd root is stale state from an earlier run. Treating it
+	// as untrusted makes init and doctor --fix replace the whole set.
+	roots.len() == 1 && roots[0].pem == normalize_pem(cert_pem)
+}
+
+#[cfg(target_os = "macos")]
+fn delete_macos_roots(roots: &[MacRoot]) -> io::Result<()> {
+	for root in roots {
+		let status = silent_command("sudo")
+			.args(["security", "delete-certificate", "-Z", &root.hash, "/Library/Keychains/System.keychain"])
+			.status()?;
+		if !status.success() {
+			return Err(io::Error::other(format!("failed to remove testd root {}", root.hash)));
+		}
+	}
+	Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn delete_macos_roots_script() -> String {
+	format!(
+		"for hash in $(security find-certificate -a -Z -c {} /Library/Keychains/System.keychain | \
+		 awk '/^SHA-1 hash: /{{print $3}}'); do security delete-certificate -Z $hash \
+		 /Library/Keychains/System.keychain || exit 1; done",
+		shell_quote(ROOT_CN)
+	)
 }
 
 #[cfg(target_os = "windows")]
@@ -919,9 +997,10 @@ pub fn trust_root_gui(cert_pem: &str) -> io::Result<()> {
 	{
 		let tmp = std::env::temp_dir().join("testd-root.crt");
 		std::fs::write(&tmp, cert_pem)?;
+		let target = shell_quote(&tmp.display().to_string());
 		let script = format!(
-			"security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain '{}'",
-			tmp.display()
+			"{}; security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {target}",
+			delete_macos_roots_script()
 		);
 		let status = silent_command("osascript")
 			.args(["-e", &format!("do shell script \"{script}\" with administrator privileges")])
@@ -959,6 +1038,10 @@ fn trust_root_linux(cert_pem: &str) -> io::Result<()> {
 
 #[cfg(target_os = "macos")]
 fn trust_root_macos(cert_pem: &str) -> io::Result<()> {
+	// Remove every old testd root first. The same CN can be present more than
+	// once after failed runs, and `add-trusted-cert` cannot reliably set trust
+	// on a duplicate item.
+	delete_macos_roots(&macos_testd_roots()?)?;
 	let tmp = std::env::temp_dir().join(format!("testd-root-{}.crt", std::process::id()));
 	std::fs::write(&tmp, cert_pem)?;
 	let status = silent_command("sudo")
@@ -1021,8 +1104,7 @@ pub fn untrust_root_gui(_cert_pem: &str) -> io::Result<()> {
 	}
 	#[cfg(target_os = "macos")]
 	{
-		let script =
-			format!("security delete-certificate -c {} /Library/Keychains/System.keychain", shell_quote(ROOT_CN));
+		let script = delete_macos_roots_script();
 		let status = silent_command("osascript")
 			.args(["-e", &format!("do shell script \"{script}\" with administrator privileges")])
 			.status()?;
@@ -1054,21 +1136,9 @@ fn untrust_root_linux() -> io::Result<()> {
 
 #[cfg(target_os = "macos")]
 fn untrust_root_macos() -> io::Result<()> {
-	let status = silent_command("sudo")
-		.args(["security", "delete-certificate", "-c", ROOT_CN, "/Library/Keychains/System.keychain"])
-		.status()?;
-	if status.success() {
-		return Ok(());
-	}
-	// No matching certificate is the desired end state; report only a real
-	// failure, such as a denied authorization.
-	let present = silent_command("security")
-		.args(["find-certificate", "-c", ROOT_CN, "/Library/Keychains/System.keychain"])
-		.status()?;
-	if !present.success() {
-		return Ok(());
-	}
-	Err(io::Error::new(io::ErrorKind::PermissionDenied, "root CA removal failed"))
+	// Uninstall removes every testd root, including duplicates left by earlier
+	// failed runs. Deleting by CN removes only one item and can leave the rest.
+	delete_macos_roots(&macos_testd_roots()?)
 }
 
 #[cfg(target_os = "windows")]
