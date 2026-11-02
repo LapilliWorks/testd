@@ -31,4 +31,4 @@ bun run check:links
 
 `site/src/assets/testd-icon.svg` and `testd-mark.svg` are geometric redrawings of the repository's `app-icon.png`. The mark is the `t.` glyph; the icon adds the square frame. The site header and footer use the full icon. `favicon.svg` is the small-size mark with a paper tile.
 
-The palette follows the Lapilli studio sheet: basalt `#141414`, paper `#F2EEE4`, lapilli `#E4542B`, ash `#8C8A83`. Fonts are self-hosted through Fontsource: Archivo for text and JetBrains Mono for code.
+The palette follows the Lapilli studio sheet: basalt `#141414`, paper `#F2EEE4`, lapilli `#E4542B`, ash `#8C8A83`. The footer uses the Direction 01 shard wordmark: the reversed file on the dark ground and the standard file on the light 404 page. Fonts are self-hosted through Fontsource: Archivo for text and JetBrains Mono for code.

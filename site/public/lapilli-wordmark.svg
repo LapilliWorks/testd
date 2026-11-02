@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1000" height="686" viewBox="-10 0 350 240"
+     role="img" aria-labelledby="lapilli-d1-title lapilli-d1-desc"
+     shape-rendering="geometricPrecision">
+  <title id="lapilli-d1-title">lapilli — Direction 01 / Shard Type</title>
+  <desc id="lapilli-d1-desc">Geometric monoline wordmark. l and i are basalt columns; a and p are the two halves of one fractured lapillus. The p descender drops below the baseline. A 2-unit ember seam marks the fracture between a and p.</desc>
+
+  <g fill="#141414">
+    <!-- l -->
+    <path d="M0 16 L16 8 L16 170 L0 170 Z"/>
+    <!-- a: left-pointing shard, 80 x 100 -->
+    <path d="M108 78 L108 162 L40 120 Z" fill="none" stroke="#141414" stroke-width="16" stroke-linejoin="miter"/>
+    <!-- p stem + descender -->
+    <path d="M124 70 L140 70 L140 214 L124 220 Z"/>
+    <!-- p: right-pointing shard -->
+    <path d="M132 78 L194 120 L132 162" fill="none" stroke="#141414" stroke-width="16" stroke-linejoin="miter"/>
+    <!-- i -->
+    <path d="M216 70 L232 70 L232 170 L216 170 Z"/>
+    <!-- l l -->
+    <path d="M250 16 L266 8 L266 170 L250 170 Z"/>
+    <path d="M284 16 L300 8 L300 170 L284 170 Z"/>
+    <!-- i -->
+    <path d="M318 70 L334 70 L334 170 L318 170 Z"/>
+  </g>
+
+  <!-- ember seam: 8-unit fracture between a and p, marked with 2 units -->
+  <rect x="119" y="70" width="2" height="100" fill="#E4542B"/>
+</svg>
