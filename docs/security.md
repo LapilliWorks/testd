@@ -1,8 +1,13 @@
+---
+title: Security
+description: 'Trust boundaries, credentials, exposure, and hardening.'
+---
+
 # Security
 
 testd is a development tool. It gives names and HTTPS to machines you control, and it assumes the host is the trust authority. It is not a production ingress controller, a public DNS service, or a multi-tenant platform.
 
-This page covers the operational security model. Vulnerability reporting is in [SECURITY.md](../SECURITY.md).
+This page covers the operational security model. Vulnerability reporting is in [SECURITY.md](https://github.com/testd/testd/blob/master/SECURITY.md).
 
 ## Trust boundaries
 
