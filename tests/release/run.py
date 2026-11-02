@@ -753,7 +753,7 @@ def desktop(run):
 
 
 def ask(prompt):
-	print(prompt, end='', flush=True)
+	print(prompt, flush=True)
 	answer = sys.stdin.readline()
 	if answer == '':
 		raise RuntimeError('desktop checklist input closed; run in an interactive terminal')

@@ -112,7 +112,7 @@ class Host:
 			staged.write(der)
 			path = staged.name
 		try:
-			text = self.command(['openssl', 'x509', '-inform', 'DER', '-noout', '-subject', path])
+			text = self.command(['openssl', 'x509', '-inform', 'DER', '-noout', '-subject', '-in', path])
 		finally:
 			pathlib.Path(path).unlink(missing_ok=True)
 		match = re.search(r'CN\s*=\s*([^,/\n]+)', text)
