@@ -46,6 +46,7 @@ pub type Registrations = Arc<Mutex<Registry>>;
 /// The host engine. Manages a TCP server and domain registrations.
 pub struct HostEngine {
 	config: HostConfig,
+	tld: String,
 	registrations: Registrations,
 	resolver: Arc<dyn Resolver>,
 	access: Arc<Access>,
@@ -65,6 +66,7 @@ impl HostEngine {
 		let (event_tx, _) = broadcast::channel(16);
 		Self {
 			config,
+			tld: testd_core::config::host_tld().to_owned(),
 			registrations: Arc::new(Mutex::new(Registry::default())),
 			resolver,
 			access,
@@ -125,7 +127,7 @@ impl HostEngine {
 		let capacity = Arc::new(tokio::sync::Semaphore::new(MAX_INTAKE_CONNECTIONS));
 
 		let http_ctx = Arc::new(HttpContext {
-			tld: self.config.tld.clone(),
+			tld: self.tld.clone(),
 			pki_dir: self.config.pki_dir.clone(),
 			registrations: self.registrations.clone(),
 			connections: Arc::clone(&connections),
@@ -137,7 +139,7 @@ impl HostEngine {
 		});
 
 		let shared = Arc::new(Shared {
-			tld: self.config.tld.clone(),
+			tld: self.tld.clone(),
 			registrations: self.registrations.clone(),
 			resolver: self.resolver.clone(),
 			access: Arc::clone(&self.access),

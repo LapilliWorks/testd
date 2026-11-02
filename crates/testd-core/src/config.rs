@@ -14,7 +14,24 @@ pub const DEFAULT_PORT: u16 = 7737;
 pub const DEFAULT_DNS_PORT: u16 = 53;
 #[cfg(not(windows))]
 pub const DEFAULT_DNS_PORT: u16 = 7753;
-pub const DEFAULT_TLD: &str = "test";
+/// The only TLD a host serves.
+pub const TLD: &str = "test";
+
+/// The host TLD. The release harness sets `TESTD_HOST_TLD` to a throwaway zone
+/// so destructive system checks cannot collide with a real `.test` setup. This
+/// is not a user-facing option.
+pub fn host_tld() -> &'static str {
+	static VALUE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+	VALUE.get_or_init(|| {
+		let value = std::env::var("TESTD_HOST_TLD").unwrap_or_else(|_| TLD.to_owned());
+		assert!(
+			crate::validate::validate_domain_labels(&value).is_ok(),
+			"TESTD_HOST_TLD is not a valid TLD: {value:?}"
+		);
+		value
+	})
+}
+
 /// Default plain HTTP routing port for an external front.
 pub const DEFAULT_HTTP_PORT: u16 = 7740;
 
@@ -38,9 +55,6 @@ pub struct HostConfig {
 	/// Address to listen on for client connections.
 	#[serde(default = "defaults::listen_addr")]
 	pub listen_addr: SocketAddr,
-	/// TLD to append to registered domain names.
-	#[serde(default = "defaults::tld")]
-	pub tld: String,
 	/// Path to the managed Caddyfile (written by testd).
 	#[serde(default = "defaults::caddyfile_path")]
 	pub caddyfile_path: PathBuf,
@@ -173,7 +187,7 @@ fn toml_escape(value: &str) -> String {
 
 /// Render the host config template with the given values, safely escaped for TOML.
 /// Without a secret the template keeps the commented placeholder.
-fn render_config(caddy_config_path: &str, tld: &str, secret: Option<&str>) -> String {
+fn render_config(caddy_config_path: &str, secret: Option<&str>) -> String {
 	let secret_line = match secret {
 		Some(secret) => format!("secret = \"{}\"", toml_escape(secret)),
 		None => "# secret = \"...\"".to_owned(),
@@ -181,7 +195,6 @@ fn render_config(caddy_config_path: &str, tld: &str, secret: Option<&str>) -> St
 	// The secret goes last so its contents are never expanded as placeholders.
 	CONFIG_TEMPLATE
 		.replace("{caddy_config_path}", &toml_escape(caddy_config_path))
-		.replace("{tld}", &toml_escape(tld))
 		.replace("{secret}", &secret_line)
 }
 
@@ -266,7 +279,7 @@ mod tests {
 	#[test]
 	fn config_template_escapes_windows_paths() {
 		let caddyfile = r"C:\Users\me\AppData\Roaming\caddy\Caddyfile";
-		let rendered = render_config(caddyfile, "test", Some("s3cret"));
+		let rendered = render_config(caddyfile, Some("s3cret"));
 		let table: toml::Table = toml::from_str(&rendered).expect("rendered config should parse");
 		assert_eq!(table["host"]["caddy_config_path"].as_str(), Some(caddyfile));
 		assert_eq!(table["host"]["secret"].as_str(), Some("s3cret"));
@@ -274,19 +287,19 @@ mod tests {
 
 	#[test]
 	fn config_template_leaves_the_secret_commented_when_absent() {
-		let rendered = render_config("", "test", None);
+		let rendered = render_config("", None);
 		let table: toml::Table = toml::from_str(&rendered).expect("rendered config should parse");
 		assert!(table["host"].get("secret").is_none(), "{rendered}");
 	}
 }
 
 /// Write a host config file, replacing an existing one. Used by idempotent `init`.
-pub fn write_config_force(caddy_config_path: &str, tld: &str, secret: Option<&str>) -> io::Result<PathBuf> {
+pub fn write_config_force(caddy_config_path: &str, secret: Option<&str>) -> io::Result<PathBuf> {
 	let dir = config_dir();
 	std::fs::create_dir_all(&dir)?;
 
 	let path = config_path();
-	let content = render_config(caddy_config_path, tld, secret);
+	let content = render_config(caddy_config_path, secret);
 	write_private(&path, content.as_bytes())?;
 	Ok(path)
 }
@@ -455,9 +468,6 @@ pub struct PendingConfig {
 	pub step: u8,
 	/// Path to the global Caddyfile.
 	pub caddy_config_path: String,
-	/// TLD to append to registered names.
-	#[serde(default = "defaults::tld")]
-	pub tld: String,
 	/// Operator secret chosen by the setup wizard.
 	#[serde(default)]
 	pub secret: String,
@@ -484,10 +494,9 @@ pub fn read_pending_config() -> io::Result<PendingConfig> {
 
 	let step = init.get("step").and_then(|v| v.as_integer()).unwrap_or(0) as u8;
 	let caddy_config_path = init.get("caddy_config_path").and_then(|v| v.as_str()).unwrap_or("").to_owned();
-	let tld = init.get("tld").and_then(|v| v.as_str()).unwrap_or(DEFAULT_TLD).to_owned();
 	let secret = init.get("secret").and_then(|v| v.as_str()).unwrap_or("").to_owned();
 
-	Ok(PendingConfig { step, caddy_config_path, tld, secret })
+	Ok(PendingConfig { step, caddy_config_path, secret })
 }
 
 /// Write or update the pending init state.
@@ -496,10 +505,9 @@ pub fn write_pending_config(pending: &PendingConfig) -> io::Result<()> {
 	std::fs::create_dir_all(&dir)?;
 
 	let content = format!(
-		"[init]\nstep = {}\ncaddy_config_path = \"{}\"\ntld = \"{}\"\nsecret = \"{}\"\n",
+		"[init]\nstep = {}\ncaddy_config_path = \"{}\"\nsecret = \"{}\"\n",
 		pending.step,
 		toml_escape(&pending.caddy_config_path),
-		toml_escape(&pending.tld),
 		toml_escape(&pending.secret),
 	);
 	write_private(&pending_config_path(), content.as_bytes())
@@ -512,7 +520,7 @@ pub fn finish_pending_config(pending: &PendingConfig) -> io::Result<PathBuf> {
 
 	let config_path = dir.join("config.toml");
 	let secret = (!pending.secret.is_empty()).then_some(pending.secret.as_str());
-	let content = render_config(&pending.caddy_config_path, &pending.tld, secret);
+	let content = render_config(&pending.caddy_config_path, secret);
 	write_private(&config_path, content.as_bytes())?;
 
 	// Remove the pending file.
@@ -763,10 +771,6 @@ mod defaults {
 
 	pub fn host_addr() -> String {
 		format!("127.0.0.1:{}", super::DEFAULT_PORT)
-	}
-
-	pub fn tld() -> String {
-		super::DEFAULT_TLD.into()
 	}
 
 	pub fn caddyfile_path() -> PathBuf {

@@ -65,7 +65,6 @@ async fn start_with_dashboard(_dashboard_addr: Option<SocketAddr>) -> Harness {
 	let config = HostConfig {
 		resolver: ResolverBackend::Dns,
 		listen_addr: "127.0.0.1:0".parse().unwrap(),
-		tld: "test".into(),
 		caddyfile_path: dir.join("Caddyfile"),
 		caddy_config_path: dir.join("global-Caddyfile"),
 		hosts_path: PathBuf::from("/etc/hosts"),

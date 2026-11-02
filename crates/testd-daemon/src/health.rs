@@ -223,9 +223,6 @@ impl Resolver for OsResolver {
 	}
 
 	fn ensure_os(&self) -> io::Result<()> {
-		if self.tld == "localhost" {
-			return Ok(());
-		}
 		let addr = Self::listen_addr();
 		if testd_setup::is_os_resolver_configured(&self.tld, addr) {
 			return Ok(());
@@ -234,7 +231,7 @@ impl Resolver for OsResolver {
 	}
 
 	fn is_os_configured(&self) -> bool {
-		self.tld == "localhost" || testd_setup::is_os_resolver_configured(&self.tld, Self::listen_addr())
+		testd_setup::is_os_resolver_configured(&self.tld, Self::listen_addr())
 	}
 
 	fn cleanup(&self) -> io::Result<()> {
@@ -248,16 +245,15 @@ impl Resolver for OsResolver {
 /// notification is activated. The elevation strategy still controls the prompt.
 pub fn repair_once(action: Action, elevation: Elevation) -> Result<(), String> {
 	let config = load_host_config().map_err(|e| e.to_string())?;
+	let tld = testd_core::config::host_tld().to_owned();
 	let resolver: Arc<dyn Resolver> = match config.resolver {
-		ResolverBackend::Dns => Arc::new(OsResolver { tld: config.tld.clone(), elevation }),
-		ResolverBackend::Hosts => {
-			Arc::new(HostsResolver::new(&config.tld, &config.hosts_helper_path, &config.hosts_path))
-		},
+		ResolverBackend::Dns => Arc::new(OsResolver { tld: tld.clone(), elevation }),
+		ResolverBackend::Hosts => Arc::new(HostsResolver::new(&tld, &config.hosts_helper_path, &config.hosts_path)),
 	};
 	let root = config
 		.edge_enabled
 		.then(|| Arc::new(PkiRoot::new(config.pki_dir.clone())) as Arc<dyn RootAuthority>);
-	let monitor = HealthMonitor::new(config.tld, resolver, root, elevation);
+	let monitor = HealthMonitor::new(tld, resolver, root, elevation);
 	monitor.repair(action).map_err(|e| e.to_string())
 }
 

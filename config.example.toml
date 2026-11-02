@@ -10,11 +10,6 @@
 # Address the daemon listens on for client connections.
 # listen_addr = "0.0.0.0:7737"
 
-# TLD appended to registered domain names. "localhost" skips OS resolver setup:
-# browsers resolve *.localhost to 127.0.0.1 themselves. HTTPS still requires
-# root trust and, where enforced, privileges to bind port 443.
-tld = "{tld}"
-
 # Path to the managed Caddyfile (imported by your global Caddy config).
 # caddyfile_path = "~/.config/testd/Caddyfile"
 

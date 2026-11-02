@@ -8,8 +8,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
 use testd_core::config::{
-	DEFAULT_DNS_PORT, DEFAULT_TLD, PendingConfig, config_dir, finish_pending_config, has_pending_config,
-	read_pending_config, write_pending_config,
+	DEFAULT_DNS_PORT, PendingConfig, TLD, config_dir, finish_pending_config, has_pending_config, read_pending_config,
+	write_pending_config,
 };
 use testd_daemon::certificate::{self, CertificateStatus};
 
@@ -20,13 +20,13 @@ use crate::tray;
 #[tauri::command]
 pub fn check_resolver() -> bool {
 	let addr = SocketAddr::from(([127, 0, 0, 1], DEFAULT_DNS_PORT));
-	testd_setup::is_os_resolver_configured("test", addr)
+	testd_setup::is_os_resolver_configured(TLD, addr)
 }
 
 #[tauri::command]
 pub fn setup_resolver() -> Result<(), String> {
 	let addr = SocketAddr::from(([127, 0, 0, 1], DEFAULT_DNS_PORT));
-	testd_setup::setup_os_resolver_gui("test", addr).map_err(|e| e.to_string())
+	testd_setup::setup_os_resolver_gui(TLD, addr).map_err(|e| e.to_string())
 }
 
 // --- Certificate (step 2) ---
@@ -63,7 +63,6 @@ fn pending_or_default() -> PendingConfig {
 	read_pending_config().unwrap_or_else(|_| PendingConfig {
 		step: 0,
 		caddy_config_path: String::new(),
-		tld: DEFAULT_TLD.into(),
 		secret: String::new(),
 	})
 }
@@ -140,7 +139,7 @@ fn configure_external_front() -> String {
 	};
 
 	let managed = config_dir().join("Caddyfile");
-	let content = testd_daemon::edge::caddyfile(DEFAULT_TLD, default_http_addr());
+	let content = testd_daemon::edge::caddyfile(TLD, default_http_addr());
 	if let Err(e) = write_managed_caddyfile(&managed, &content) {
 		eprintln!("[warn]   could not write {}: {e}", managed.display());
 		return String::new();
@@ -167,7 +166,6 @@ pub fn finish_init(app: AppHandle, secret: String) -> Result<(), String> {
 	let mut pending = pending_or_default();
 	pending.step = 3;
 	pending.caddy_config_path = configure_external_front();
-	pending.tld = DEFAULT_TLD.into();
 	pending.secret = validate_operator_secret(&secret)?;
 	finish_pending_config(&pending).map_err(|e| e.to_string())?;
 

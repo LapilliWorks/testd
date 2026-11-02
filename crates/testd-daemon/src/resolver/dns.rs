@@ -54,9 +54,6 @@ impl DnsResolver {
 
 impl Resolver for DnsResolver {
 	fn ensure_os(&self) -> io::Result<()> {
-		if self.tld == "localhost" {
-			return Ok(());
-		}
 		if testd_setup::is_os_resolver_configured(&self.tld, self.listen_addr) {
 			return Ok(());
 		}
@@ -65,7 +62,7 @@ impl Resolver for DnsResolver {
 	}
 
 	fn is_os_configured(&self) -> bool {
-		self.tld == "localhost" || testd_setup::is_os_resolver_configured(&self.tld, self.listen_addr)
+		testd_setup::is_os_resolver_configured(&self.tld, self.listen_addr)
 	}
 
 	fn apply(&self, names: &[ResolvedName]) -> io::Result<()> {

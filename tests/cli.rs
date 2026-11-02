@@ -1,4 +1,4 @@
-//! CLI-level tests: idempotent init, TLD modes, doctor exit codes.
+//! CLI-level tests: idempotent init, the fixed TLD, doctor exit codes.
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -15,6 +15,7 @@ fn testd(home: &Path, args: &[&str]) -> Output {
 		.env_remove("TESTD_HOSTS")
 		.env_remove("TESTD_HOST")
 		.env_remove("TESTD_TLD")
+		.env_remove("TESTD_HOST_TLD")
 		.env_remove("TESTD_CADDYFILE")
 		.env_remove("TESTD_YES")
 		.env_remove("TESTD_TOKEN")
@@ -66,15 +67,24 @@ fn init_writes_and_keeps_an_operator_secret() {
 }
 
 #[test]
-fn init_respects_tld_flag_and_localhost_skips_resolver() {
+fn init_uses_the_fixed_test_tld() {
 	let home = TempDir::new().unwrap();
-	let out = testd(home.path(), &["init", "--caddyfile", "", "--tld", "localhost"]);
+	let out = init(home.path());
 	assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 
 	let config = config(home.path());
-	assert!(config.contains("tld = \"localhost\""), "{config}");
+	assert!(!config.contains("tld"), "the TLD is not configurable: {config}");
 	let stderr = String::from_utf8_lossy(&out.stderr);
-	assert!(stderr.contains(".localhost"), "{stderr}");
+	assert!(stderr.contains(".test"), "{stderr}");
+}
+
+#[test]
+fn init_has_no_tld_option() {
+	let home = TempDir::new().unwrap();
+	let out = testd(home.path(), &["init", "--caddyfile", "", "--tld", "test"]);
+	assert!(!out.status.success(), "--tld must no longer be accepted");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(stderr.contains("unexpected argument"), "{stderr}");
 }
 
 #[cfg(target_os = "linux")]
@@ -101,6 +111,7 @@ fn init_reports_an_already_configured_resolver() {
 		.env("PATH", path)
 		.env_remove("TESTD_HOST")
 		.env_remove("TESTD_TLD")
+		.env_remove("TESTD_HOST_TLD")
 		.env_remove("TESTD_CADDYFILE")
 		.env_remove("TESTD_YES")
 		.env_remove("TESTD_TOKEN")
@@ -185,27 +196,6 @@ fn doctor_missing_config_exits_1_with_json() {
 }
 
 #[test]
-fn doctor_reports_localhost_resolver_as_not_needed() {
-	let home = TempDir::new().unwrap();
-	assert!(
-		testd(home.path(), &["init", "--caddyfile", "", "--tld", "localhost"])
-			.status
-			.success()
-	);
-
-	let out = testd(home.path(), &["doctor", "--json"]);
-	let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid json");
-	let resolver = value["checks"]
-		.as_array()
-		.unwrap()
-		.iter()
-		.find(|c| c["name"] == "resolver")
-		.unwrap();
-	assert_eq!(resolver["ok"], true);
-	assert!(resolver["detail"].as_str().unwrap().contains("localhost"));
-}
-
-#[test]
 fn run_warns_about_single_label_names_before_connecting() {
 	let home = TempDir::new().unwrap();
 	#[cfg(unix)]
@@ -258,22 +248,6 @@ fn a_leaf_without_a_credential_requests_one_and_saves_it() {
 
 	let credential = config_dir(home.path()).join("credentials/default");
 	assert_eq!(std::fs::read_to_string(&credential).unwrap().trim(), "issued-token");
-}
-
-#[test]
-fn environment_variables_are_accepted_as_inputs() {
-	let home = TempDir::new().unwrap();
-	let out = Command::new(env!("CARGO_BIN_EXE_testd"))
-		.args(["init", "--caddyfile", ""])
-		.env("HOME", home.path())
-		.env("APPDATA", home.path().join("AppData/Roaming"))
-		.env("USERPROFILE", home.path())
-		.env_remove("TESTD_YES")
-		.env("TESTD_TLD", "localhost")
-		.output()
-		.unwrap();
-	assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-	assert!(config(home.path()).contains("tld = \"localhost\""));
 }
 
 #[test]

@@ -19,15 +19,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
 	/// Configure this machine as a host. Idempotent: re-running keeps the
-	/// existing TLD and operator secret and only updates what changed.
+	/// operator secret and only updates what changed.
 	Init {
 		/// Path to the global Caddyfile. Auto-detected if omitted.
 		#[arg(long, env = "TESTD_CADDYFILE")]
 		caddyfile: Option<String>,
-		/// TLD appended to registered names. `localhost` skips resolver setup,
-		/// but HTTPS still needs root trust and permission to bind the edge port.
-		#[arg(long, env = "TESTD_TLD")]
-		tld: Option<String>,
 		/// Accept every default without prompting.
 		#[arg(long, short = 'y', env = "TESTD_YES")]
 		yes: bool,
@@ -214,7 +210,7 @@ async fn main() -> anyhow::Result<()> {
 	let cli = Cli::parse();
 
 	match cli.command {
-		Command::Init { caddyfile, tld, yes, resolver_now } => init(caddyfile, tld, yes, resolver_now).await,
+		Command::Init { caddyfile, yes, resolver_now } => init(caddyfile, yes, resolver_now).await,
 		Command::Run { entries, force, host, hosts, token_profile, node_profile, command } => {
 			let entries = parse_entries(entries)?;
 			let config = leaf_config(host, hosts, token_profile, node_profile)?;
@@ -270,7 +266,6 @@ fn url_action(url: &str) -> anyhow::Result<()> {
 /// Everything `init` needs to know about an existing config.
 #[derive(Default)]
 struct Existing {
-	tld: Option<String>,
 	caddy_config_path: Option<String>,
 	secret: Option<String>,
 }
@@ -281,7 +276,6 @@ fn read_existing() -> Existing {
 	};
 	let host = table.get("host");
 	Existing {
-		tld: host.and_then(|h| h.get("tld")).and_then(|v| v.as_str()).map(str::to_owned),
 		caddy_config_path: host
 			.and_then(|h| h.get("caddy_config_path"))
 			.and_then(|v| v.as_str())
@@ -295,18 +289,14 @@ fn read_existing() -> Existing {
 	}
 }
 
-fn validate_tld(tld: &str) -> anyhow::Result<()> {
-	testd_core::validate::validate_domain_labels(tld).map_err(|e| anyhow::anyhow!("invalid TLD {tld:?}: {e}"))
-}
-
 fn certificate_summary(pem: &str) -> String {
 	testd_pki::inspect_certificate(pem)
 		.map(|info| info.summary())
 		.unwrap_or_else(|e| format!("certificate unreadable: {e}"))
 }
 
-async fn init(caddyfile: Option<String>, tld: Option<String>, yes: bool, resolver_now: bool) -> anyhow::Result<()> {
-	use testd_core::config::{DEFAULT_TLD, write_config_force};
+async fn init(caddyfile: Option<String>, yes: bool, resolver_now: bool) -> anyhow::Result<()> {
+	use testd_core::config::write_config_force;
 
 	let existing = read_existing();
 	let has_config = testd_core::config::config_exists();
@@ -314,25 +304,18 @@ async fn init(caddyfile: Option<String>, tld: Option<String>, yes: bool, resolve
 	// Host init.
 	eprintln!("testd: local dev domain manager\n");
 
-	let tld_value = tld
-		.or_else(|| std::env::var("TESTD_TLD").ok())
-		.or_else(|| existing.tld.clone())
-		.unwrap_or_else(|| DEFAULT_TLD.into());
-	validate_tld(&tld_value)?;
-	let localhost_mode = tld_value == "localhost";
+	let tld = testd_core::config::host_tld();
 	let interactive = std::io::stdin().is_terminal() && !yes;
 	let allow_privileged = interactive || yes;
 
 	/* Resolver setup is deferred by default; certificate trust is handled below. */
 	eprintln!("[1/3] Resolver");
-	if localhost_mode {
-		eprintln!("      .localhost resolves to 127.0.0.1 without a resolver change\n");
-	} else if resolver_now {
-		init_resolver_now(&tld_value)?;
-	} else if resolver_configured(&tld_value) {
-		eprintln!("      already configured: .{tld_value} queries resolve to {}\n", resolver_dns_addr());
+	if resolver_now {
+		init_resolver_now(tld)?;
+	} else if resolver_configured(tld) {
+		eprintln!("      already configured: .{tld} queries resolve to {}\n", resolver_dns_addr());
 	} else {
-		eprintln!("      deferred: configured when the first client connects from another machine");
+		eprintln!("      deferred: .{tld} is configured when the first client connects from another machine");
 		eprintln!("      run `testd doctor --fix` to configure it now\n");
 	}
 
@@ -377,7 +360,7 @@ async fn init(caddyfile: Option<String>, tld: Option<String>, yes: bool, resolve
 
 	if !caddy_config_path.is_empty() {
 		let managed = testd_core::config::config_dir().join("Caddyfile");
-		let content = testd_daemon::edge::caddyfile(&tld_value, http_addr_from_config());
+		let content = testd_daemon::edge::caddyfile(tld, http_addr_from_config());
 		if let Some(parent) = managed.parent() {
 			std::fs::create_dir_all(parent)?;
 		}
@@ -389,7 +372,7 @@ async fn init(caddyfile: Option<String>, tld: Option<String>, yes: bool, resolve
 		Some(secret) => secret,
 		None => testd_core::config::generate_operator_secret()?,
 	};
-	let path = write_config_force(&caddy_config_path, &tld_value, Some(&secret))?;
+	let path = write_config_force(&caddy_config_path, Some(&secret))?;
 	eprintln!("config written to {}", path.display());
 
 	// The operator secret is the bootstrap credential. Re-running keeps it.
@@ -400,7 +383,7 @@ async fn init(caddyfile: Option<String>, tld: Option<String>, yes: bool, resolve
 	}
 	eprintln!();
 
-	init_show_dev_commands(&tld_value);
+	init_show_dev_commands();
 	if has_config {
 		eprintln!("\nSetup refreshed. Run `testd host` to start the daemon.");
 	} else {
@@ -500,14 +483,8 @@ fn init_caddyfile(explicit: Option<String>, interactive: bool, yes: bool) -> any
 	Ok(caddy_config_path)
 }
 
-fn init_show_dev_commands(tld: &str) {
+fn init_show_dev_commands() {
 	eprintln!("Next steps");
-	if tld == "localhost" {
-		eprintln!("      .localhost mode: run testd on the same machine as the browser");
-		eprintln!("        testd run :3000");
-		eprintln!();
-		return;
-	}
 	eprintln!("      On this machine:");
 	eprintln!("        testd run app.example:3000");
 	eprintln!();
@@ -561,6 +538,7 @@ async fn doctor(fix: bool, json: bool) -> anyhow::Result<i32> {
 		},
 	};
 	checks.push(Check::ok("config", config_path().display().to_string()));
+	let tld = testd_core::config::host_tld();
 
 	if config.secret.is_empty() {
 		if fix {
@@ -587,18 +565,15 @@ async fn doctor(fix: bool, json: bool) -> anyhow::Result<i32> {
 		checks.push(Check::ok("secret", "operator secret set".to_owned()));
 	}
 
-	let localhost_mode = config.tld == "localhost";
-	if localhost_mode {
-		checks.push(Check::ok("resolver", ".localhost needs no resolver change".into()));
-	} else {
+	{
 		let dns_addr = SocketAddr::from(([127, 0, 0, 1], DEFAULT_DNS_PORT));
 		match config.resolver {
 			ResolverBackend::Dns => {
-				if testd_setup::is_os_resolver_configured(&config.tld, dns_addr) {
+				if testd_setup::is_os_resolver_configured(tld, dns_addr) {
 					checks.push(Check::ok("resolver", format!("configured (DNS server on {dns_addr})")));
 				} else if fix {
-					match testd_setup::setup_os_resolver(&config.tld, dns_addr) {
-						Ok(()) if testd_setup::is_os_resolver_configured(&config.tld, dns_addr) => {
+					match testd_setup::setup_os_resolver(tld, dns_addr) {
+						Ok(()) if testd_setup::is_os_resolver_configured(tld, dns_addr) => {
 							checks.push(Check::ok("resolver", format!("configured (DNS server on {dns_addr})")));
 						},
 						Ok(()) => checks.push(Check::fail(
@@ -635,7 +610,7 @@ async fn doctor(fix: bool, json: bool) -> anyhow::Result<i32> {
 
 		// `is_os_resolver_configured` only proves the route exists. Resolve the
 		// dashboard name the way a browser does, through the OS resolver.
-		let dashboard = format!("testd.{}", config.tld);
+		let dashboard = format!("testd.{tld}");
 		let expected = match config.resolver {
 			ResolverBackend::Dns => std::net::IpAddr::V4(config.answer_addr),
 			ResolverBackend::Hosts => std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
@@ -649,7 +624,7 @@ async fn doctor(fix: bool, json: bool) -> anyhow::Result<i32> {
 		if matches!(config.resolver, ResolverBackend::Dns)
 			&& !matches!(&resolved, Some(addrs) if addrs.contains(&expected))
 		{
-			match start_resolution_probe(&config.tld, config.answer_addr).await {
+			match start_resolution_probe(tld, config.answer_addr).await {
 				Ok(true) => {
 					resolved = resolve_via_os_until(&dashboard, expected, std::time::Duration::from_secs(2)).await;
 				},
@@ -663,7 +638,7 @@ async fn doctor(fix: bool, json: bool) -> anyhow::Result<i32> {
 			&& matches!(config.resolver, ResolverBackend::Dns)
 			&& !matches!(&resolved, Some(addrs) if addrs.contains(&expected))
 		{
-			match testd_setup::setup_os_resolver(&config.tld, dns_addr) {
+			match testd_setup::setup_os_resolver(tld, dns_addr) {
 				Ok(()) => resolve_via_os_until(&dashboard, expected, std::time::Duration::from_secs(5)).await,
 				Err(_) => resolved,
 			}
@@ -778,12 +753,12 @@ async fn doctor(fix: bool, json: bool) -> anyhow::Result<i32> {
 	}
 
 	let edge_port = if config.edge_enabled { config.edge_addr.port() } else { 443 };
-	let mut status = caddy::probe(&config.tld, edge_port);
+	let mut status = caddy::probe(tld, edge_port);
 	if status == EdgeStatus::Untrusted
 		&& fix && let Some(pem) = &root_pem
 	{
 		match testd_setup::trust_root(pem) {
-			Ok(()) => status = caddy::probe(&config.tld, edge_port),
+			Ok(()) => status = caddy::probe(tld, edge_port),
 			Err(e) => checks.push(Check::fail("certificate", e.to_string(), "run `testd init --yes`")),
 		}
 	}
@@ -1099,7 +1074,7 @@ fn age(seconds: u64) -> String {
 
 fn export_caddyfile() -> anyhow::Result<()> {
 	let config = testd_core::config::load_host_config()?;
-	let content = testd_daemon::edge::caddyfile(&config.tld, config.http_addr);
+	let content = testd_daemon::edge::caddyfile(testd_core::config::host_tld(), config.http_addr);
 	std::fs::create_dir_all(config.caddyfile_path.parent().unwrap_or(std::path::Path::new(".")))?;
 	std::fs::write(&config.caddyfile_path, &content)?;
 	eprintln!("wrote {}", config.caddyfile_path.display());
@@ -1112,15 +1087,12 @@ const HOSTS_HELPER_SCRIPT: &str = include_str!("../scripts/testd-hosts-helper");
 
 fn uninstall(purge: bool, keep_resolver: bool, keep_certificate: bool) -> anyhow::Result<()> {
 	let config = testd_core::config::load_host_config().ok();
-	let tld = config
-		.as_ref()
-		.map(|c| c.tld.clone())
-		.unwrap_or_else(|| testd_core::config::DEFAULT_TLD.to_owned());
+	let tld = testd_core::config::host_tld();
 	let mut errors = Vec::new();
 
-	if !keep_resolver && tld != "localhost" {
+	if !keep_resolver {
 		eprintln!("removing the OS resolver route for .{tld}");
-		if let Err(e) = testd_setup::teardown_os_resolver(&tld) {
+		if let Err(e) = testd_setup::teardown_os_resolver(tld) {
 			errors.push(format!("resolver: {e}"));
 		}
 	}

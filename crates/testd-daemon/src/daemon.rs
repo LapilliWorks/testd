@@ -55,7 +55,7 @@ impl Daemon {
 	pub async fn new_with_elevation(elevation: Elevation) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
 		let _instance_lock = acquire_instance_lock()?;
 		let config = load_host_config()?;
-		let tld = config.tld.clone();
+		let tld = testd_core::config::host_tld().to_owned();
 
 		if config.secret.is_empty() {
 			eprintln!(
@@ -65,7 +65,7 @@ impl Daemon {
 
 		let resolver: Arc<dyn Resolver> = match config.resolver {
 			ResolverBackend::Dns => {
-				let dns = DnsResolver::start(&config.tld, config.answer_addr, elevation)
+				let dns = DnsResolver::start(&tld, config.answer_addr, elevation)
 					.await
 					.map_err(|e| format!("failed to start the DNS server on 127.0.0.1:{DEFAULT_DNS_PORT}: {e}"))?;
 				eprintln!("DNS server listening on {}", dns.listen_addr());
@@ -82,7 +82,7 @@ impl Daemon {
 					)
 					.into());
 				}
-				Arc::new(HostsResolver::new(&config.tld, &config.hosts_helper_path, &config.hosts_path))
+				Arc::new(HostsResolver::new(&tld, &config.hosts_helper_path, &config.hosts_path))
 			},
 		};
 
@@ -97,7 +97,7 @@ impl Daemon {
 		let root = config
 			.edge_enabled
 			.then(|| Arc::new(PkiRoot::new(config.pki_dir.clone())) as Arc<dyn RootAuthority>);
-		let health = Arc::new(HealthMonitor::new(config.tld.clone(), Arc::clone(&resolver), root, elevation));
+		let health = Arc::new(HealthMonitor::new(tld.clone(), Arc::clone(&resolver), root, elevation));
 		let health_for_http = Arc::clone(&health);
 		engine.set_health_refresh(move || {
 			health_for_http.probe(true);
@@ -122,7 +122,7 @@ impl Daemon {
 		// A share belongs to its name: when the registration goes, the tunnel goes.
 		{
 			let shares = Arc::clone(&shares);
-			tokio::spawn(retain_shares(shares, engine.subscribe(), engine.registrations(), config.tld.clone()));
+			tokio::spawn(retain_shares(shares, engine.subscribe(), engine.registrations(), tld.clone()));
 		}
 
 		let control = match ControlServer::start(
@@ -131,7 +131,7 @@ impl Daemon {
 			Arc::clone(&shares),
 			engine.registrations(),
 			Arc::clone(&access),
-			config.tld.clone(),
+			tld.clone(),
 		)
 		.await
 		{
@@ -155,7 +155,7 @@ impl Daemon {
 		};
 
 		if let Some(edge) = &edge {
-			eprintln!("[edge]   https://*.{} on {}", config.tld, edge.tls_addr);
+			eprintln!("[edge]   https://*.{} on {}", tld, edge.tls_addr);
 			eprintln!("[edge]   http://{} for external fronts", edge.http_addr);
 		}
 
