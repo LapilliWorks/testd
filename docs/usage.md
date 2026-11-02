@@ -1,3 +1,8 @@
+---
+title: Daily usage
+description: 'Names, targets, lifetimes, the dashboard, sharing, access requests, and troubleshooting.'
+---
+
 # Daily usage
 
 ## Register a name

@@ -1,3 +1,8 @@
+---
+title: Advanced usage
+description: 'Remote development, profiles, grants, quick launches, tunnels, external fronts, and PKI.'
+---
+
 # Advanced usage
 
 ## Remote development

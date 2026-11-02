@@ -1,3 +1,8 @@
+---
+title: Dependency policy
+description: 'Advisory exceptions and MSRV constraints accepted by the dependency gate.'
+---
+
 # Dependency advisory exceptions
 
 `cargo deny check` remains the dependency policy gate. Vulnerability advisories are not exempted.

@@ -1,3 +1,8 @@
+---
+title: Quickstart
+description: 'From a clean machine to a working HTTPS name: install, first host, first registration.'
+---
+
 # Quickstart
 
 This is the shortest path from a clean machine to a working HTTPS name. It assumes the host is the machine with the browser; the project can run on the same machine or on a remote dev box.
@@ -26,7 +31,7 @@ From the repository:
 cargo install --path .
 ```
 
-Release archives and generated Homebrew formulas are also published. Verify `SHA256SUMS` before installing. The tray app is a separate Tauri build. See [DEVELOPING.md](../DEVELOPING.md#release) for building and packaging.
+Release archives and generated Homebrew formulas are also published. Verify `SHA256SUMS` before installing. The tray app is a separate Tauri build. See [DEVELOPING.md](https://github.com/testd/testd/blob/master/DEVELOPING.md#release) for building and packaging.
 
 ## 2. Prepare the host
 
