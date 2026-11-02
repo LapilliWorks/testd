@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+	<url><loc>https://testd.dev/</loc></url>
+	<url><loc>https://testd.dev/docs/</loc></url>
+	<url><loc>https://testd.dev/docs/quickstart.html</loc></url>
+	<url><loc>https://testd.dev/docs/usage.html</loc></url>
+	<url><loc>https://testd.dev/docs/advanced.html</loc></url>
+	<url><loc>https://testd.dev/docs/reference.html</loc></url>
+	<url><loc>https://testd.dev/docs/security.html</loc></url>
+	<url><loc>https://testd.dev/docs/dependency-policy.html</loc></url>
+</urlset>

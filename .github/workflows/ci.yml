@@ -42,6 +42,17 @@ jobs:
       - run: python -m unittest discover -s tests/release -p 'test_*.py'
       - run: bun test tests/release/browser.test.ts
 
+  site:
+    name: site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run check
+      - run: bun run build
+      - run: bun run check:links
+
   system-restore:
     name: system restore (${{ matrix.os }})
     strategy:
