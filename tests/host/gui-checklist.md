@@ -64,12 +64,13 @@ run at a time; the instance lock must reject a second tray or headless host.
 - [ ] Windows: certificate install from the wizard raises one UAC prompt;
       later launches raise none when trust is already installed.
 - [ ] macOS: after setup the app has no dock icon (activation policy Accessory).
-- [ ] Tray menu shows the live domain list, grouped by project when more than
-      one project is active.
+- [ ] Tray menu shows the live domain list, each name with open and stop.
 - [ ] Start `testd run app.example:3000` in a project; the domain appears in the
       tray within two seconds.
-- [ ] Click the domain: the default browser opens `https://app.example.test` and
-      the dev server responds.
+- [ ] Open the domain's stop action: the leaf stops and the name disappears, but
+      its grant is kept, so the next run publishes it without asking.
+- [ ] Click the domain's open action: the default browser opens
+      `https://app.example.test` and the dev server responds.
 - [ ] Stop `testd run`; the domain disappears from the tray.
 - [ ] "Open dashboard" opens the authenticated dashboard URL in the browser.
 - [ ] Dashboard shows the same domains, shares, and quick launches as the CLI.
@@ -119,7 +120,8 @@ run at a time; the instance lock must reject a second tray or headless host.
 
 ## Quick launches
 
-- [ ] Tray: "Quick launches…" opens the local dashboard at the Quick launches section; a second click focuses or reopens the same browser page.
+- [ ] Tray: **Quick launches** is a disabled heading, each saved launch is a
+      submenu with `label :port`, and its action starts or stops the launch.
 - [ ] Save a launch with a program, arguments, one name, and no target. Start it: the name shows `configured`, then `probing`, then `confirmed`; the browser reaches the process.
 - [ ] Stop it: the process exits, the name disappears, and the state returns to `configured`.
 - [ ] Save a launch with an explicit `127.0.0.1:<port>` target and start it; it registers without detection.

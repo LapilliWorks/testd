@@ -13,6 +13,7 @@ use tauri_plugin_deep_link::DeepLinkExt;
 use testd_daemon::daemon::Daemon;
 use testd_daemon::engine::EngineEvent;
 use testd_daemon::health::{Action, Health};
+use testd_daemon::launch::LaunchView;
 use testd_daemon::share::ShareView;
 
 /// Append a timestamped line to the file named by `TESTD_TRAY_TRACE`.
@@ -35,6 +36,9 @@ pub(crate) fn trace(message: &str) {
 /// whole UI.
 enum MenuAction {
 	ToggleAutostart,
+	StopDomain(String),
+	StartLaunch(String),
+	StopLaunch(String),
 	/// `None` is this machine.
 	OpenShare(String),
 	StopShare(String),
@@ -66,11 +70,21 @@ struct MenuState<'a> {
 	health: Health,
 	autostart: bool,
 	shares: &'a [ShareView],
+	launches: &'a [LaunchRow],
+}
+
+/// The part of a launch the menu renders. Kept separate from [`LaunchView`] so
+/// a new log line does not rebuild an open menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LaunchRow {
+	id: String,
+	label: String,
+	running: bool,
 }
 
 /// Build a complete tray menu from the current registrations and health.
 fn build_menu(app: &AppHandle, state: &MenuState<'_>, handles: &SharedHandles) -> tauri::Result<Menu<tauri::Wry>> {
-	let MenuState { regs, health, autostart, shares } = *state;
+	let MenuState { regs, health, autostart, shares, launches } = *state;
 	let mut items: Vec<Box<dyn tauri::menu::IsMenuItem<tauri::Wry>>> = Vec::new();
 	// A missing prerequisite is the first thing to act on, and the red icon
 	// points here.
@@ -84,30 +98,33 @@ fn build_menu(app: &AppHandle, state: &MenuState<'_>, handles: &SharedHandles) -
 		items.push(Box::new(PredefinedMenuItem::separator(app)?));
 	}
 
-	items.push(Box::new(PredefinedMenuItem::separator(app)?));
-
 	if regs.is_empty() {
 		items.push(Box::new(MenuItem::with_id(app, "no-domains", "No active domains", false, None::<&str>)?));
 	} else {
-		let groups = testd_core::naming::group_by_project(regs);
-		if groups.len() > 1 {
-			for (project, domains) in &groups {
-				let label = (*project).unwrap_or("single-label");
-				let submenu = Submenu::with_id(app, format!("group:{label}"), label, true)?;
-				for r in domains {
-					submenu.append(&domain_item(app, r)?)?;
-				}
-				items.push(Box::new(submenu));
-			}
-		} else {
-			for r in regs {
-				items.push(Box::new(domain_item(app, r)?));
-			}
+		for r in regs {
+			items.push(Box::new(domain_item(app, r)?));
 		}
 	}
 
-	if !shares.is_empty() {
+	items.push(Box::new(PredefinedMenuItem::separator(app)?));
+
+	if !launches.is_empty() {
+		// A heading, not an action. Start and stop live on each launch.
+		items.push(Box::new(MenuItem::with_id(app, "quick-launches", "Quick launches", false, None::<&str>)?));
+		for launch in launches {
+			let submenu = Submenu::with_id(app, format!("launch:{}", launch.id), &launch.label, true)?;
+			let (id, action) = if launch.running {
+				(format!("launch-stop:{}", launch.id), "stop")
+			} else {
+				(format!("launch-start:{}", launch.id), "start")
+			};
+			submenu.append(&MenuItem::with_id(app, id, action, true, None::<&str>)?)?;
+			items.push(Box::new(submenu));
+		}
 		items.push(Box::new(PredefinedMenuItem::separator(app)?));
+	}
+
+	if !shares.is_empty() {
 		for share in shares {
 			let label = format!("Shared: {} → {} ({})", share.name, share.url, share.exposure.label());
 			items.push(Box::new(MenuItem::with_id(
@@ -125,15 +142,13 @@ fn build_menu(app: &AppHandle, state: &MenuState<'_>, handles: &SharedHandles) -
 				None::<&str>,
 			)?));
 		}
+		items.push(Box::new(PredefinedMenuItem::separator(app)?));
 	}
 
 	items.push(Box::new(MenuItem::with_id(app, "dashboard", "Open dashboard", true, None::<&str>)?));
 	let autostart_item = CheckMenuItem::with_id(app, "autostart", "Launch at login", true, autostart, None::<&str>)?;
 	items.push(Box::new(autostart_item.clone()));
-	items.push(Box::new(MenuItem::with_id(app, "launches", "Quick launches…", true, None::<&str>)?));
-
-	items.push(Box::new(PredefinedMenuItem::separator(app)?));
-	items.push(Box::new(MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?));
+	items.push(Box::new(MenuItem::with_id(app, "quit", "Exit", true, None::<&str>)?));
 
 	if let Ok(mut slot) = handles.lock() {
 		*slot = Some(MenuHandles { autostart: autostart_item });
@@ -144,11 +159,58 @@ fn build_menu(app: &AppHandle, state: &MenuState<'_>, handles: &SharedHandles) -
 	Menu::with_items(app, &refs)
 }
 
-/// One clickable name. The item id is the domain, which is what the menu event
-/// handler opens.
-fn domain_item(app: &AppHandle, reg: &testd_core::Registration) -> tauri::Result<MenuItem<tauri::Wry>> {
+/// One name, with open and stop beneath it. A menu item cannot both act and hold
+/// children, so the name itself is a submenu.
+fn domain_item(app: &AppHandle, reg: &testd_core::Registration) -> tauri::Result<Submenu<tauri::Wry>> {
 	let label = format!("{} → {}", reg.domain, reg.target);
-	MenuItem::with_id(app, &reg.domain, label, true, None::<&str>)
+	let submenu = Submenu::with_id(app, format!("domain:{}", reg.domain), label, true)?;
+	submenu.append(&MenuItem::with_id(app, format!("domain-open:{}", reg.domain), "open", true, None::<&str>)?)?;
+	submenu.append(&MenuItem::with_id(app, format!("domain-stop:{}", reg.domain), "stop", true, None::<&str>)?)?;
+	Ok(submenu)
+}
+
+/// The menu's view of every saved launch.
+fn summarize_launches(views: &[LaunchView]) -> Vec<LaunchRow> {
+	views
+		.iter()
+		.map(|view| LaunchRow { id: view.definition.id.clone(), label: launch_label(view), running: view.running })
+		.collect()
+}
+
+/// `label :port`, using the live target when a launch detected its own port.
+fn launch_label(view: &LaunchView) -> String {
+	let mut ports: Vec<&str> = Vec::new();
+	for entry in &view.definition.entries {
+		let target = view
+			.states
+			.iter()
+			.find(|state| state.domain == entry.domain)
+			.map(|state| state.target.as_str())
+			.unwrap_or(entry.target.as_str());
+		if let Some(port) = target_port(target)
+			&& !ports.contains(&port)
+		{
+			ports.push(port);
+		}
+	}
+	if ports.is_empty() {
+		view.definition.label.clone()
+	} else {
+		format!("{} :{}", view.definition.label, ports.join(", :"))
+	}
+}
+
+/// The numeric port of a target, if it names one.
+fn target_port(target: &str) -> Option<&str> {
+	let target = target.trim();
+	if target.is_empty() || target.eq_ignore_ascii_case("auto") {
+		return None;
+	}
+	let port = match target.strip_prefix('[') {
+		Some(rest) => rest.split_once("]:").map(|(_, port)| port)?,
+		None => target.rsplit_once(':').map_or(target, |(_, port)| port),
+	};
+	(!port.is_empty() && port.chars().all(|c| c.is_ascii_digit())).then_some(port)
 }
 
 /// What the tray icon should say before the user opens the menu.
@@ -308,8 +370,10 @@ pub fn start_daemon(
 
 	let autostart = autostart_enabled(app);
 	let shares = rt.block_on(async { daemon.shares().list().await });
+	let launches = summarize_launches(&daemon.launches().list());
 	let handles: SharedHandles = std::sync::Arc::new(std::sync::Mutex::new(None));
-	let menu = build_menu(app, &MenuState { regs: &[], health, autostart, shares: &shares }, &handles)?;
+	let menu =
+		build_menu(app, &MenuState { regs: &[], health, autostart, shares: &shares, launches: &launches }, &handles)?;
 
 	// Subscribe before reading the current value, so a request made while the
 	// tray is being built is not missed.
@@ -318,11 +382,6 @@ pub fn start_daemon(
 	let mut icon_state = IconState::current(health.healthy(), has_request);
 	let icon = tray_icon(icon_state)?;
 	let click_dashboard = dashboard_url.clone();
-	let launches_url = if dashboard_url.contains('#') {
-		format!("{dashboard_url}&view=launches")
-	} else {
-		format!("{dashboard_url}#view=launches")
-	};
 	let action_daemon = Arc::clone(&daemon);
 	let action_rt = rt.handle().clone();
 	let action_menu = action_tx.clone();
@@ -346,19 +405,25 @@ pub fn start_daemon(
 				let _ = action_menu.send(MenuAction::ToggleAutostart);
 			} else if id == "dashboard" {
 				let _ = open::that(&click_dashboard);
+			} else if let Some(domain) = id.strip_prefix("domain-open:") {
+				let url = format!("https://{domain}");
+				let _ = open::that(&url);
+			} else if let Some(domain) = id.strip_prefix("domain-stop:") {
+				let _ = action_menu.send(MenuAction::StopDomain(domain.to_owned()));
+			} else if let Some(launch) = id.strip_prefix("launch-start:") {
+				let _ = action_menu.send(MenuAction::StartLaunch(launch.to_owned()));
+			} else if let Some(launch) = id.strip_prefix("launch-stop:") {
+				let _ = action_menu.send(MenuAction::StopLaunch(launch.to_owned()));
 			} else if let Some(name) = id.strip_prefix("share-open:") {
 				let _ = action_menu.send(MenuAction::OpenShare(name.to_owned()));
 			} else if let Some(name) = id.strip_prefix("share-stop:") {
 				let _ = action_menu.send(MenuAction::StopShare(name.to_owned()));
-			} else if id == "launches" {
-				let _ = open::that(&launches_url);
-			} else if id != "no-domains" {
-				// Submenu headers carry `group:` ids and must not open a URL.
-				if id.starts_with("group:") {
-					return;
-				}
-				let url = format!("https://{id}");
-				let _ = open::that(&url);
+			} else if id.starts_with("domain:")
+				|| id.starts_with("launch:")
+				|| id == "quick-launches"
+				|| id == "no-domains"
+			{
+				// Submenu headers and headings are not actions.
 			}
 		})
 		.build(app)?;
@@ -408,7 +473,9 @@ pub fn start_daemon(
 		let mut health = health;
 		let mut autostart = autostart_enabled(&menu_app);
 		let mut shares = shares;
+		let mut launches = launches;
 		let mut ticker = tokio::time::interval(Duration::from_secs(5));
+		let mut launch_ticker = tokio::time::interval(Duration::from_secs(1));
 
 		loop {
 			let mut rebuild = false;
@@ -424,6 +491,13 @@ pub fn start_daemon(
 					let current = node_daemon.shares().list().await;
 					if current != shares {
 						shares = current;
+						rebuild = true;
+					}
+				},
+				_ = launch_ticker.tick() => {
+					let current = summarize_launches(&node_daemon.launches().list());
+					if current != launches {
+						launches = current;
 						rebuild = true;
 					}
 				},
@@ -464,6 +538,36 @@ pub fn start_daemon(
 					// immediately is what froze the UI.
 					tokio::time::sleep(Duration::from_millis(150)).await;
 					match action {
+						MenuAction::StopDomain(domain) => {
+							match node_daemon.stop_domain(&domain).await {
+								Ok(()) => trace(&format!("domain stopped: {domain}")),
+								Err(e) => trace(&format!("domain stop failed: {e}")),
+							}
+						},
+						MenuAction::StartLaunch(id) => {
+							let book = node_daemon.launches();
+							match book.start(&id) {
+								Ok(()) => trace(&format!("launch started: {id}")),
+								Err(e) => trace(&format!("launch start failed: {e}")),
+							}
+							let current = summarize_launches(&book.list());
+							if current != launches {
+								launches = current;
+								rebuild = true;
+							}
+						},
+						MenuAction::StopLaunch(id) => {
+							let book = node_daemon.launches();
+							match book.stop(&id) {
+								Ok(()) => trace(&format!("launch stopping: {id}")),
+								Err(e) => trace(&format!("launch stop failed: {e}")),
+							}
+							let current = summarize_launches(&book.list());
+							if current != launches {
+								launches = current;
+								rebuild = true;
+							}
+						},
 						MenuAction::ToggleAutostart => {
 							use tauri_plugin_autostart::ManagerExt;
 							let manager = menu_app.autolaunch();
@@ -515,7 +619,7 @@ pub fn start_daemon(
 				// Swapping the menu while its popup is still closing is the failure
 				// mode; give it a moment.
 				tokio::time::sleep(Duration::from_millis(150)).await;
-				let state = MenuState { regs: &regs, health, autostart, shares: &shares };
+				let state = MenuState { regs: &regs, health, autostart, shares: &shares, launches: &launches };
 				match build_menu(&menu_app, &state, &menu_handles) {
 					Ok(menu) => match tray.set_menu(Some(menu)) {
 						Ok(()) => trace("menu replaced"),

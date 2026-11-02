@@ -157,7 +157,7 @@ The dashboard has a **Shares** card: provider URL, the registered name, the expo
 
 ## Quick launches
 
-The local dashboard's **Quick launches** section starts a command and owns its names for the process lifetime. A name with no target detects the child's listening port; an explicit `host:port` overrides detection. Each name moves through `configured -> probing -> confirmed`, and the name is registered only after the target accepts. Stop stops the process group; quitting the app stops every launch. Definitions live in `~/.config/testd/launches.json`; running claims are not persisted. The tray's "Quick launches..." item opens this section.
+The local dashboard's **Quick launches** section starts a command and owns its names for the process lifetime. A name with no target detects the child's listening port; an explicit `host:port` overrides detection. Each name moves through `configured -> probing -> confirmed`, and the name is registered only after the target accepts. Stop stops the process group; quitting the app stops every launch. Definitions live in `~/.config/testd/launches.json`; running claims are not persisted. The tray lists saved launches with start and stop actions.
 
 ## Diagnosis
 

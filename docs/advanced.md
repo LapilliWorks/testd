@@ -101,7 +101,7 @@ Quick launches and the operator secret are not issued grants. Names published th
 
 ## Quick launches
 
-A quick launch is a saved command started from the local dashboard. It is local-only: the dashboard serves it on loopback and the authenticated intake never exposes process control. The tray's **Quick launches...** item opens the same section.
+A quick launch is a saved command started from the local dashboard or the tray. It is local-only: the dashboard serves it on loopback and the authenticated intake never exposes process control. The tray lists saved launches with start and stop actions.
 
 A launch definition has a label, a command, an optional working directory, an optional environment, and one or more name entries. For each entry:
 
@@ -200,7 +200,7 @@ The tray:
 - Runs the daemon and opens the authenticated dashboard
 - Enables launch at login once, on first start, with a **Launch at login** checkbox afterwards
 - Shows pending access requests as notifications and changes its icon while one waits
-- Hosts the Quick launches section
+- Lists saved quick launches with start and stop actions
 - Provides share controls
 
 Unticking **Launch at login** is final until you tick it again, even if the login item is removed outside the tray. Removing the app with the OS uninstaller does not remove the DNS route or the trusted root; run `testd uninstall` first.
