@@ -703,29 +703,69 @@ def browser(run):
 def desktop(run):
 	if not run.args.app:
 		raise RuntimeError('provide --app with the candidate .app, .AppImage, or NSIS installer')
+	if not sys.stdin.isatty():
+		raise RuntimeError('the desktop suite needs an interactive terminal; run it directly, '
+			'not through a pipe or with stdin redirected')
 	snapshot = system_snapshot(run, HOST_TLD, interactive=True)
 	print('This suite requires a real desktop session and actual interaction. '
 		'Integration installed while it runs is restored afterwards.', flush=True)
 	app = run.args.app.resolve()
 	command = ['open', str(app)] if SYSTEM == 'Darwin' else [str(app)]
-	subprocess.Popen(command)
-	items = checklist_items((ROOT / 'tests/host/gui-checklist.md').read_text(encoding=ENCODING))
+	app_log = run.log_path('desktop-app')
+	app_process = None
 	try:
+		# The app must not inherit the checklist's stdin. Its daemon logs belong
+		# in the report, not on top of the next prompt.
+		with app_log.open('xb') as sink:
+			app_process = subprocess.Popen(
+				command, stdin=subprocess.DEVNULL, stdout=sink, stderr=subprocess.STDOUT)
+		print(f'Candidate app output: {app_log}', flush=True)
+		if SYSTEM == 'Linux':
+			time.sleep(1.5)
+			if app_process.poll() is not None:
+				raise RuntimeError(
+					f'the candidate app exited immediately; see {app_log}. '
+					'Check display/port privileges before rerunning the checklist')
+			watch = threading.Thread(target=note_app_exit, args=(app_process, app_log), daemon=True)
+			watch.start()
+		items = checklist_items((ROOT / 'tests/host/gui-checklist.md').read_text(encoding=ENCODING))
 		for item in items:
 			print(f'\n{item}')
-			answer = input('[p]ass / [f]ail / [n]ot applicable / [q]uit: ').strip().lower()
+			answer = ask('[p]ass / [f]ail / [n]ot applicable / [q]uit: ')
 			while answer not in ['p', 'f', 'n', 'q']:
-				answer = input('Enter p, f, n, or q: ').strip().lower()
+				answer = ask('Enter p, f, n, or q: ')
 			if answer == 'q':
 				run.metadata['incomplete'] = True
 				run.record('desktop-checklist', 'skip', 'interrupted; unanswered checks are not passed')
 				return
-			detail = input('Evidence or reason (required for fail/not applicable): ').strip()
+			detail = ask('Evidence or reason (required for fail/not applicable): ')
 			if answer in ['f', 'n'] and not detail:
 				raise RuntimeError('a reason is required')
 			run.record(item, {'p': 'pass', 'f': 'fail', 'n': 'skip'}[answer], detail)
 	finally:
+		if app_process is not None and SYSTEM == 'Linux' and app_process.poll() is None:
+			app_process.terminate()
+			try:
+				app_process.wait(timeout=5)
+			except subprocess.TimeoutExpired:
+				app_process.kill()
 		system_restore(run, snapshot, HOST_TLD, interactive=True)
+
+
+def ask(prompt):
+	print(prompt, end='', flush=True)
+	answer = sys.stdin.readline()
+	if answer == '':
+		raise RuntimeError('desktop checklist input closed; run in an interactive terminal')
+	return answer.strip().lower()
+
+
+def note_app_exit(process, log):
+	try:
+		code = process.wait()
+	except Exception:
+		return
+	print(f'\n[desktop] candidate app exited with {code}; see {log}\n', flush=True)
 
 
 def checklist_items(text):

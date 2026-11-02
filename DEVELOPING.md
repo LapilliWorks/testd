@@ -7,6 +7,7 @@
 - `cargo-cyclonedx` for workspace SBOM generation
 - `cargo-nextest` for tests and `cargo-deny` for dependency checks
 - `cargo-tauri` and the platform's Tauri prerequisites for the tray app: Xcode command-line tools on macOS, WebKitGTK/GTK on Linux, MSVC on Windows
+- On Fedora/RHEL, `qt5-qttools` provides `qtpaths`, which the Linux AppImage bundler needs
 
 ## Build
 
@@ -51,6 +52,9 @@ python3 tests/release/run.py browser
 
 # Interactive desktop checklist, for example on macOS
 python3 tests/release/run.py desktop --app /Applications/Testd.app
+# On Windows, run this from an elevated PowerShell so the system snapshot and
+# restore can read the NRPT rules and machine root store. Use a disposable
+# desktop VM, not a headless CI runner.
 ```
 
 Reports contain local PKI and test credentials and are private by default. Do not attach the entire report directory to a public issue; share only reviewed logs/JSON, never private keys or credentials.
@@ -59,7 +63,7 @@ The browser suite uses Bun fixtures and publishes `app.releasecheck`, `api.relea
 
 The `service` suite (also available as `host --service` or `artifacts --service`) exercises the real launchd/systemd user-session supervisor: start, TLS, forced-crash restart, and stop. It stages a uniquely named service with an isolated home and high ports, retains the generated unit/plist in the report, and removes only that new service when done. Run in a real user session with a working `systemctl --user` or launchd GUI domain; Windows CLI services are not shipped, so Windows supervision is covered by the tray login checks.
 
-The desktop suite launches the supplied app/installer and records each existing GUI checklist item as pass, fail, or not applicable with evidence. Use a clean disposable machine for first-install, setup, actual login, upgrade, and uninstall checks; the runner restores any integration the session installs, but not a pre-existing installation. Padlocks, UAC, tray behavior, and login cannot be proven by an HTTP-only script. Skips and unanswered checks remain visible in `report.json`; they are not counted as passes. An interrupted desktop checklist or browser run without a saved report exits `2` (incomplete); failed checks exit `1`.
+The desktop suite launches the supplied app/installer and records each existing GUI checklist item as pass, fail, or not applicable with evidence. It requires a real interactive terminal and a real desktop session; the app runs with stdin detached and its output goes to a `desktop-app.log` file in the report. Use a clean disposable machine for first-install, setup, actual login, upgrade, and uninstall checks; the runner restores any integration the session installs, but not a pre-existing installation. Padlocks, UAC, tray behavior, and login cannot be proven by an HTTP-only script. On Linux, grant `CAP_NET_BIND_SERVICE` to the actual tray binary or set a high `[host] edge_addr`; without port privileges the daemon exits after setup. Skips and unanswered checks remain visible in `report.json`; they are not counted as passes. An interrupted desktop checklist or browser run without a saved report exits `2` (incomplete); failed checks exit `1`.
 
 `host --system` snapshots the integration `doctor --fix` will change, runs the checks, then restores and verifies that snapshot. Nothing outside the throwaway TLD and the `testd root` and `testd root testing` names is touched, so the suite does not require a clean machine; it requires that no testd daemon is running. See [System integration](#system-integration) for the recorded artifacts and the recovery path. Plain `host` does not change system integration. `--bin /path/to/testd` runs a candidate CLI without rebuilding it.
 

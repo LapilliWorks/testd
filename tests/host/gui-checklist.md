@@ -15,9 +15,15 @@ open target/release/bundle/macos/Testd.app
 Linux:
 
 ```sh
+# Fedora/RHEL: qtpaths from qt5-qttools is required by the AppImage bundler
+sudo dnf install qt5-qttools
 cargo tauri build
 ./target/release/bundle/appimage/*.AppImage
 ```
+
+The tray must bind port 443. Grant `CAP_NET_BIND_SERVICE` to the actual tray
+binary or set `[host] edge_addr` to a high port before the daemon starts;
+otherwise the tray exits after setup with a bind permission error.
 
 Windows (elevated shell not required for the app itself):
 
@@ -25,6 +31,9 @@ Windows (elevated shell not required for the app itself):
 cargo tauri build
 target\release\bundle\nsis\Testd_0.1.0_x64-setup.exe
 ```
+
+Run `tests/release/run.py desktop` from an elevated PowerShell on Windows so
+its system snapshot and restore can read the NRPT rules and machine root store.
 
 The GUI imports the same daemon library as `testd host`. Only one daemon may
 run at a time; the instance lock must reject a second tray or headless host.
