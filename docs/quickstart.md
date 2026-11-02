@@ -26,13 +26,7 @@ What it does:
 4. Leaves the OS resolver alone until a remote client registers. Run `testd doctor --fix` to configure it immediately.
 5. Installs the root into the system trust store when stdin is a terminal or `--yes` is passed.
 
-For the default `.test` TLD, run `testd doctor --fix` on every platform to configure the resolver before using a local registration. Otherwise lazy setup does not run until a remote client arrives.
-
-The default TLD is `.test`. For a single-machine setup that needs no resolver change:
-
-```sh
-testd init --tld localhost
-```
+For the `.test` TLD, run `testd doctor --fix` on every platform to configure the resolver before using a local registration. Otherwise lazy setup does not run until a remote client arrives.
 
 ## 3. Start the host daemon
 
@@ -42,7 +36,7 @@ testd host
 
 The daemon owns the TCP intake (`:7737`), the HTTPS edge (`:443`), and the DNS server (`127.0.0.1:7753`, or `:53` on Windows). A second instance fails fast on the instance lock.
 
-On Linux, port 443 needs `CAP_NET_BIND_SERVICE`. The root-managed `testd@.service` grants that capability; a systemd user service must use a high port. For a foreground executable, grant the capability to that executable, or set `[host] edge_addr = '127.0.0.1:8443'` and use `https://app.example.test:8443`. `*.localhost` removes only the DNS setup requirement, not CA trust or privileged-port requirements.
+On Linux, port 443 needs `CAP_NET_BIND_SERVICE`. The root-managed `testd@.service` grants that capability; a systemd user service must use a high port. For a foreground executable, grant the capability to that executable, or set `[host] edge_addr = '127.0.0.1:8443'` and use `https://app.example.test:8443`.
 
 ## 4. Register the first name
 
@@ -99,7 +93,7 @@ For an unattended leaf, `[host] secret` is the bootstrap credential. Put it in `
 export TESTD_TOKEN=<the secret>
 ```
 
-The host answers `*.localhost` or `*.test` locally; other devices reach the name through the host's DNS and edge, so the resolver and the root certificate must be configured there too. `testd doctor` on the host reports both. To make the host's names available to another machine, copy the root from the local dashboard:
+The host answers `*.test` locally; other devices reach the name through the host's DNS and edge, so the resolver and the root certificate must be configured there too. `testd doctor` on the host reports both. To make the host's names available to another machine, copy the root from the local dashboard:
 
 ```sh
 curl http://127.0.0.1:7737/ca.crt -o testd-root.crt

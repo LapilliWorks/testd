@@ -9,7 +9,7 @@ check_binary() {
 
 check_init() {
 	section 'init'
-	if ! HOME="$TEST_HOME" "$TESTD_BIN" init --caddyfile "" --tld "$TLD" </dev/null >"$TEST_HOME/init.log" 2>&1; then
+	if ! HOME="$TEST_HOME" "$TESTD_BIN" init --caddyfile "" </dev/null >"$TEST_HOME/init.log" 2>&1; then
 		fail 'init'
 		sed -n '1,120p' "$TEST_HOME/init.log" >&2
 		summary
@@ -38,7 +38,7 @@ check_init() {
 	if [ "$(file_mode "$(config_path)")" = '600' ]; then pass 'config is private'; else fail 'config is private'; fi
 
 	# Re-running init must keep the secret other machines already copy.
-	if HOME="$TEST_HOME" "$TESTD_BIN" init --caddyfile "" --tld "$TLD" </dev/null >"$TEST_HOME/init-again.log" 2>&1; then
+	if HOME="$TEST_HOME" "$TESTD_BIN" init --caddyfile "" </dev/null >"$TEST_HOME/init-again.log" 2>&1; then
 		if [ "$(operator_secret)" = "$secret" ]; then
 			pass 're-init keeps the operator secret'
 		else

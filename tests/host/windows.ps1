@@ -21,6 +21,7 @@ $Root = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 Set-Location $Root
 
 $Tld = if ($env:TESTD_HOST_TLD) { $env:TESTD_HOST_TLD } else { 'testdcheck' }
+$env:TESTD_HOST_TLD = $Tld
 $EdgePort = if ($env:TESTD_HOST_EDGE_PORT) { [int]$env:TESTD_HOST_EDGE_PORT } else { 8443 }
 $AppPort = if ($env:TESTD_HOST_APP_PORT) { [int]$env:TESTD_HOST_APP_PORT } else { 18080 }
 $LaunchPort = if ($env:TESTD_HOST_LAUNCH_PORT) { [int]$env:TESTD_HOST_LAUNCH_PORT } else { 18081 }
@@ -137,7 +138,7 @@ function OperatorSecret {
 function Invoke-Init {
 	$psi = New-Object System.Diagnostics.ProcessStartInfo
 	$psi.FileName = $TestdBin
-	$psi.Arguments = "init --caddyfile `"`" --tld $Tld"
+	$psi.Arguments = "init --caddyfile `"`""
 	$psi.UseShellExecute = $false
 	$psi.RedirectStandardInput = $true
 	$psi.RedirectStandardOutput = $true

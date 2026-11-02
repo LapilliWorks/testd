@@ -8,7 +8,7 @@
 #
 # Environment:
 #   TESTD_BIN                 binary to test (default target/release/testd)
-#   TESTD_HOST_TLD            throwaway TLD (default testdcheck)
+#   TESTD_HOST_TLD            test-only throwaway TLD (default testdcheck)
 #   TESTD_HOST_EDGE_PORT      HTTPS edge port (default 8443)
 #   TESTD_HOST_APP_PORT       upstream port for registration (default 18080)
 #   TESTD_HOST_LAUNCH_PORT    quick-launch upstream port (default 18081)
@@ -23,6 +23,7 @@ if [ "${TESTD_HOST_TEST_SYSTEM:-0}" = '1' ] && [ ! -f "${TESTD_HOST_SNAPSHOT:-/n
 fi
 
 TLD="${TESTD_HOST_TLD:-testdcheck}"
+export TESTD_HOST_TLD="$TLD"
 EDGE_PORT="${TESTD_HOST_EDGE_PORT:-8443}"
 APP_PORT="${TESTD_HOST_APP_PORT:-18080}"
 LAUNCH_PORT="${TESTD_HOST_LAUNCH_PORT:-18081}"

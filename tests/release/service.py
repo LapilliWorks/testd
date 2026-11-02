@@ -27,7 +27,7 @@ def wait_dashboard(port):
 			connection.request('GET', '/api/status')
 			response = connection.getresponse()
 			value = json.loads(response.read())
-			is_running = response.status == 200 and value['tld'] == 'localhost'
+			is_running = response.status == 200 and value['tld'] == 'test'
 		except (OSError, ValueError):
 			is_running = False
 		finally:
@@ -55,7 +55,7 @@ def service_home(run, cli):
 	for key in list(env):
 		if key.startswith('TESTD_'):
 			del env[key]
-	run.command('service-init', [str(cli), 'init', '--caddyfile', '', '--tld', 'localhost'], env=env)
+	run.command('service-init', [str(cli), 'init', '--caddyfile', ''], env=env)
 	ports = [free_port() for _ in range(3)]
 	config = home / '.config/testd/config.toml'
 	text = config.read_text().replace('[host]', '[host]\n' + '\n'.join([
@@ -83,8 +83,8 @@ def pid(run, system, name):
 def supervise(run, system, name, port, tls_port, root):
 	wait_dashboard(port)
 	run.command('service-tls', ['curl', '--silent', '--show-error', '--max-time', '10', '--noproxy', '*',
-		'--cacert', str(root), '--resolve', f'testd.localhost:{tls_port}:127.0.0.1',
-		f'https://testd.localhost:{tls_port}/'])
+		'--cacert', str(root), '--resolve', f'testd.test:{tls_port}:127.0.0.1',
+		f'https://testd.test:{tls_port}/'])
 	original = pid(run, system, name)
 	os.kill(original, signal.SIGKILL)
 	for _ in range(60):

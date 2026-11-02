@@ -36,13 +36,13 @@ testd init
 testd host
 ```
 
-`init` is idempotent and runs without prompts when stdin is not a terminal. It creates `~/.config/testd/config.toml`, a local CA, and an operator secret. It does not change the system resolver yet: that privileged step is deferred until the first registration arrives from another machine. For the default `.test` TLD on every platform, configure the resolver and install root trust once with:
+`init` is idempotent and runs without prompts when stdin is not a terminal. It creates `~/.config/testd/config.toml`, a local CA, and an operator secret. It does not change the system resolver yet: that privileged step is deferred until the first registration arrives from another machine. For the `.test` TLD on every platform, configure the resolver and install root trust once with:
 
 ```sh
 testd doctor --fix
 ```
 
-On Linux, port 443 requires privileges. For a root-managed system service, use `packaging/systemd/testd@.service`, which grants only `CAP_NET_BIND_SERVICE`. For a foreground CLI, run `sudo setcap 'cap_net_bind_service=+ep' "$(readlink -f "$(command -v testd)")"` after installing or replacing the executable. For a tray build, grant it to the actual tray executable, not an AppImage wrapper. Alternatively, set `[host] edge_addr = '127.0.0.1:8443'` and include `:8443` in browser URLs. A systemd user service with `NoNewPrivileges=yes` cannot acquire a file capability: use a high port there. `*.localhost` skips DNS setup, not HTTPS trust or port-443 permissions.
+On Linux, port 443 requires privileges. For a root-managed system service, use `packaging/systemd/testd@.service`, which grants only `CAP_NET_BIND_SERVICE`. For a foreground CLI, run `sudo setcap 'cap_net_bind_service=+ep' "$(readlink -f "$(command -v testd)")"` after installing or replacing the executable. For a tray build, grant it to the actual tray executable, not an AppImage wrapper. Alternatively, set `[host] edge_addr = '127.0.0.1:8443'` and include `:8443` in browser URLs. A systemd user service with `NoNewPrivileges=yes` cannot acquire a file capability: use a high port there.
 
 Then, in the project:
 
@@ -199,7 +199,6 @@ Useful `[host]` keys:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `tld` | `test` | Names are `<name>.<tld>`; `localhost` needs no resolver change |
 | `resolver` | `dns` | `dns` (built-in server) or `hosts` (single-node only) |
 | `listen_addr` | `0.0.0.0:7737` | Dev-environment intake |
 | `edge_addr` | `0.0.0.0:443` | HTTPS edge; use a high port if the binary lacks `CAP_NET_BIND_SERVICE` |

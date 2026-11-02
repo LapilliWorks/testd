@@ -6,13 +6,13 @@
 # route with `uninstall --keep-certificate`, checks again, then restores the
 # original file. Evidence is kept under a persisted directory.
 #
-# It changes only /etc/resolver/<tld>. It also lets `doctor --fix` touch the
+# It changes only /etc/resolver/test. It also lets `doctor --fix` touch the
 # root trust and Caddyfile import, so run it on a machine where that is allowed.
 # `uninstall --keep-certificate` leaves root trust in place.
 #
 # Usage:
-#   tests/release/macos-resolver-probe.sh [--bin PATH] [--tld TLD]
-#       [--dns-port PORT] [--backup-root DIR]
+#   tests/release/macos-resolver-probe.sh [--bin PATH] [--dns-port PORT]
+#       [--backup-root DIR]
 #
 # Run as the operator, not through sudo. The script calls sudo itself.
 
@@ -22,7 +22,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 CONFIG="$HOME/.config/testd/config.toml"
 BIN="$ROOT/target/release/testd"
-TLD=''
+TLD='test'
 DNS_ADDR=127.0.0.1
 DNS_PORT=7753
 BACKUP_ROOT="$HOME/Library/Application Support/testd/resolver-probes"
@@ -46,7 +46,6 @@ fail() {
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 		--bin) BIN=${2:?missing --bin value}; shift 2 ;;
-		--tld) TLD=${2:?missing --tld value}; shift 2 ;;
 		--dns-port) DNS_PORT=${2:?missing --dns-port value}; shift 2 ;;
 		--backup-root) BACKUP_ROOT=${2:?missing --backup-root value}; shift 2 ;;
 		-h|--help) usage; exit 0 ;;
@@ -64,25 +63,16 @@ case "$DNS_PORT" in
 	''|*[!0-9]*) fail "invalid DNS port: $DNS_PORT" ;;
 esac
 
-config_values=$(python3 - "$CONFIG" <<'PY'
+config_backend=$(python3 - "$CONFIG" <<'PY'
 import sys
 import tomllib
 
 with open(sys.argv[1], 'rb') as source:
 	host = tomllib.load(source)['host']
-print(host['tld'])
 print(host.get('resolver', 'dns'))
 PY
 )
-config_tld=$(printf '%s\n' "$config_values" | sed -n '1p')
-config_backend=$(printf '%s\n' "$config_values" | sed -n '2p')
-[ -n "$config_tld" ] || fail "no [host] tld in $CONFIG"
 [ "$config_backend" = 'dns' ] || fail "this probe needs resolver = \"dns\"; config uses $config_backend"
-if [ -n "$TLD" ] && [ "$TLD" != "$config_tld" ]; then
-	fail "--tld $TLD does not match the configured host TLD $config_tld"
-fi
-TLD="$config_tld"
-[ "$TLD" != 'localhost' ] || fail '.localhost needs no resolver route; use --tld localhost only in the browser suite'
 
 case "$TLD" in
 	''|*/*|*[!A-Za-z0-9.-]*) fail "unsafe TLD: $TLD" ;;

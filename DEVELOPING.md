@@ -47,8 +47,7 @@ python3 tests/release/run.py artifacts --artifacts ~/Downloads/testd-candidate \
 # Optional upgrade check: add --previous-bin /path/to/previous/testd
 
 # Real browser checks; starts a headless host if none is running
-python3 tests/release/run.py browser --tld test
-python3 tests/release/run.py browser --tld localhost
+python3 tests/release/run.py browser
 
 # Interactive desktop checklist, for example on macOS
 python3 tests/release/run.py desktop --app /Applications/Testd.app
@@ -56,7 +55,7 @@ python3 tests/release/run.py desktop --app /Applications/Testd.app
 
 Reports contain local PKI and test credentials and are private by default. Do not attach the entire report directory to a public issue; share only reviewed logs/JSON, never private keys or credentials.
 
-The browser suite uses Bun fixtures and publishes `app.releasecheck`, `api.releasecheck`, and a dead-upstream name. It checks HTTPS, WebSocket idle survival, streamed SSE, a 100 MiB upload, and project-cookie scope. It starts a headless host when none is listening and stops only a host it started; initialize the host with `testd init` first. For a non-localhost TLD it checks `testd doctor --json` first, so a missing OS resolver route fails before the browser opens. When the suite started the host, the page's restart button replaces the manual daemon restart for the renewal check; a pre-started host is left alone and must be restarted manually. Run it in every supported browser, complete the certificate and error-response observations, and save the JSON report from the page. A failed run can still be saved with the observations unchecked; the report records it as a failure. Ctrl+C removes only the fixture processes and registrations. For localhost mode, initialize the test host with `testd init --tld localhost`; for a high edge port, pass `--edge-port 8443`. The suite does not install trust or change the resolver.
+The browser suite uses Bun fixtures and publishes `app.releasecheck`, `api.releasecheck`, and a dead-upstream name. It checks HTTPS, WebSocket idle survival, streamed SSE, a 100 MiB upload, and project-cookie scope. It starts a headless host when none is listening and stops only a host it started; initialize the host with `testd init` first. It checks `testd doctor --json` first, so a missing OS resolver route fails before the browser opens. When the suite started the host, the page's restart button replaces the manual daemon restart for the renewal check; a pre-started host is left alone and must be restarted manually. Run it in every supported browser, complete the certificate and error-response observations, and save the JSON report from the page. A failed run can still be saved with the observations unchecked; the report records it as a failure. Ctrl+C removes only the fixture processes and registrations. For a high edge port, pass `--edge-port 8443`. The suite does not install trust or change the resolver.
 
 The `service` suite (also available as `host --service` or `artifacts --service`) exercises the real launchd/systemd user-session supervisor: start, TLS, forced-crash restart, and stop. It stages a uniquely named service with an isolated home and high ports, retains the generated unit/plist in the report, and removes only that new service when done. Run in a real user session with a working `systemctl --user` or launchd GUI domain; Windows CLI services are not shipped, so Windows supervision is covered by the tray login checks.
 
@@ -99,7 +98,7 @@ The quick launch checks need `python3` (or `python` on Windows) to start a local
 Each script uses:
 
 - a throwaway `HOME`/`%APPDATA%` retained under the persisted report directory,
-- a throwaway TLD (`testdcheck` by default) so it does not collide with a real `.test` setup,
+- a test-only throwaway TLD (`testdcheck` by default) so it does not collide with a real `.test` setup,
 - a high HTTPS port (`8443`) so it does not need root for the edge,
 - dedicated upstream ports for registration (`18080`) and quick launches (`18081`).
 
@@ -239,7 +238,7 @@ checklist covers the run and the toggle.
 
 The [Browser validation](#browser-validation) section holds the per-browser script: trust stores, padlock
 and certificate expectations, WebSocket and SSE behaviour, cookie scope across
-`app.example.test` and `api.example.test`, and the `*.localhost` mode. The host
+`app.example.test` and `api.example.test`. The host
 scripts stop at the HTTP layer on purpose; they cannot judge a padlock.
 
 ### GUI
@@ -265,7 +264,7 @@ for the per-artifact commands.
 | Variable | Default | Meaning |
 |---|---|---|
 | `TESTD_BIN` | `target/release/testd` | Binary to test |
-| `TESTD_HOST_TLD` | `testdcheck` | Throwaway TLD; must be 1 to 10 lowercase alphanumeric chars |
+| `TESTD_HOST_TLD` | `testdcheck` | Test-only throwaway TLD; must be 1 to 10 lowercase alphanumeric chars |
 | `TESTD_HOST_EDGE_PORT` | `8443` | HTTPS edge port |
 | `TESTD_HOST_APP_PORT` | `18080` | Test upstream port |
 | `TESTD_HOST_LAUNCH_PORT` | `18081` | Quick-launch upstream port |
@@ -282,8 +281,8 @@ artifact `doctor --fix` can change in `<report>/system-before/`:
 |---|---|---|
 | Linux (Debian, Ubuntu) | `/etc/systemd/resolved.conf.d/90-testd.conf`, `/usr/local/share/ca-certificates/testd-root.crt` | `systemctl reload systemd-resolved`, `update-ca-certificates` |
 | Linux (Fedora, RHEL) | `/etc/systemd/resolved.conf.d/90-testd.conf`, `/etc/pki/ca-trust/source/anchors/testd-root.crt` | `systemctl reload systemd-resolved`, `update-ca-trust extract` |
-| macOS | `/etc/resolver/<tld>`, every `CN=testd root <covo name>` (and legacy `CN=testd root` or `CN=testd root testing`) in the System keychain | keychain operations are per SHA-1 |
-| Windows | NRPT rules for `.<tld>`, every `CN=testd root <covo name>` (and legacy `CN=testd root` or `CN=testd root testing`) in the machine root store | per thumbprint |
+| macOS | `/etc/resolver/<test-only TLD>`, every `CN=testd root <covo name>` (and legacy `CN=testd root` or `CN=testd root testing`) in the System keychain | keychain operations are per SHA-1 |
+| Windows | NRPT rules for `.<test-only TLD>`, every `CN=testd root <covo name>` (and legacy `CN=testd root` or `CN=testd root testing`) in the machine root store | per thumbprint |
 
 The manifest records file bytes, modes, SHA-256 digests, and every pre-existing
 store entry. Restore puts back what the suite removed, removes what it added,
@@ -321,7 +320,7 @@ connects to the edge. The scripts restart the daemon if it went away, and skip
 the section with a reason if it cannot start, so a dead daemon is not reported
 as a broken resolver.
 
-On Windows the trust check connects to `https://testd.<tld>/` **without**
+On Windows the trust check connects to `https://testd.<test-only TLD>/` **without**
 `--insecure`: any HTTP status means Schannel accepted the chain from the machine
 store.
 
@@ -378,15 +377,6 @@ Run each in every browser you support: Chrome, Firefox, Safari, Edge.
 6. Cookies: two names in one project (`app.example.test`, `api.example.test`) share a cookie set on `.example.test`, exactly as `app.example.com` and `api.example.com` would.
 7. Stop the upstream, reload: the edge returns `502`. Request an unregistered name: `404`.
 8. Single-label warning: `testd run app:3000` prints the cross-site warning, and `app.test` still resolves.
-
-### `*.localhost` mode
-
-On a host initialised with `testd init --tld localhost`:
-
-1. `testd run app:3000`, then open `https://app.localhost` (or `https://app.localhost:8443` if the edge uses port 8443). Port 3000 is the upstream HTTP port, not the HTTPS edge.
-2. No resolver change was needed. Root trust and port-443 permissions are still required for HTTPS.
-3. Record whether the browser resolves `*.localhost` itself (expected in Chrome, Firefox, and Safari) or sends it to DNS.
-4. glibc caveat: name resolution through `getaddrinfo` for `*.localhost` depends on the resolver; `curl` may need `--resolve`. Browsers are the target, not CLI tools.
 
 ### Record
 

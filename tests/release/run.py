@@ -481,10 +481,10 @@ def fresh_install(run, cli, index, expected_version):
 	self_config = home / ('AppData/Roaming/testd' if SYSTEM == 'Windows' else '.config/testd')
 	initial = run.args.previous_bin.resolve() if run.args.previous_bin else cli
 	run.command('upgrade-base-init' if run.args.previous_bin else 'fresh-init',
-		[str(initial), 'init', '--caddyfile', '', '--tld', 'localhost'], env=env)
+		[str(initial), 'init', '--caddyfile', ''], env=env)
 	root_before = file_digest(self_config / 'pki/root.crt')
 	before = tomllib.loads((self_config / 'config.toml').read_text(encoding=ENCODING))
-	run.command('re-init', [str(cli), 'init', '--caddyfile', '', '--tld', 'localhost'], env=env)
+	run.command('re-init', [str(cli), 'init', '--caddyfile', ''], env=env)
 	after = tomllib.loads((self_config / 'config.toml').read_text(encoding=ENCODING))
 	assert_preserved_config(before, after)
 	if file_digest(self_config / 'pki/root.crt') != root_before:
@@ -660,18 +660,17 @@ def browser(run):
 	cli = binary(run)
 	with HostFixture(run, cli, run.args.intake_port) as host:
 		status = host.status
-		if status.get('tld') != run.args.tld:
+		if status.get('tld') != 'test':
 			raise RuntimeError(f'the host at 127.0.0.1:{run.args.intake_port} serves .{status.get("tld")}, '
-				f'but --tld {run.args.tld} was requested; run the host with the same TLD')
-		if run.args.tld != 'localhost':
-			require_host_resolution(run, cli)
+				'but testd serves .test; run `testd init` and restart the host')
+		require_host_resolution(run, cli)
 		run.metadata['browser_host_managed'] = host.started
 		run.save()
-		url = f'https://app.releasecheck.{run.args.tld}:{run.args.edge_port}/'
+		url = f'https://app.releasecheck.test:{run.args.edge_port}/'
 		print(f'Open {url} in each browser. Do not bypass certificate warnings.\n'
 			'Run the checks and save the JSON report using the page. Ctrl+C stops only the fixtures.', flush=True)
 		env = dict(os.environ, TESTD_BROWSER_REPORT=str(run.output), TESTD_BROWSER_PORT=str(run.args.port),
-			TESTD_BROWSER_TLD=run.args.tld, TESTD_BROWSER_EDGE_PORT=str(run.args.edge_port))
+			TESTD_BROWSER_TLD='test', TESTD_BROWSER_EDGE_PORT=str(run.args.edge_port))
 		command = [str(cli), 'run', '--host', f'127.0.0.1:{run.args.intake_port}',
 			f'app.releasecheck:{run.args.port}', f'api.releasecheck:{run.args.port}',
 			f'dead.releasecheck:{run.args.port + 1}', '--', 'bun', 'tests/release/browser-server.ts']
@@ -802,7 +801,6 @@ def main():
 	parser.add_argument('--service', action='store_true', help='also test launchd/systemd supervision')
 	parser.add_argument('--app', type=pathlib.Path)
 	parser.add_argument('--previous-bin', type=pathlib.Path, help='previous CLI for artifact upgrade checks')
-	parser.add_argument('--tld', choices=['test', 'localhost'], default='test')
 	parser.add_argument('--port', type=int, default=19080)
 	parser.add_argument('--edge-port', type=int, default=443)
 	parser.add_argument('--intake-port', type=int, default=7737)
