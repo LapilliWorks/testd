@@ -26,6 +26,7 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 
 ### Fixed
 
+- The access label keeps the host part (`user@host:project`): a leaf falls back to the kernel host name when the shell sets `HOSTNAME` without exporting it
 - `[host] edge_enabled = false` disables only the built-in TLS listener; the plain HTTP routing listener still starts for an external front or a `tailscale` share, and `doctor` reports that the external front owns TLS trust instead of requiring the testd root
 - The dead-upstream edge test closes its probe port before the request: macOS drops the SYN for a socket that is bound but never listens, so the test received a timeout instead of the refusal it asserts
 - The browser release suite starts a headless host when none is listening and stops only a host it started, so the suite no longer leaves the fixture retrying for an hour; a host with another TLD is refused
