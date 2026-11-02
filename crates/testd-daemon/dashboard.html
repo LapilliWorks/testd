@@ -205,6 +205,14 @@
 		background: var(--success);
 		box-shadow: 0 0 0 3px var(--success-soft);
 	}
+	.live-dot.is-connecting {
+		background: var(--warning);
+		box-shadow: 0 0 0 3px var(--warning-soft);
+	}
+	.live-dot.is-offline {
+		background: var(--danger);
+		box-shadow: 0 0 0 3px var(--danger-soft);
+	}
 
 	/* Layout */
 
@@ -588,12 +596,13 @@
 			<h1>Dashboard</h1>
 			<p class="page-subtitle">Stable HTTPS names for <code>.{tld}</code> on this machine.</p>
 		</div>
-		<p class="page-meta"><span class="live-dot" aria-hidden="true"></span> Local daemon</p>
+		<p class="page-meta"><span class="live-dot" id="live-dot" aria-hidden="true"></span>
+			<span id="connection-state">Connecting...</span></p>
 	</header>
 
 	<div id="notice" class="notice" role="status" aria-live="polite"></div>
 
-	{advisory}
+	<div id="advisory-slot">{advisory}</div>
 
 	<div class="layout">
 		<div class="column">
@@ -820,6 +829,7 @@
 	}
 
 	let noticeTimer;
+	let streamLive = false;
 
 	function hideNotice() {
 		clearTimeout(noticeTimer);
@@ -845,6 +855,25 @@
 		if (!isError) noticeTimer = setTimeout(hideNotice, 4000);
 	}
 
+	function setConnection(state) {
+		const label = document.getElementById('connection-state');
+		const dot = document.getElementById('live-dot');
+		if (!label || !dot) return;
+		dot.classList.remove('is-connecting', 'is-offline');
+		if (state === 'live') {
+			label.textContent = 'Local daemon · live';
+		} else if (state === 'connecting') {
+			label.textContent = 'Connecting...';
+			dot.classList.add('is-connecting');
+		} else if (state === 'missing') {
+			label.textContent = 'No dashboard token';
+			dot.classList.add('is-offline');
+		} else {
+			label.textContent = 'Reconnecting...';
+			dot.classList.add('is-offline');
+		}
+	}
+
 	function emptyState(title, text) {
 		const box = document.createElement('p');
 		box.className = 'empty';
@@ -860,34 +889,108 @@
 		document.getElementById(id).textContent = value;
 	}
 
-	function removeRow(button, bodyId, countId, emptyTitle, emptyText) {
-		const row = button.closest('.row');
-		const list = row.parentElement;
-		row.remove();
-		if (list && list.classList.contains('rows') && !list.querySelector('.row')) {
-			const heading = list.previousElementSibling;
-			if (heading && heading.classList.contains('group')) heading.remove();
-			list.remove();
+	const STOP_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+		'<rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor"/></svg>';
+	const TRASH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" ' +
+		'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+		'<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>';
+
+	function groupDomains(domains) {
+		const groups = [];
+		for (const domain of domains) {
+			const project = domain.project || null;
+			let group = groups.find((item) => item.project === project);
+			if (!group) {
+				group = { project, items: [] };
+				groups.push(group);
+			}
+			group.items.push(domain);
 		}
-		const body = document.getElementById(bodyId);
-		const count = body.querySelectorAll('.row').length;
-		updateCount(countId, count);
-		if (count === 0) body.replaceChildren(emptyState(emptyTitle, emptyText));
+		groups.sort((a, b) => {
+			if (a.project && b.project) return a.project.localeCompare(b.project);
+			if (a.project) return -1;
+			if (b.project) return 1;
+			return 0;
+		});
+		return groups;
 	}
 
-	function unshare(name, button) {
-		button.disabled = true;
-		post('/unshare/' + encodeURIComponent(name))
-			.then(() => removeRow(button, 'share-list', 'share-count', 'No shares',
-				'Start one with testd share <name>.'))
-			.catch((e) => { button.disabled = false; notice(e.message); });
+	function domainRow(domain) {
+		const row = document.createElement('li');
+		row.className = 'row';
+
+		const main = document.createElement('div');
+		main.className = 'row-main';
+		const title = document.createElement('a');
+		title.className = 'row-title';
+		title.href = 'https://' + domain.domain;
+		title.target = '_blank';
+		title.rel = 'noreferrer';
+		title.textContent = domain.domain;
+		const meta = document.createElement('span');
+		meta.className = 'row-meta';
+		meta.textContent = domain.target;
+		main.append(title, meta);
+
+		const actions = document.createElement('div');
+		actions.className = 'row-actions';
+		const stop = document.createElement('button');
+		stop.type = 'button';
+		stop.className = 'icon-btn icon-btn-stop';
+		stop.setAttribute('aria-label', 'Stop the leaf that publishes ' + domain.domain);
+		stop.title = 'Stop this leaf (keeps its grant)';
+		stop.innerHTML = STOP_ICON;
+		stop.addEventListener('click', () => stopName(domain.domain, stop));
+		actions.append(stop);
+
+		if (domain.granted) {
+			const remove = document.createElement('button');
+			remove.type = 'button';
+			remove.className = 'icon-btn';
+			remove.setAttribute('aria-label', 'Delete the grant for ' + domain.domain);
+			remove.title = 'Delete this leaf\'s grant (it must request access again)';
+			remove.innerHTML = TRASH_ICON;
+			remove.addEventListener('click', () => deleteGrant(domain.domain, remove));
+			actions.append(remove);
+		}
+
+		row.append(main, actions);
+		return row;
+	}
+
+	function renderDomains(state) {
+		const container = document.getElementById('domain-list');
+		container.replaceChildren();
+		updateCount('domain-count', state.domains.length);
+		if (!state.domains.length) {
+			container.append(emptyState('No active domains',
+				'Names appear here while a dev environment is connected.'));
+			return;
+		}
+		const groups = groupDomains(state.domains);
+		for (const group of groups) {
+			if (groups.length > 1) {
+				const heading = document.createElement('h3');
+				heading.className = 'group';
+				heading.textContent = group.project || 'single-label';
+				const count = document.createElement('span');
+				count.className = 'count';
+				count.textContent = group.items.length;
+				heading.append(count);
+				container.append(heading);
+			}
+			const rows = document.createElement('ul');
+			rows.className = 'rows';
+			for (const domain of group.items) rows.append(domainRow(domain));
+			container.append(rows);
+		}
 	}
 
 	// Stop the leaf but keep its grant, so a later run publishes the name again.
 	function stopName(domain, button) {
 		button.disabled = true;
 		post('/stop/' + encodeURIComponent(domain))
-			.then(() => location.reload())
+			.then(refreshState)
 			.catch((e) => { button.disabled = false; notice(e.message); });
 	}
 
@@ -900,34 +1003,58 @@
 		if (!confirm(message)) return;
 		button.disabled = true;
 		post('/delete/' + encodeURIComponent(domain))
-			.then(() => location.reload())
+			.then(refreshState)
 			.catch((e) => { button.disabled = false; notice(e.message); });
 	}
 
-	let launchErrorShown = false;
+	function shareRow(share) {
+		const row = document.createElement('li');
+		row.className = 'row';
+		const main = document.createElement('div');
+		main.className = 'row-main';
+		const link = document.createElement('a');
+		link.className = 'row-title';
+		link.href = share.url;
+		link.target = '_blank';
+		link.rel = 'noreferrer';
+		link.textContent = share.url;
+		const meta = document.createElement('span');
+		meta.className = 'row-meta';
+		meta.append(document.createTextNode(share.name + ' · ' + share.exposure + ' '));
+		const tag = document.createElement('span');
+		tag.className = 'tag';
+		tag.textContent = share.provider;
+		meta.append(tag);
+		main.append(link, meta);
 
-	async function loadLaunches() {
-		try {
-			const launches = await getJson('/api/local/launches');
-			const list = document.getElementById('launch-list');
-			list.replaceChildren();
-			updateCount('launch-count', launches.length);
-			if (!launches.length) {
-				list.append(emptyState('No quick launches',
-					'Save a command below to register its name while it runs.'));
-				return;
-			}
-			const rows = document.createElement('ul');
-			rows.className = 'rows';
-			for (const launch of launches) rows.append(launchRow(launch));
-			list.append(rows);
-			launchErrorShown = false;
-		} catch (e) {
-			if (!launchErrorShown) {
-				notice('Cannot read quick launches: ' + e.message);
-				launchErrorShown = true;
-			}
+		const stop = document.createElement('button');
+		stop.type = 'button';
+		stop.className = 'btn btn-sm btn-danger';
+		stop.textContent = 'Stop';
+		stop.addEventListener('click', () => unshare(share.name, stop));
+		row.append(main, stop);
+		return row;
+	}
+
+	function renderShares(state) {
+		const container = document.getElementById('share-list');
+		container.replaceChildren();
+		updateCount('share-count', state.shares.length);
+		if (!state.shares.length) {
+			container.append(emptyState('No shares', 'Start one with testd share <name>.'));
+			return;
 		}
+		const rows = document.createElement('ul');
+		rows.className = 'rows';
+		for (const share of state.shares) rows.append(shareRow(share));
+		container.append(rows);
+	}
+
+	function unshare(name, button) {
+		button.disabled = true;
+		post('/unshare/' + encodeURIComponent(name))
+			.then(refreshState)
+			.catch((e) => { button.disabled = false; notice(e.message); });
 	}
 
 	function launchRow(launch) {
@@ -991,22 +1118,37 @@
 		toggle.type = 'button';
 		toggle.className = 'btn btn-sm' + (launch.running ? '' : ' btn-primary');
 		toggle.textContent = launch.running ? 'Stop' : 'Start';
-		toggle.onclick = () => launchAction(launch.running ? 'stop' : 'start', launch.id);
+		toggle.addEventListener('click', () => launchAction(launch.running ? 'stop' : 'start', launch.id));
 		const remove = document.createElement('button');
 		remove.type = 'button';
 		remove.className = 'btn btn-sm btn-danger';
 		remove.textContent = 'Delete';
 		remove.disabled = launch.running;
-		remove.onclick = () => launchAction('delete', launch.id);
+		remove.addEventListener('click', () => launchAction('delete', launch.id));
 		actions.append(toggle, remove);
 
 		row.append(main, actions);
 		return row;
 	}
 
+	function renderLaunches(launches) {
+		const container = document.getElementById('launch-list');
+		container.replaceChildren();
+		updateCount('launch-count', launches.length);
+		if (!launches.length) {
+			container.append(emptyState('No quick launches',
+				'Save a command below to register its name while it runs.'));
+			return;
+		}
+		const rows = document.createElement('ul');
+		rows.className = 'rows';
+		for (const launch of launches) rows.append(launchRow(launch));
+		container.append(rows);
+	}
+
 	function launchAction(action, id) {
 		post('/api/local/launches/' + action, { id })
-			.then(loadLaunches)
+			.then(refreshState)
 			.catch((e) => notice(e.message));
 	}
 
@@ -1069,6 +1211,7 @@
 			notice('Enter a command to run.');
 			return;
 		}
+		const form = event.target;
 		const body = {
 			label: document.getElementById('launch-label').value.trim(),
 			program: argv[0],
@@ -1080,9 +1223,9 @@
 		};
 		post('/api/local/launches/save', body)
 			.then(() => {
-				event.target.reset();
-				loadLaunches();
+				form.reset();
 				notice('Launch saved.', false);
+				return refreshState();
 			})
 			.catch((e) => notice(e.message));
 	}
@@ -1142,53 +1285,90 @@
 		container.append(list);
 	}
 
-	let accessErrorShown = false;
-
-	async function loadAccess() {
-		try {
-			const [requests, tokens] = await Promise.all([
-				getJson('/api/local/requests'),
-				getJson('/api/local/tokens'),
+	function renderAccess(state) {
+		updateCount('request-count', state.requests.length);
+		updateCount('token-count', state.tokens.length);
+		renderAccessList('request-list', state.requests, (request) => accessRow(
+			request.label,
+			(request.names.length ? request.names.join(', ') + ' · ' : '') +
+				request.address + ' · requested ' + ago(request.requested_at) + ' · ' + request.id,
+			[
+				actionButton('Approve', 'primary', () => requestAction('approve', request.id)),
+				actionButton('Deny', 'danger', () => requestAction('deny', request.id)),
+			],
+		), 'No pending requests', 'A leaf asking for a token or a name appears here.');
+		renderAccessList('token-list', state.tokens, (token) => {
+			let meta = token.names ? (token.names.join(', ') || 'no names') : 'all names';
+			meta += ' · issued ' + ago(token.created_at);
+			if (token.last_seen_at) meta += ' · last seen ' + ago(token.last_seen_at);
+			meta += ' · ' + token.id;
+			return accessRow(token.label, meta, [
+				actionButton('Revoke', 'danger', () => revokeToken(token.id)),
 			]);
-			updateCount('request-count', requests.length);
-			updateCount('token-count', tokens.length);
-			renderAccessList('request-list', requests, (request) => accessRow(
-				request.label,
-				(request.names.length ? request.names.join(', ') + ' · ' : '') +
-					request.address + ' · requested ' + ago(request.requested_at) + ' · ' + request.id,
-				[
-					actionButton('Approve', 'primary', () => requestAction('approve', request.id)),
-					actionButton('Deny', 'danger', () => requestAction('deny', request.id)),
-				],
-			), 'No pending requests', 'A leaf asking for a token or a name appears here.');
-			renderAccessList('token-list', tokens, (token) => {
-				let meta = token.names ? (token.names.join(', ') || 'no names') : 'all names';
-				meta += ' · issued ' + ago(token.created_at);
-				if (token.last_seen_at) meta += ' · last seen ' + ago(token.last_seen_at);
-				meta += ' · ' + token.id;
-				return accessRow(token.label, meta, [
-					actionButton('Revoke', 'danger', () => revokeToken(token.id)),
-				]);
-			}, 'No issued tokens', 'Approved requests become tokens.');
-			accessErrorShown = false;
-		} catch (e) {
-			if (!accessErrorShown) {
-				notice('Cannot read access state: ' + e.message);
-				accessErrorShown = true;
-			}
-		}
+		}, 'No issued tokens', 'Approved requests become tokens.');
 	}
 
 	function requestAction(action, id) {
 		return post('/api/local/requests/' + action, { id })
-			.then(loadAccess)
+			.then(refreshState)
 			.catch((e) => notice(e.message));
 	}
 
 	function revokeToken(id) {
 		return post('/api/local/tokens/revoke', { id })
-			.then(loadAccess)
+			.then(refreshState)
 			.catch((e) => notice(e.message));
+	}
+
+	function renderAdvisory(items) {
+		const slot = document.getElementById('advisory-slot');
+		slot.replaceChildren();
+		if (!items.length) return;
+		const section = document.createElement('section');
+		section.className = 'card';
+		section.id = 'advisory';
+		const head = document.createElement('div');
+		head.className = 'card-head';
+		const headInner = document.createElement('div');
+		const titleRow = document.createElement('div');
+		titleRow.className = 'card-title-row';
+		const heading = document.createElement('h2');
+		heading.textContent = 'Advisory';
+		const pill = document.createElement('span');
+		pill.className = 'pill pill-warn';
+		pill.textContent = 'Attention';
+		titleRow.append(heading, pill);
+		headInner.append(titleRow);
+		head.append(headInner);
+		const body = document.createElement('div');
+		body.className = 'card-body';
+		const list = document.createElement('ul');
+		list.className = 'advisory';
+		for (const item of items) {
+			const row = document.createElement('li');
+			row.textContent = item;
+			list.append(row);
+		}
+		body.append(list);
+		section.append(head, body);
+		slot.append(section);
+	}
+
+	function renderState(state) {
+		renderAdvisory(state.advisory || []);
+		renderDomains(state);
+		renderShares(state);
+		renderLaunches(state.launches || []);
+		renderAccess(state);
+	}
+
+	async function refreshState() {
+		if (streamLive) return;
+		try {
+			renderState(await getJson('/api/local/state'));
+		} catch (e) {
+			notice('Cannot refresh the dashboard: ' + e.message);
+		}
 	}
 
 	function certificate(action) {
@@ -1220,17 +1400,87 @@
 		}
 	}
 
+	let streamController = null;
+	let reconnectTimer;
+	let reconnectDelay = 1000;
+	let eventErrorShown = false;
+
+	function handleEventFrame(frame) {
+		const data = frame.split('\n')
+			.filter((line) => line.startsWith('data:'))
+			.map((line) => line.slice(5).trimStart())
+			.join('\n');
+		if (!data) return;
+		let state;
+		try {
+			state = JSON.parse(data);
+		} catch (e) {
+			notice('Malformed dashboard update: ' + e.message);
+			return;
+		}
+		renderState(state);
+	}
+
+	// Read the event stream with fetch, not EventSource, so the per-run token
+	// stays in a request header instead of the URL.
+	async function connectEvents() {
+		clearTimeout(reconnectTimer);
+		if (streamController) streamController.abort();
+		const controller = new AbortController();
+		streamController = controller;
+		setConnection('connecting');
+		try {
+			const response = await fetch('/api/local/events', {
+				headers: { 'X-Testd-Token': dashboardToken },
+				cache: 'no-store',
+				signal: controller.signal,
+			});
+			if (!response.ok || !response.body) {
+				throw new Error(response.statusText || 'the daemon did not open a stream');
+			}
+			streamLive = true;
+			reconnectDelay = 1000;
+			const recovered = eventErrorShown;
+			eventErrorShown = false;
+			setConnection('live');
+			if (recovered) notice('Live updates resumed.', false);
+			const reader = response.body.getReader();
+			const decoder = new TextDecoder();
+			let buffer = '';
+			for (;;) {
+				const { value, done } = await reader.read();
+				if (done) break;
+				buffer += decoder.decode(value, { stream: true });
+				let boundary;
+				while ((boundary = buffer.indexOf('\n\n')) >= 0) {
+					handleEventFrame(buffer.slice(0, boundary));
+					buffer = buffer.slice(boundary + 2);
+				}
+			}
+			throw new Error('the event stream closed');
+		} catch (e) {
+			if (controller.signal.aborted) return;
+			streamLive = false;
+			streamController = null;
+			setConnection('offline');
+			if (!eventErrorShown) {
+				notice('Live updates paused: ' + e.message);
+				eventErrorShown = true;
+			}
+			reconnectTimer = setTimeout(connectEvents, reconnectDelay);
+			reconnectDelay = Math.min(reconnectDelay * 2, 15000);
+		}
+	}
+
 	if (new URLSearchParams(location.hash.slice(1)).get('view') === 'launches') {
 		document.getElementById('launches')?.scrollIntoView();
 	}
 
 	if (dashboardToken) {
-		loadLaunches();
 		certificateState();
-		loadAccess();
-		setInterval(() => { if (!document.hidden) loadAccess(); }, 3000);
-		setInterval(() => { if (!document.hidden) loadLaunches(); }, 4000);
+		connectEvents();
 	} else {
+		setConnection('missing');
 		notice('Dashboard token missing. Open the URL from the tray or run `testd dashboard`.');
 	}
 </script>
