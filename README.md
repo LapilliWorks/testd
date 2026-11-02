@@ -17,6 +17,14 @@ host machine (browser machine)
 
 No Caddy, no per-project `/etc/hosts` edits, and no per-project certificates. A registration lives only as long as the connection that created it. Closing the terminal removes the name.
 
+## Documentation
+
+- [Quickstart](docs/quickstart.md): install, first host, first name
+- [Daily usage](docs/usage.md): names, dashboard, sharing, access, troubleshooting
+- [Advanced usage](docs/advanced.md): remote leaves, profiles, quick launches, tunnels, external fronts
+- [Reference](docs/reference.md): commands, configuration, files, endpoints, limits
+- [Security](docs/security.md): trust boundaries, credentials, exposure, hardening
+
 ## Install
 
 From source:
@@ -216,11 +224,11 @@ default_profile = "home"
 hosts = ["192.168.1.5:7737", "192.168.1.6:7737"]
 ```
 
-Credentials live in `~/.config/testd/credentials/<profile>`, mode `0600`, or in `TESTD_TOKEN` for a one-off run. Precedence for nodes is CLI/env, then the selected client profile, then the node's own loopback listener. Precedence for credentials is `TESTD_TOKEN`, then the project's `token_profile`, then the `default` profile. When no credential is found for the profile, the leaf requests one from the host instead of failing.
+Credentials live in `~/.config/testd/credentials/<profile>`, mode `0600`, or in `TESTD_TOKEN` for a one-off run. Precedence for nodes is CLI/env, then the selected client profile, then the node's own loopback listener. The token profile is chosen by `--token-profile` or `TESTD_TOKEN_PROFILE`, then `token_profile` in the project's `.testd.toml`, then `default`. `TESTD_TOKEN` overrides the credential file; without it, the leaf uses `credentials/<profile>` or, on the node and only over loopback, the operator secret. When no credential is found for the profile, the leaf requests one from the host instead of failing.
 
 Issued tokens live on the node in `~/.config/testd/tokens.json`, mode `0600`, and cover only the names the operator approved. The file holds the token secrets and their labels; neither `testd tokens` nor the dashboard prints a secret.
 
 On the node itself no credential file is needed: when the `default` profile has no credential and every target is a loopback endpoint, leaf actions (`testd run`, `testd deregister`) use `[host] secret` from the host config. A named profile or a non-loopback target asks for a token instead, so the operator secret is never sent to another machine.
 
-The managed Caddyfile is optional. `testd export-caddyfile` prints a config for users who want to provide their own front end; the built-in edge does not need it.
+The managed Caddyfile is optional. `testd export-caddyfile` writes one and prints the import line for users who want to provide their own front end; the built-in edge does not need it.
 

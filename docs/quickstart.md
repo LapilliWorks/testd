@@ -1,6 +1,6 @@
 # Quickstart
 
-This is the shortest path from a clean host to a working name, plus the remote path. It assumes the host is the machine with the browser.
+This is the shortest path from a clean machine to a working HTTPS name. It assumes the host is the machine with the browser; the project can run on the same machine or on a remote dev box.
 
 ## 1. Install
 
@@ -10,111 +10,94 @@ From the repository:
 cargo install --path .
 ```
 
-Or install a CLI archive or the generated Homebrew formula from a public release after verifying `SHA256SUMS`. `packaging/homebrew/*.rb.in` are release templates, not directly installable definitions. The public tray app is separate; see [DEVELOPING.md](../DEVELOPING.md#release).
+Release archives and generated Homebrew formulas are also published. Verify `SHA256SUMS` before installing. The tray app is a separate Tauri build. See [DEVELOPING.md](../DEVELOPING.md#release) for building and packaging.
 
-## 2. Initialize the host
+## 2. Prepare the host
 
 ```sh
 testd init
+testd doctor --fix
 ```
 
-What it does:
+`init` is idempotent. It:
 
-1. Writes `~/.config/testd/config.toml` (mode `0600`).
-2. Creates a local root CA and intermediate at `~/.config/testd/pki/`.
-3. Writes the operator secret used by this machine and by unattended clients that present it as `TESTD_TOKEN`.
-4. Leaves the OS resolver alone until a remote client registers. Run `testd doctor --fix` to configure it immediately.
-5. Installs the root into the system trust store when stdin is a terminal or `--yes` is passed.
+1. Writes `~/.config/testd/config.toml` with mode `0600`.
+2. Creates a local root CA and host intermediate under `~/.config/testd/pki/`.
+3. Writes the operator secret to `[host] secret`.
+4. Detects an external Caddy install and offers to import the managed Caddyfile.
+5. Installs the root certificate into the system trust store when stdin is a terminal or `--yes` is passed.
 
-For the `.test` TLD, run `testd doctor --fix` on every platform to configure the resolver before using a local registration. Otherwise lazy setup does not run until a remote client arrives.
+It leaves the OS resolver alone by default, until the first registration from another machine. Run `testd doctor --fix` now to configure the `.test` resolver and root trust immediately. These steps need administrator privileges.
 
-## 3. Start the host daemon
+## 3. Start the host
 
 ```sh
 testd host
 ```
 
-The daemon owns the TCP intake (`:7737`), the HTTPS edge (`:443`), and the DNS server (`127.0.0.1:7753`, or `:53` on Windows). A second instance fails fast on the instance lock. Run `testd dashboard` to print the authenticated dashboard URL; actions require the per-run token in that URL.
+The daemon owns the listeners:
 
-On Linux, port 443 needs `CAP_NET_BIND_SERVICE`. The root-managed `testd@.service` grants that capability; a systemd user service must use a high port. For a foreground executable, grant the capability to that executable, or set `[host] edge_addr = '127.0.0.1:8443'` and use `https://app.example.test:8443`.
+| Listener | Default | Purpose |
+|---|---|---|
+| TCP | `0.0.0.0:7737` | Leaf intake; the dashboard answers on `127.0.0.1:7737` |
+| TCP | `0.0.0.0:443` | HTTPS edge for registered names |
+| UDP | `127.0.0.1:7753` | DNS for `.test` on Linux and macOS |
+| UDP | `127.0.0.1:53` | DNS for `.test` on Windows |
 
-## 4. Register the first name
+A second daemon fails fast on the instance lock. `testd dashboard` prints the authenticated dashboard URL.
+
+On Linux, binding port 443 needs `CAP_NET_BIND_SERVICE`. Use the root-managed `packaging/systemd/testd@.service`, grant the capability to the executable yourself, or set a high edge port and include it in browser URLs. See [Advanced usage](advanced.md#privileged-ports).
+
+## 4. Register a name
 
 In the project directory:
-
-```sh
-testd run :3000
-```
-
-This infers the project name from the directory. Or name it explicitly:
 
 ```sh
 testd run app.example:3000
 ```
 
-Open `https://app.example.test`. Keep the command running; Ctrl+C removes the name.
-
-Wrap a dev server so the name appears and disappears with the process:
+Other forms:
 
 ```sh
-testd run app.example:3000 -- npm run dev
+testd run :3000                              # name inferred from the directory
+testd run app.example:3000 -- npm run dev    # name lives as long as the process
+testd run frontend:3000 api:8080 -- npm run dev
 ```
 
-## 5. Check the host
+Open `https://app.example.test`. The name is given without the TLD; the host appends `.test`. Keep the command running: Ctrl+C, a child exit, or a lost connection removes the name.
+
+Use `<service>.<project>` names such as `app.example`, not single-label names such as `app`. The two-label form gives cookies the same scope they would have on `app.example.com` and `api.example.com`. `testd` warns when it sees a single-label name.
+
+## 5. Check the result
 
 ```sh
 testd doctor
 ```
 
-`0` means ready. Exit `2` means the resolver is not configured; `3` means the certificate is not trusted or the edge is not listening. `--json` is stable for scripts.
+Exit code `0` means ready. `1` means missing configuration or state, `2` means the resolver is not configured, and `3` means the edge or certificate trust is not ready. `testd doctor --json` is stable for scripts. `testd doctor --fix` repairs the resolver, Caddyfile import, and root trust.
 
-## Remote environments
+## Remote project in one minute
 
-Registration, including bearer tokens, uses plain TCP. Use a trusted local network or a separately secured transport. Do not expose intake port 7737 to the public internet.
-
-On the other machine, register against the host:
+On the other machine, point at the host:
 
 ```sh
 testd run --host <host-lan-ip> :3000
 ```
 
-With no credential for the profile, the leaf requests a grant and names the domains it wants. On the host, approve it:
+With no credential for the profile, the leaf asks for access. On the host, approve it:
 
 ```sh
 testd requests
 testd approve <id>
 ```
 
-The local dashboard's **Access** card does the same; the tray also posts a notification and turns its icon light blue while a request is waiting. The token is saved on the leaf and reused. The host stores issued tokens in `~/.config/testd/tokens.json`; `testd tokens` lists them and `testd tokens --revoke <id>` withdraws one, closing its connections and deleting all of the leaf's grants; the leaf forgets the dead credential and must request access again. Delete the leaf's `~/.config/testd/credentials/<profile>` file to request a new token after a host reset. A name the token does not cover asks for its own grant when the leaf first publishes it, and the dashboard's Delete removes that one name only.
+The token is saved on the leaf and reused. The app must listen on an address the host can reach; a server bound only to `127.0.0.1` on the remote machine is not reachable from the host.
 
-For an unattended leaf, `[host] secret` is the bootstrap credential. Put it in `TESTD_TOKEN` and skip the approval:
+Registration traffic is plain TCP and carries a bearer token. Use a trusted network or an encrypted private network, and do not expose port 7737 to the internet. See [Security](security.md).
 
-```sh
-export TESTD_TOKEN=<the secret>
-```
+## Where next
 
-The host answers `*.test` locally; other devices reach the name through the host's DNS and edge, so the resolver and the root certificate must be configured there too. `testd doctor` on the host reports both. To make the host's names available to another machine, copy the root from the local dashboard:
-
-```sh
-curl http://127.0.0.1:7737/ca.crt -o testd-root.crt
-```
-
-## Certificates and removal
-
-The local dashboard's certificate section shows the root certificate's trust state, fingerprint, and expiry, and installs or removes system trust. Command-line users have `testd doctor --fix` for repair.
-
-To remove the system integration, stop the daemon and run:
-
-```sh
-testd uninstall
-```
-
-This removes the OS resolver route and the trusted root. `--purge` also deletes `~/.config/testd`; `--keep-resolver` and `--keep-certificate` preserve either system change. Removing the app with the OS installer does not remove these, so run `testd uninstall` first.
-
-## Troubleshooting
-
-- **No certificate or browser warning**: run `testd doctor --fix` to install the root certificate. Firefox may need a separate trust import.
-- **`port 53 already in use` on Windows**: another service owns the DNS port. Stop it, or use Linux or macOS, where testd uses `:7753`.
-- **`nothing is serving HTTPS`**: run `testd host`, or check `edge_addr`; ports below 1024 need `CAP_NET_BIND_SERVICE` or a privileged launch.
-- **Name resolves but the proxy returns 502**: the dev server stopped, the target host is wrong, or a firewall blocks the host from reaching the dev environment.
-- **Duplicate name**: another connection owns it. Use `testd run --force` only when you intend to take it over.
+- [Daily usage](usage.md): names, dashboard, sharing, access requests, troubleshooting
+- [Advanced usage](advanced.md): remote leaves, profiles, quick launches, tunnels, external fronts, system service
+- [Reference](reference.md): commands, options, configuration, files, endpoints, limits
+- [Security](security.md): trust boundaries, credentials, exposure, and hardening
