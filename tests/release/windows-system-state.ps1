@@ -96,10 +96,27 @@ function Get-RootThumbprints {
 	@(Get-RootCertificates | ForEach-Object { $_.Thumbprint.ToUpperInvariant() })
 }
 
+# One namespace or name-server list, reduced to the values Windows stores:
+# strings, trimmed, without duplicates. Windows keeps each list in one property,
+# and a restore of an older, misread snapshot could leave the same value in it
+# twice, so dropping duplicates is also how that legacy state gets healed.
+function Get-SignatureList($values) {
+	@($values | ForEach-Object { $_ } |
+		ForEach-Object { if ($_ -is [string]) { $_ -split ',' } else { $_ } } |
+		ForEach-Object { "$_".Trim() } | Where-Object { $_ } | Select-Object -Unique)
+}
+
+# The canonical list as the one string a snapshot records and compares: two
+# arrays never compare with -eq, which filters the left side by the whole right
+# side, so two identical multi-entry lists looked different.
+function Get-SignatureValue($values) {
+	(Get-SignatureList $values) -join ','
+}
+
 function Get-RuleSignature($rule) {
 	[pscustomobject]@{
-		Namespace = $rule.Namespace
-		NameServers = (@($rule.NameServers | ForEach-Object { $_.ToString() }) -join ',')
+		Namespace = Get-SignatureValue $rule.Namespace
+		NameServers = Get-SignatureValue $rule.NameServers
 		DisplayName = "$($rule.DisplayName)"
 		Comment = "$($rule.Comment)"
 	}
@@ -142,9 +159,16 @@ function Read-Snapshot {
 	if ($text -and $text.Trim()) {
 		# ConvertFrom-Json hands back the whole array as one object, and the filter
 		# would keep it that way, leaving the rules nested in a single element.
-		# Enumerate it through a variable first.
+		# Enumerate it through a variable first. Rewriting each signature through
+		# the canonical form a live rule gets lets a snapshot written before that
+		# form still compare and restore.
 		$parsed = $text | ConvertFrom-Json
-		$rules = @($parsed | Where-Object { $null -ne $_ })
+		$rules = @($parsed | Where-Object { $null -ne $_ } | ForEach-Object {
+			[pscustomobject]@{
+				Signature = Get-RuleSignature $_.Signature
+				Properties = $_.Properties
+			}
+		})
 	}
 	$certificates = @()
 	if (Test-Path -LiteralPath $RootDirectory) {
@@ -155,8 +179,10 @@ function Read-Snapshot {
 
 function Add-SnapshotRule($rule) {
 	$splat = @{
-		Namespace = $rule.Signature.Namespace
-		NameServers = @($rule.Signature.NameServers -split ',')
+		# The snapshot records both lists as one joined string; split it back into
+		# the values the cmdlet takes, dropping duplicates it may still carry.
+		Namespace = Get-SignatureList $rule.Signature.Namespace
+		NameServers = Get-SignatureList $rule.Signature.NameServers
 	}
 	foreach ($name in $FlagProperties) {
 		$property = $rule.Properties.PSObject.Properties[$name]

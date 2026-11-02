@@ -864,6 +864,79 @@ def script_syntax_errors(engine, path):
 	return result.returncode, (result.stdout + result.stderr).decode('utf-8', errors='replace').strip()
 
 
+# Load the script's constants and functions without running its final action
+# switch, then drive them against a snapshot an older run could have written:
+# Namespace as a list with a duplicate and NameServers as a joined string.
+SNAPSHOT_PROBE = r'''
+$live = [pscustomobject]@{
+	Namespace = @('.testdcheck', '.testdcheck')
+	NameServers = @('127.0.0.1', '127.0.0.1')
+	DisplayName = ''
+	Comment = ''
+}
+$script:live = $live
+function Get-NamespaceRules { @($script:live) }
+$legacy = @([pscustomobject]@{
+	Signature = [pscustomobject]@{
+		Namespace = @('.testdcheck', '.testdcheck')
+		NameServers = '127.0.0.1,127.0.0.1'
+		DisplayName = ''
+		Comment = ''
+	}
+	Properties = [pscustomobject]@{}
+})
+Set-Content -LiteralPath $NrptFile -Value (ConvertTo-Json -InputObject $legacy -Depth 10) -Encoding utf8
+$snapshot = Read-Snapshot
+$signature = $snapshot.Rules[0].Signature
+if ($signature.Namespace -ne '.testdcheck') { throw "namespace is not canonical: $($signature.Namespace)" }
+if ($signature.NameServers -ne '127.0.0.1') { throw "name servers are not canonical: $($signature.NameServers)" }
+if ((@(Get-PropertyDifferences $snapshot)).Count -ne 0) {
+	throw 'a matching multi-entry rule was reported as missing'
+}
+$script:added = $null
+function Add-DnsClientNrptRule {
+	param($Namespace, $NameServers)
+	$script:added = @{ Namespace = @($Namespace); NameServers = @($NameServers) }
+}
+Add-SnapshotRule $snapshot.Rules[0]
+if ($script:added.Namespace.Count -ne 1 -or $script:added.Namespace[0] -ne '.testdcheck') {
+	throw "restore re-added namespaces: $($script:added.Namespace -join '|')"
+}
+if ($script:added.NameServers.Count -ne 1 -or $script:added.NameServers[0] -ne '127.0.0.1') {
+	throw "restore re-added name servers: $($script:added.NameServers -join '|')"
+}
+$script:live = [pscustomobject]@{
+	Namespace = @('.testdcheck')
+	NameServers = @('10.0.0.1')
+	DisplayName = ''
+	Comment = ''
+}
+if ((@(Get-PropertyDifferences $snapshot)).Count -eq 0) {
+	throw 'a different name server was not reported'
+}
+Remove-Item -LiteralPath $Destination -Recurse -Force
+'''
+
+
+def snapshot_probe(engine):
+	script = state.powershell_quote(str(ROOT / 'tests/release/windows-system-state.ps1'))
+	command = (
+		"$Tld = 'testdcheck';"
+		"$Destination = Join-Path $env:TEMP ('testd-snapshot-' + [guid]::NewGuid().ToString('N'));"
+		'New-Item -ItemType Directory -Path $Destination | Out-Null;'
+		'$tokens = $null; $errors = $null;'
+		f'$ast = [System.Management.Automation.Language.Parser]::ParseFile({script}, [ref]$tokens, [ref]$errors);'
+		'foreach ($statement in $ast.FindAll({ $args[0] -is '
+		'[System.Management.Automation.Language.AssignmentStatementAst] }, $false)) {'
+		' . ([scriptblock]::Create($statement.Extent.Text)) };'
+		'foreach ($function in $ast.FindAll({ $args[0] -is '
+		'[System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {'
+		' . ([scriptblock]::Create($function.Extent.Text)) };'
+		+ SNAPSHOT_PROBE)
+	result = subprocess.run([engine, '-NoProfile', '-NonInteractive', '-Command', command], capture_output=True)
+	return result.returncode, (result.stdout + result.stderr).decode('utf-8', errors='replace').strip()
+
+
 @unittest.skipUnless(POWERSHELLS, 'PowerShell is not installed')
 class PowerShellScriptTests(unittest.TestCase):
 	"""A broken script only fails when the release suite runs, so parse it here.
@@ -882,6 +955,14 @@ class PowerShellScriptTests(unittest.TestCase):
 				with self.subTest(engine=pathlib.Path(engine).name, script=str(script.relative_to(ROOT))):
 					code, output = script_syntax_errors(engine, script)
 					self.assertEqual(code, 0, f'{script.relative_to(ROOT)}: {output}')
+
+	def test_multi_entry_nrpt_signatures_compare_and_re_add_as_values(self):
+		"""`-eq` on two arrays filters the left side, so a rule whose lists have
+		more than one entry never matched and was reported as missing."""
+		for engine in POWERSHELLS:
+			with self.subTest(engine=pathlib.Path(engine).name):
+				code, output = snapshot_probe(engine)
+				self.assertEqual(code, 0, output)
 
 
 if __name__ == '__main__':
