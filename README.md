@@ -25,6 +25,8 @@ No Caddy, no per-project `/etc/hosts` edits, and no per-project certificates. A 
 - [Reference](docs/reference.md): commands, configuration, files, endpoints, limits
 - [Security](docs/security.md): trust boundaries, credentials, exposure, hardening
 
+The same pages are published at <https://testd.dev/docs/>. The product site lives at <https://testd.dev>.
+
 ## Install
 
 From source:

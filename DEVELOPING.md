@@ -20,6 +20,21 @@ cargo tauri build                # tray app
 
 The workspace includes `testd-gui`. On a machine without GTK/WebKit, add `--exclude testd-gui` to workspace test and clippy commands. CI installs the Tauri system prerequisites and checks the full workspace.
 
+## Website
+
+The product site and documentation are independent Vite apps in `site/` and `docs/`, managed by a Bun workspace at the repository root.
+
+```sh
+bun install
+bun run dev       # product site at http://localhost:5173
+bun run dev:docs  # VitePress docs at http://localhost:5174/docs/
+bun run build     # site/dist, with the docs under site/dist/docs
+bun run check
+bun run check:links
+```
+
+`bun run build` writes the product site first and the docs second, so the shared output directory ends up with both. Deploy `site/dist/` as one static tree.
+
 ## Test
 
 ```sh
