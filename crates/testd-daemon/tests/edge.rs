@@ -37,10 +37,18 @@ struct Harness {
 
 async fn start() -> Harness {
 	// Windows may take more than 300 ms to report a refused loopback connection.
-	start_with_upstream_timeout(Duration::from_secs(5)).await
+	start_with(Duration::from_secs(5), true).await
 }
 
 async fn start_with_upstream_timeout(upstream_timeout: Duration) -> Harness {
+	start_with(upstream_timeout, true).await
+}
+
+async fn start_plain() -> Harness {
+	start_with(Duration::from_secs(5), false).await
+}
+
+async fn start_with(upstream_timeout: Duration, tls: bool) -> Harness {
 	let (upstream, upstream_dropped) = start_upstream().await;
 	let dir = std::env::temp_dir().join(format!("testd-edge-{}-{}", std::process::id(), upstream.port()));
 	std::fs::create_dir_all(&dir).unwrap();
@@ -57,9 +65,8 @@ async fn start_with_upstream_timeout(upstream_timeout: Duration) -> Harness {
 	ctx.upstream_timeout = upstream_timeout;
 
 	let pki_dir = dir.join("pki");
-	let edge =
-		edge::start(Arc::new(ctx), Some("127.0.0.1:0".parse().unwrap()), "127.0.0.1:0".parse().unwrap(), &pki_dir)
-			.unwrap();
+	let tls_addr = tls.then(|| "127.0.0.1:0".parse().unwrap());
+	let edge = edge::start(Arc::new(ctx), tls_addr, "127.0.0.1:0".parse().unwrap(), &pki_dir).unwrap();
 
 	Harness { edge, registry, dir, upstream_dropped }
 }
@@ -214,6 +221,14 @@ async fn raw_request(addr: SocketAddr, request: &str) -> String {
 
 fn get(host: &str, path: &str) -> String {
 	format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
+}
+
+#[tokio::test]
+async fn serves_plain_http_without_the_tls_listener() {
+	let harness = start_plain().await;
+	let response = raw_request(harness.edge.http_addr, &get("app.test", "/echo")).await;
+	assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+	assert!(response.contains("proto=http"), "{response}");
 }
 
 #[tokio::test]

@@ -103,13 +103,11 @@ impl Daemon {
 			health_for_http.probe(true);
 		});
 
-		// Providers that cannot reach a container or LAN target point at the edge
-		// instead; the edge learns the share's name as an alias.
-		let front = config.edge_enabled.then(|| crate::share::Front {
-			registry: engine.registrations(),
-			plain_addr: local_client_addr(config.http_addr),
-		});
-		let shares = Arc::new(crate::share::Shares::from_env(front));
+		// Providers that cannot reach a container or LAN target point at the plain
+		// edge listener instead; the edge learns the share's name as an alias.
+		let front =
+			crate::share::Front { registry: engine.registrations(), plain_addr: local_client_addr(config.http_addr) };
+		let shares = Arc::new(crate::share::Shares::from_env(Some(front)));
 		engine.set_shares(Arc::clone(&shares));
 
 		// `tailscale serve --bg` survives this process while the alias that made
@@ -147,25 +145,34 @@ impl Daemon {
 
 		let engine = Arc::new(engine);
 
-		let edge = if config.edge_enabled {
-			let mut context = EdgeContext::new(tld.clone(), engine.registrations());
-			context.trust_forwarded_for = config.trust_forwarded_for;
-			Some(edge::start(Arc::new(context), Some(config.edge_addr), config.http_addr, &config.pki_dir)?)
-		} else {
-			None
-		};
-
-		if let Some(edge) = &edge {
+		// The plain listener is always needed: an external front owns TLS when the
+		// built-in edge is disabled. Only the TLS listener follows `edge_enabled`.
+		let mut context = EdgeContext::new(tld.clone(), engine.registrations());
+		context.trust_forwarded_for = config.trust_forwarded_for;
+		let tls_addr = config.edge_enabled.then_some(config.edge_addr);
+		let edge = edge::start(Arc::new(context), tls_addr, config.http_addr, &config.pki_dir)?;
+		if config.edge_enabled {
 			eprintln!("[edge]   https://*.{} on {}", tld, edge.tls_addr);
-			eprintln!("[edge]   http://{} for external fronts", edge.http_addr);
 		}
+		eprintln!("[edge]   http://{} for external fronts", edge.http_addr);
 
 		// The tray used to install the root on startup; keep that policy in the
 		// daemon, but never prompt a terminal for `testd host`.
 		health.start(elevation == Elevation::Gui);
 		spawn_request_notices(Arc::clone(&access), Arc::clone(&health));
 
-		Ok(Self { engine, resolver, tld, edge, health, shares, access, _control: control, launches, _instance_lock })
+		Ok(Self {
+			engine,
+			resolver,
+			tld,
+			edge: Some(edge),
+			health,
+			shares,
+			access,
+			_control: control,
+			launches,
+			_instance_lock,
+		})
 	}
 
 	/// The daemon's tunnels. A share lives here, not in the CLI process.

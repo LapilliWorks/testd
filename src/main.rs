@@ -699,39 +699,54 @@ async fn doctor(fix: bool, json: bool) -> anyhow::Result<i32> {
 	}
 	let root_cert = pki_dir.join("root.crt");
 	let root_pem = std::fs::read_to_string(&root_cert).ok();
-	match &root_pem {
-		// Windows and macOS can hold stale certificates with the same CN. Always
-		// reinstall the exact root when repairing.
-		Some(pem) if fix && (cfg!(windows) || cfg!(target_os = "macos")) => match testd_setup::trust_root(pem) {
-			Ok(()) => checks.push(Check::ok("certificate", format!("root installed: {}", certificate_summary(pem)))),
-			Err(e) => {
-				exit = exit.max(3);
-				checks.push(Check::fail("certificate", e.to_string(), "run `testd init --yes`"));
+	if config.edge_enabled {
+		match &root_pem {
+			// Windows and macOS can hold stale certificates with the same CN. Always
+			// reinstall the exact root when repairing.
+			Some(pem) if fix && (cfg!(windows) || cfg!(target_os = "macos")) => match testd_setup::trust_root(pem) {
+				Ok(()) => {
+					checks.push(Check::ok("certificate", format!("root installed: {}", certificate_summary(pem))))
+				},
+				Err(e) => {
+					exit = exit.max(3);
+					checks.push(Check::fail("certificate", e.to_string(), "run `testd init --yes`"));
+				},
 			},
-		},
-		Some(pem) if testd_setup::is_root_trusted(pem) => {
-			checks.push(Check::ok("certificate", format!("root trusted: {}", root_cert.display())));
-		},
-		Some(pem) if fix => match testd_setup::trust_root(pem) {
-			Ok(()) => checks.push(Check::ok("certificate", format!("root installed: {}", certificate_summary(pem)))),
-			Err(e) => {
-				exit = exit.max(3);
-				checks.push(Check::fail("certificate", e.to_string(), "run `testd init --yes`"));
+			Some(pem) if testd_setup::is_root_trusted(pem) => {
+				checks.push(Check::ok("certificate", format!("root trusted: {}", root_cert.display())));
 			},
-		},
-		Some(_) => {
-			exit = exit.max(3);
-			checks.push(Check::fail("certificate", "root is not trusted".into(), "run `testd doctor --fix`"));
-		},
-		None => {
-			exit = exit.max(3);
-			checks.push(Check::fail("certificate", format!("missing: {}", root_cert.display()), "run `testd init`"));
-		},
+			Some(pem) if fix => match testd_setup::trust_root(pem) {
+				Ok(()) => {
+					checks.push(Check::ok("certificate", format!("root installed: {}", certificate_summary(pem))))
+				},
+				Err(e) => {
+					exit = exit.max(3);
+					checks.push(Check::fail("certificate", e.to_string(), "run `testd init --yes`"));
+				},
+			},
+			Some(_) => {
+				exit = exit.max(3);
+				checks.push(Check::fail("certificate", "root is not trusted".into(), "run `testd doctor --fix`"));
+			},
+			None => {
+				exit = exit.max(3);
+				checks.push(Check::fail(
+					"certificate",
+					format!("missing: {}", root_cert.display()),
+					"run `testd init`",
+				));
+			},
+		}
+	} else {
+		checks.push(Check::ok("certificate", "external front owns TLS trust".into()));
 	}
 
 	match find_caddy_binary() {
 		Some(path) => checks.push(Check::ok("caddy", format!("{} (optional)", path.display()))),
-		None => checks.push(Check::ok("caddy", "not installed; the built-in edge is used".into())),
+		None if config.edge_enabled => {
+			checks.push(Check::ok("caddy", "not installed; the built-in edge is used".into()))
+		},
+		None => checks.push(Check::ok("caddy", "not installed; an external front must terminate TLS".into())),
 	}
 
 	let managed = config_dir().join("Caddyfile");
@@ -767,7 +782,8 @@ async fn doctor(fix: bool, json: bool) -> anyhow::Result<i32> {
 
 	let edge_port = if config.edge_enabled { config.edge_addr.port() } else { 443 };
 	let mut status = caddy::probe(tld, edge_port);
-	if status == EdgeStatus::Untrusted
+	if config.edge_enabled
+		&& status == EdgeStatus::Untrusted
 		&& fix && let Some(pem) = &root_pem
 	{
 		match testd_setup::trust_root(pem) {

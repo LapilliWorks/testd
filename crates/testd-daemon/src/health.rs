@@ -95,7 +95,7 @@ impl Notice {
 	fn resolver(tld: &str) -> Self {
 		Self {
 			title: "DNS routing is not set up".into(),
-			body: format!("Names ending in .{tld} do not resolve from other devices. Set up DNS on this host."),
+			body: format!("Names ending in .{tld} do not resolve. Set up DNS on this host."),
 			action: Some(Action::SetupResolver),
 		}
 	}

@@ -151,7 +151,7 @@ async fn a_sweep_leaves_a_live_share_alone() {
 }
 
 #[tokio::test]
-async fn a_tailscale_share_without_the_edge_is_refused() {
+async fn a_tailscale_share_without_the_plain_listener_is_refused() {
 	let dir = tempfile::tempdir().unwrap();
 	let (provider, _, _) = tailscale(dir.path());
 	let shares = Shares::new(Provider::Tailscale, Some(provider), None);
@@ -161,7 +161,7 @@ async fn a_tailscale_share_without_the_edge_is_refused() {
 		.await
 		.unwrap_err()
 		.to_string();
-	assert!(error.contains("built-in edge"), "{error}");
+	assert!(error.contains("plain HTTP routing listener"), "{error}");
 }
 
 #[tokio::test]

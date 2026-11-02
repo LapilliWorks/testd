@@ -211,8 +211,8 @@ impl Shares {
 		let provider = provider.unwrap_or(self.default);
 		if provider.needs_front() && self.front.is_none() {
 			bail!(
-				"{} needs the built-in edge, and this host runs with `edge_enabled = false`; \
-				 enable the edge or share with cloudflared or ngrok",
+				"{} needs the plain HTTP routing listener, and this daemon has none; \
+				 share with cloudflared or ngrok instead",
 				provider.name()
 			);
 		}
