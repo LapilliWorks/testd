@@ -19,6 +19,7 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 - New root certificates include a random pronounceable covo name in the common name, so multiple installations are distinguishable in the keychain; legacy `testd root` names are still recognised
 - `tests/release/run.py host --system` snapshots the resolver and trust integration it changes and restores it afterwards instead of refusing to run on a host that already has testd integration; `--restore-report` recovers a report after a hard kill
 - CLI/daemon MSRV raised to Rust 1.89; tray MSRV remains Rust 1.90
+- The host TLD is fixed to `.test`; `init --tld`, `TESTD_TLD`, the `[host] tld` key, and the `*.localhost` mode are removed, and an old configured `tld` value is ignored
 
 ### Fixed
 
@@ -27,7 +28,9 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 - The browser page can restart a host the suite started and reports the result back to the page, so the certificate-renewal check no longer needs a separate terminal; a pre-started host is left alone
 - The HTTPS edge keeps the WebSocket handshake response headers, including `Sec-WebSocket-Accept`, so upgrades through the edge work in browsers again
 - macOS resolver setup and teardown flush the DNS cache and reload mDNSResponder, so a new or removed `/etc/resolver/<tld>` route takes effect without a stale negative cache; `doctor --fix` also rewrites the route when resolution still fails
+- `doctor` answers `testd.<tld>` from a temporary DNS server when the host is not running, so the resolution check tests the OS route instead of requiring `testd host`
 - macOS root trust is keyed by every certificate's SHA-1 rather than the common name, so duplicate `testd root` certificates from failed runs are replaced or removed and `doctor --fix` refreshes the exact root
+- macOS root cleanup reads the certificate list before hashing every entry itself and deletes each SHA-1 with `-t`, so a failed run cannot leave duplicate `testd root` entries or their trust settings behind
 - The browser suite checks the OS resolver through `testd doctor --json` before opening the page, and the page can save a failing report with its observations unchecked instead of forcing a false confirmation
 - The Windows NRPT snapshot enumerates the JSON array before filtering, so restoring two or more rules no longer nests them into a single element
 - Windows quick-launch checks hand curl its JSON body through a temporary file, because PowerShell 5.1 breaks a native argument that holds both spaces and quotes
