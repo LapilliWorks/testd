@@ -5,10 +5,11 @@ $ErrorActionPreference = 'Continue'
 $root = Split-Path $PSScriptRoot -Parent
 
 # The crate binary name has changed over time and the bundled app may be renamed
-# to the product name. Match all of them so old installs are still reported.
+# to the product name. Older Windows builds also produced an underscore name.
+# Match all of them so old installs are still reported.
 # Case-sensitive: testd.exe is the CLI, Testd.exe is the product.
-$binaryPattern = '^(Testd|testd-(host|gui))\.exe$'
-$processPattern = '^(Testd|testd-(host|gui))$'
+$binaryPattern = '^(Testd|testd[-_](host|gui))\.exe$'
+$processPattern = '^(Testd|testd[-_](host|gui))$'
 
 function Section($name) { Write-Host "`n== $name" -ForegroundColor Cyan }
 
