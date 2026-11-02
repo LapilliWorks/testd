@@ -675,17 +675,22 @@ mod tests {
 	}
 
 	#[test]
-	fn macos_root_output_is_split_into_hash_and_pem() {
-		let output = "SHA-1 hash: 1111111111111111111111111111111111111111\n\
-		-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----\n\
-		SHA-1 hash: 2222222222222222222222222222222222222222\n\
-		-----BEGIN CERTIFICATE-----\nBBB\n-----END CERTIFICATE-----\n";
+	fn macos_root_list_parses_every_certificate() {
+		let output = "keychain: \"/Library/Keychains/System.keychain\"\n\
+		-----BEGIN CERTIFICATE-----\nAAEC\n-----END CERTIFICATE-----\n\
+		SHA-1 hash: 1111111111111111111111111111111111111111\n\
+		-----BEGIN CERTIFICATE-----\nBwgJ\n-----END CERTIFICATE-----\n";
 		let roots = parse_macos_roots(output);
 		assert_eq!(roots.len(), 2);
-		assert_eq!(roots[0].hash, "1111111111111111111111111111111111111111");
-		assert!(roots[0].pem.contains("AAA"));
-		assert_eq!(roots[1].hash, "2222222222222222222222222222222222222222");
-		assert!(roots[1].pem.contains("BBB"));
+		assert!(roots[0].pem.contains("AAEC"));
+		assert!(roots[1].pem.contains("BwgJ"));
+		assert_eq!(roots[0].hash.len(), 40);
+		assert_ne!(roots[0].hash, roots[1].hash);
+	}
+
+	#[test]
+	fn sha1_hex_matches_a_known_digest() {
+		assert_eq!(sha1_hex(b"abc"), "a9993e364706816aba3e25717850c26c9cd0d89d");
 	}
 
 	#[cfg(target_os = "linux")]
@@ -805,21 +810,17 @@ struct MacRoot {
 #[cfg(any(target_os = "macos", test))]
 fn parse_macos_roots(output: &str) -> Vec<MacRoot> {
 	let mut roots = Vec::new();
-	let mut hash = None;
 	let mut pem = String::new();
 	for line in output.lines() {
-		if let Some(value) = line.strip_prefix("SHA-1 hash: ") {
-			hash = Some(value.trim().to_owned());
-			pem.clear();
-		} else if line == "-----BEGIN CERTIFICATE-----" {
+		if line == "-----BEGIN CERTIFICATE-----" {
 			pem.clear();
 			pem.push_str(line);
 			pem.push('\n');
 		} else if line == "-----END CERTIFICATE-----" {
 			pem.push_str(line);
 			pem.push('\n');
-			if let Some(hash) = hash.take() {
-				roots.push(MacRoot { hash, pem: normalize_pem(&pem) });
+			if let Ok(der) = pem_to_der(&pem) {
+				roots.push(MacRoot { hash: sha1_hex(&der), pem: normalize_pem(&pem) });
 			}
 			pem.clear();
 		} else if !pem.is_empty() {
@@ -828,6 +829,13 @@ fn parse_macos_roots(output: &str) -> Vec<MacRoot> {
 		}
 	}
 	roots
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn sha1_hex(bytes: &[u8]) -> String {
+	use sha1::{Digest, Sha1};
+
+	Sha1::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Whether the testd root is already in the system trust store.
@@ -930,7 +938,7 @@ fn certificate_common_name(pem: &str) -> Option<String> {
 #[cfg(target_os = "macos")]
 fn macos_testd_roots() -> io::Result<Vec<MacRoot>> {
 	let output = silent_command("security")
-		.args(["find-certificate", "-a", "-Z", "-p", "/Library/Keychains/System.keychain"])
+		.args(["find-certificate", "-a", "-p", "/Library/Keychains/System.keychain"])
 		.output()?;
 	if !output.status.success() {
 		return Ok(Vec::new());
@@ -952,7 +960,7 @@ fn is_root_trusted_macos(cert_pem: &str) -> bool {
 fn delete_macos_roots(roots: &[MacRoot]) -> io::Result<()> {
 	for root in roots {
 		let status = silent_command("sudo")
-			.args(["security", "delete-certificate", "-Z", &root.hash, "/Library/Keychains/System.keychain"])
+			.args(["security", "delete-certificate", "-t", "-Z", &root.hash, "/Library/Keychains/System.keychain"])
 			.status()?;
 		if !status.success() {
 			return Err(io::Error::other(format!("failed to remove testd root {}", root.hash)));
@@ -966,7 +974,7 @@ fn delete_macos_roots_script(roots: &[MacRoot]) -> String {
 	roots
 		.iter()
 		.map(|root| {
-			format!("security delete-certificate -Z {} /Library/Keychains/System.keychain || exit 1; ", root.hash)
+			format!("security delete-certificate -t -Z {} /Library/Keychains/System.keychain || exit 1; ", root.hash)
 		})
 		.collect()
 }

@@ -8,5 +8,6 @@ license.workspace = true
 [dependencies]
 base64 = { workspace = true }
 covo = { workspace = true }
+sha1 = "0.10"
 testd-core = { workspace = true }
 x509-parser = { workspace = true }
