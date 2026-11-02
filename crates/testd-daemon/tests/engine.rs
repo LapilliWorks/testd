@@ -13,7 +13,7 @@ use tokio::sync::oneshot;
 use testd_core::config::{HostConfig, ResolverBackend};
 use testd_core::protocol::{Auth, Request, Response, TokenRequest, recv, send};
 use testd_daemon::access::{Access, Approved};
-use testd_daemon::engine::HostEngine;
+use testd_daemon::engine::{HostEngine, OperatorAction};
 use testd_daemon::resolver::{ResolvedName, Resolver};
 
 /// Records the last applied registration set so tests can observe eviction.
@@ -34,6 +34,7 @@ impl Resolver for RecordingResolver {
 
 struct Harness {
 	addr: SocketAddr,
+	engine: Arc<HostEngine>,
 	resolver: Arc<RecordingResolver>,
 	registrations: testd_daemon::engine::Registrations,
 	access: Arc<Access>,
@@ -87,14 +88,15 @@ async fn start_with_dashboard(_dashboard_addr: Option<SocketAddr>) -> Harness {
 	let registrations = engine.registrations();
 	let listener = TcpListener::bind(addr).await.unwrap();
 	let (stop, mut stopped) = oneshot::channel::<()>();
+	let serving = Arc::clone(&engine);
 	tokio::spawn(async move {
 		tokio::select! {
-			result = engine.serve(listener) => { result.ok(); }
+			result = serving.serve(listener) => { result.ok(); }
 			_ = &mut stopped => {}
 		}
 	});
 
-	Harness { addr, resolver, registrations, access, token: SECRET.to_owned(), stop: Some(stop) }
+	Harness { addr, engine, resolver, registrations, access, token: SECRET.to_owned(), stop: Some(stop) }
 }
 
 impl Drop for Harness {
@@ -337,6 +339,27 @@ fn post(token: &str, path: &str, body: &str) -> String {
 		 Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
 		body.len()
 	)
+}
+
+#[tokio::test]
+async fn an_operator_action_stops_a_leaf_from_outside_the_serve_loop() {
+	let harness = start().await;
+	let mut alice = Client::connect(harness.addr, &harness.token).await;
+	assert!(matches!(alice.request(register("app", "3000", false)).await, Response::Ok));
+
+	harness
+		.engine
+		.operator(OperatorAction::Stop { domain: "app.test".into() })
+		.await
+		.expect("the serve loop accepts an operator action");
+
+	let stopped = tokio::time::timeout(std::time::Duration::from_secs(5), recv::<_, Response>(&mut alice.reader))
+		.await
+		.expect("the owner is told to stop")
+		.unwrap()
+		.unwrap();
+	assert!(matches!(&stopped, Response::Stopped { domain } if domain == "app.test"), "{stopped:?}");
+	assert!(harness.registrations.lock().await.snapshot().is_empty());
 }
 
 #[tokio::test]

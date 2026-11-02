@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -61,11 +62,15 @@ pub struct HostEngine {
 	launches: Option<Arc<LaunchBook>>,
 	/// Re-probe health after a local certificate change.
 	health_refresh: Option<Arc<dyn Fn() + Send + Sync>>,
+	/// Operator actions from outside the serve loop. Taken once by `serve`.
+	operator_tx: mpsc::Sender<OperatorRequest>,
+	operator_rx: StdMutex<Option<mpsc::Receiver<OperatorRequest>>>,
 }
 
 impl HostEngine {
 	pub fn new(config: HostConfig, resolver: Arc<dyn Resolver>, access: Arc<Access>) -> Self {
 		let (event_tx, _) = broadcast::channel(16);
+		let (operator_tx, operator_rx) = mpsc::channel(16);
 		Self {
 			config,
 			tld: testd_core::config::host_tld().to_owned(),
@@ -77,6 +82,8 @@ impl HostEngine {
 			local_token: None,
 			launches: None,
 			health_refresh: None,
+			operator_tx,
+			operator_rx: StdMutex::new(Some(operator_rx)),
 		}
 	}
 
@@ -114,6 +121,17 @@ impl HostEngine {
 		self.event_tx.subscribe()
 	}
 
+	/// Run an operator action in the serve loop, which owns the registration
+	/// lock and the live connections.
+	pub async fn operator(&self, action: OperatorAction) -> Result<(), String> {
+		let (respond, response) = oneshot::channel();
+		self.operator_tx
+			.send(OperatorRequest { action, respond })
+			.await
+			.map_err(|_| "the engine is not serving".to_owned())?;
+		response.await.map_err(|_| "the engine is not serving".to_owned())?
+	}
+
 	/// Run the TCP server. Blocks until the listener fails.
 	pub async fn run(&self) -> io::Result<()> {
 		let listener = TcpListener::bind(self.config.listen_addr).await?;
@@ -123,7 +141,12 @@ impl HostEngine {
 
 	/// Run the TCP server on an already-bound listener.
 	pub async fn serve(&self, listener: TcpListener) -> io::Result<()> {
-		let (operator_tx, mut operator_rx) = mpsc::channel::<OperatorRequest>(16);
+		let mut operator_rx = self
+			.operator_rx
+			.lock()
+			.expect("engine operator receiver poisoned")
+			.take()
+			.ok_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "the engine is already serving"))?;
 		let mut revocations = self.access.revocations();
 		let connections = Arc::new(Connections::default());
 		let capacity = Arc::new(tokio::sync::Semaphore::new(MAX_INTAKE_CONNECTIONS));
@@ -135,7 +158,7 @@ impl HostEngine {
 			local_token: self.local_token.clone(),
 			registrations: self.registrations.clone(),
 			connections: Arc::clone(&connections),
-			operator_tx,
+			operator_tx: self.operator_tx.clone(),
 			launches: self.launches.clone(),
 			health_refresh: self.health_refresh.clone(),
 			shares: self.shares.clone(),

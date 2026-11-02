@@ -14,7 +14,7 @@ use testd_setup::Elevation;
 use crate::access::{Access, PendingView};
 use crate::control::ControlServer;
 use crate::edge::{self, Edge, EdgeContext};
-use crate::engine::HostEngine;
+use crate::engine::{HostEngine, OperatorAction};
 use crate::health::{Action, Health, HealthMonitor, Notice, PkiRoot, RootAuthority};
 use crate::launch::LaunchBook;
 use crate::resolver::Resolver;
@@ -178,6 +178,17 @@ impl Daemon {
 	/// The daemon's tunnels. A share lives here, not in the CLI process.
 	pub fn shares(&self) -> Arc<crate::share::Shares> {
 		Arc::clone(&self.shares)
+	}
+
+	/// The daemon's saved quick launches and their live state.
+	pub fn launches(&self) -> Arc<LaunchBook> {
+		Arc::clone(&self.launches)
+	}
+
+	/// Stop the leaf that publishes one name. Its grant is kept, so a later run
+	/// publishes the name again without asking.
+	pub async fn stop_domain(&self, domain: &str) -> Result<(), String> {
+		self.engine.operator(OperatorAction::Stop { domain: domain.to_owned() }).await
 	}
 
 	/// Waiting leaf token requests, oldest first.
