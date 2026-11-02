@@ -643,19 +643,17 @@ async fn doctor(fix: bool, json: bool) -> anyhow::Result<i32> {
 		let mut resolved = resolve_via_os(&dashboard);
 		// The route can be correct while the host is not running yet. Answer the
 		// dashboard name from a one-shot server so this checks the OS route
-		// instead of requiring `testd host`. `None` means the port is taken,
+		// instead of requiring `testd host`. `false` means the port is taken,
 		// usually by the running host.
-		let mut probe = None;
 		let mut probe_error = None;
 		if matches!(config.resolver, ResolverBackend::Dns)
 			&& !matches!(&resolved, Some(addrs) if addrs.contains(&expected))
 		{
 			match start_resolution_probe(&config.tld, config.answer_addr).await {
-				Ok(Some(server)) => {
-					probe = Some(server);
+				Ok(true) => {
 					resolved = resolve_via_os_until(&dashboard, expected, std::time::Duration::from_secs(2)).await;
 				},
-				Ok(None) => {},
+				Ok(false) => {},
 				Err(error) => probe_error = Some(error),
 			}
 		}
@@ -672,7 +670,6 @@ async fn doctor(fix: bool, json: bool) -> anyhow::Result<i32> {
 		} else {
 			resolved
 		};
-		drop(probe);
 		match resolved {
 			Some(addrs) if addrs.contains(&expected) => {
 				checks.push(Check::ok("resolution", format!("{dashboard} resolves to {expected}")));
@@ -824,20 +821,18 @@ fn resolve_via_os(name: &str) -> Option<Vec<std::net::IpAddr>> {
 	(!addrs.is_empty()).then_some(addrs)
 }
 
-/// Start a temporary DNS server for the resolution check. Returns `None` when
-/// the DNS port is already in use, which usually means the host owns it.
-async fn start_resolution_probe(
-	tld: &str,
-	answer_addr: std::net::Ipv4Addr,
-) -> std::io::Result<Option<testd_daemon::resolver::dns::DnsResolver>> {
+/// Start a DNS server for the resolution check. It serves until the process
+/// exits. Returns `false` when the DNS port is already in use, which usually
+/// means the host owns it.
+async fn start_resolution_probe(tld: &str, answer_addr: std::net::Ipv4Addr) -> std::io::Result<bool> {
 	use testd_daemon::resolver::Resolver as _;
 
 	match testd_daemon::resolver::dns::DnsResolver::start(tld, answer_addr, Elevation::Sudo).await {
 		Ok(probe) => {
 			probe.apply(&[])?;
-			Ok(Some(probe))
+			Ok(true)
 		},
-		Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => Ok(None),
+		Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => Ok(false),
 		Err(error) => Err(error),
 	}
 }
