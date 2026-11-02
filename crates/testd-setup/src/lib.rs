@@ -485,9 +485,16 @@ fn teardown_macos(tld: &str) -> io::Result<()> {
 #[cfg(target_os = "linux")]
 fn teardown_linux(_tld: &str) -> io::Result<()> {
 	let script = format!("rm -f {RESOLVED_DROPIN} && systemctl reload systemd-resolved");
-	let _ = silent_command("sudo").args(["sh", "-c", &script]).status();
+	let status = silent_command("sudo").args(["sh", "-c", &script]).status()?;
+	if !status.success() {
+		return Err(io::Error::new(io::ErrorKind::PermissionDenied, "removing the resolver drop-in failed"));
+	}
 	// Configurations written by older versions live on the link, not in a drop-in.
-	let _ = silent_command("sudo").args(["resolvectl", "revert", "lo"]).status();
+	if let Ok(status) = silent_command("sudo").args(["resolvectl", "revert", "lo"]).status()
+		&& !status.success()
+	{
+		eprintln!("[warn]   could not revert the legacy resolvectl lo configuration");
+	}
 	Ok(())
 }
 
@@ -555,14 +562,19 @@ fn sudo_write(path: &Path, content: &str) -> io::Result<()> {
 /// Write content to a file via a native GUI auth dialog.
 #[cfg(target_os = "macos")]
 fn gui_write(path: &Path, content: &str) -> io::Result<()> {
-	/* osascript can't pipe stdin, so pass content via a temp file. */
-	let tmp = std::env::temp_dir().join("testd-caddyfile-import.tmp");
-	std::fs::write(&tmp, content)?;
+	use base64::Engine;
+	use base64::engine::general_purpose::STANDARD;
 
-	let script =
-		format!("do shell script \"cat '{}' > '{}'\" with administrator privileges", tmp.display(), path.display(),);
+	/* osascript cannot pipe stdin; pass the public Caddyfile as base64 and let
+	the elevated shell write its own root-only temp file. */
+	let encoded = STANDARD.encode(content.as_bytes());
+	let target = shell_quote(&path.display().to_string());
+	let command = format!(
+		"tmp=$(mktemp /var/root/testd-caddy.XXXXXX) && trap 'rm -f $tmp' EXIT && \
+		 printf '%s' '{encoded}' | base64 -D > $tmp && cat $tmp > {target}"
+	);
+	let script = format!("do shell script \"{command}\" with administrator privileges");
 	let status = silent_command("osascript").args(["-e", &script]).status()?;
-	let _ = std::fs::remove_file(&tmp);
 	if !status.success() {
 		return Err(io::Error::new(
 			io::ErrorKind::PermissionDenied,
@@ -597,14 +609,22 @@ fn gui_write(path: &Path, content: &str) -> io::Result<()> {
 /// Write content to a file via UAC elevation.
 #[cfg(target_os = "windows")]
 fn gui_write(path: &Path, content: &str) -> io::Result<()> {
-	let tmp = std::env::temp_dir().join("testd-caddyfile-import.tmp");
-	std::fs::write(&tmp, content)?;
+	use base64::Engine;
+	use base64::engine::general_purpose::STANDARD;
 
-	let cmd = format!("Copy-Item '{}' '{}'", tmp.display(), path.display());
+	let encoded = STANDARD.encode(content.as_bytes());
+	let target = powershell_single_quote(&path.display().to_string());
+	let script =
+		format!("$bytes = [Convert]::FromBase64String('{encoded}'); [IO.File]::WriteAllBytes({target}, $bytes)");
+	let encoded_command = powershell_encoded(&script);
+	let argument = format!("-NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded_command}");
+	let command = format!(
+		"$ErrorActionPreference = 'Stop'; $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -ErrorAction Stop -ArgumentList {}; exit $p.ExitCode",
+		powershell_single_quote(&argument)
+	);
 	let status = silent_command("powershell")
-		.args(["-Command", &format!("Start-Process powershell -Verb RunAs -Wait -ArgumentList '-Command','{cmd}'")])
+		.args(["-NoProfile", "-Command", &command])
 		.status()?;
-	let _ = std::fs::remove_file(&tmp);
 	if !status.success() {
 		return Err(io::Error::new(
 			io::ErrorKind::PermissionDenied,
@@ -831,7 +851,7 @@ fn parse_macos_roots(output: &str) -> Vec<MacRoot> {
 	roots
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn sha1_hex(bytes: &[u8]) -> String {
 	use sha1::{Digest, Sha1};
 
@@ -899,9 +919,24 @@ fn trust_layout() -> TrustLayout {
 }
 
 #[cfg(target_os = "linux")]
-fn trust_install_script(source: &std::path::Path) -> String {
+fn trust_install_script() -> String {
 	let layout = trust_layout();
-	format!("mkdir -p '{}' && cp '{}' '{}' && {}", layout.directory, source.display(), layout.anchor, layout.reload)
+	// The certificate arrives on stdin, so there is no user-writable temp file
+	// for another process to replace between the check and the install.
+	format!("mkdir -p '{}' && cat > '{}' && {}", layout.directory, layout.anchor, layout.reload)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn run_with_stdin(mut command: std::process::Command, input: &[u8]) -> io::Result<std::process::ExitStatus> {
+	use std::io::Write;
+	use std::process::Stdio;
+
+	command.stdin(Stdio::piped());
+	let mut child = command.spawn()?;
+	let mut stdin = child.stdin.take().expect("stdin was requested");
+	stdin.write_all(input)?;
+	drop(stdin);
+	child.wait()
 }
 
 #[cfg(target_os = "linux")]
@@ -982,13 +1017,7 @@ fn delete_macos_roots_script(roots: &[MacRoot]) -> String {
 #[cfg(target_os = "windows")]
 fn is_root_trusted_windows(cert_pem: &str) -> bool {
 	let Ok(der) = pem_to_der(cert_pem) else { return false };
-	let tmp = std::env::temp_dir().join(format!("testd-check-{}.cer", std::process::id()));
-	if std::fs::write(&tmp, der).is_err() {
-		return false;
-	}
-	let thumbprint = windows_cert_thumbprint(&tmp);
-	let _ = std::fs::remove_file(&tmp);
-	let Ok(thumbprint) = thumbprint else { return false };
+	let thumbprint = sha1_hex(&der);
 	let Ok(output) = silent_command("certutil").args(["-store", "Root"]).output() else {
 		return false;
 	};
@@ -1021,11 +1050,10 @@ pub fn trust_root(cert_pem: &str) -> io::Result<()> {
 pub fn trust_root_gui(cert_pem: &str) -> io::Result<()> {
 	#[cfg(target_os = "linux")]
 	{
-		let tmp = std::env::temp_dir().join("testd-root.crt");
-		std::fs::write(&tmp, cert_pem)?;
-		let script = trust_install_script(&tmp);
-		let status = silent_command("pkexec").args(["sh", "-c", &script]).status()?;
-		let _ = std::fs::remove_file(&tmp);
+		let script = trust_install_script();
+		let mut command = silent_command("pkexec");
+		command.args(["sh", "-c", &script]);
+		let status = run_with_stdin(command, cert_pem.as_bytes())?;
 		if !status.success() {
 			return Err(io::Error::new(
 				io::ErrorKind::PermissionDenied,
@@ -1036,18 +1064,22 @@ pub fn trust_root_gui(cert_pem: &str) -> io::Result<()> {
 	}
 	#[cfg(target_os = "macos")]
 	{
+		use base64::Engine;
+		use base64::engine::general_purpose::STANDARD;
+
 		let roots = macos_testd_roots()?;
-		let tmp = std::env::temp_dir().join("testd-root.crt");
-		std::fs::write(&tmp, cert_pem)?;
-		let target = shell_quote(&tmp.display().to_string());
+		// `do shell script` does not inherit stdin. Pass the public certificate
+		// as base64 and let the elevated shell create its own root-only file.
+		let encoded = STANDARD.encode(cert_pem.as_bytes());
 		let script = format!(
-			"{}security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {target}",
+			"{}tmp=$(mktemp /var/root/testd-root.XXXXXX) && trap 'rm -f $tmp' EXIT && \
+			 printf '%s' '{encoded}' | base64 -D > $tmp && \
+			 security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain $tmp",
 			delete_macos_roots_script(&roots)
 		);
 		let status = silent_command("osascript")
 			.args(["-e", &format!("do shell script \"{script}\" with administrator privileges")])
 			.status()?;
-		let _ = std::fs::remove_file(&tmp);
 		if !status.success() {
 			return Err(io::Error::new(
 				io::ErrorKind::PermissionDenied,
@@ -1066,12 +1098,10 @@ pub fn trust_root_gui(cert_pem: &str) -> io::Result<()> {
 
 #[cfg(target_os = "linux")]
 fn trust_root_linux(cert_pem: &str) -> io::Result<()> {
-	let tmp = std::env::temp_dir().join(format!("testd-root-{}.crt", std::process::id()));
-	std::fs::write(&tmp, cert_pem)?;
-	let script = trust_install_script(&tmp);
-	let status = silent_command("sudo").args(["sh", "-c", &script]).status();
-	let _ = std::fs::remove_file(&tmp);
-	let status = status?;
+	let script = trust_install_script();
+	let mut command = silent_command("sudo");
+	command.args(["sh", "-c", &script]);
+	let status = run_with_stdin(command, cert_pem.as_bytes())?;
 	if !status.success() {
 		return Err(io::Error::new(io::ErrorKind::PermissionDenied, "root CA install failed"));
 	}
@@ -1084,14 +1114,11 @@ fn trust_root_macos(cert_pem: &str) -> io::Result<()> {
 	// once after failed runs, and `add-trusted-cert` cannot reliably set trust
 	// on a duplicate item.
 	delete_macos_roots(&macos_testd_roots()?)?;
-	let tmp = std::env::temp_dir().join(format!("testd-root-{}.crt", std::process::id()));
-	std::fs::write(&tmp, cert_pem)?;
-	let status = silent_command("sudo")
-		.args(["security", "add-trusted-cert", "-d", "-r", "trustRoot", "-k", "/Library/Keychains/System.keychain"])
-		.arg(&tmp)
-		.status();
-	let _ = std::fs::remove_file(&tmp);
-	let status = status?;
+	let script = "tmp=$(mktemp /var/root/testd-root.XXXXXX) && trap 'rm -f $tmp' EXIT && \
+		cat > $tmp && security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain $tmp";
+	let mut command = silent_command("sudo");
+	command.args(["sh", "-c", script]);
+	let status = run_with_stdin(command, cert_pem.as_bytes())?;
 	if !status.success() {
 		return Err(io::Error::new(io::ErrorKind::PermissionDenied, "root CA install failed"));
 	}
@@ -1101,13 +1128,16 @@ fn trust_root_macos(cert_pem: &str) -> io::Result<()> {
 #[cfg(target_os = "windows")]
 fn trust_root_windows(cert_pem: &str) -> io::Result<()> {
 	// Windows certificate APIs load DER reliably; PEM support depends on the
-	// .NET version, so convert once before handing the file to the helper.
+	// .NET version, so convert once before handing the file to the helper. The
+	// expected thumbprint comes from the PEM, not from the mutable temp file.
+	let der = pem_to_der(cert_pem)?;
+	let thumbprint = sha1_hex(&der);
 	let tmp = std::env::temp_dir().join(format!("testd-root-{}.cer", std::process::id()));
-	std::fs::write(&tmp, pem_to_der(cert_pem)?)?;
-	let result = windows_cert_thumbprint(&tmp).and_then(|thumbprint| {
+	std::fs::write(&tmp, &der)?;
+	let result = (|| {
 		let cert_path = tmp.display().to_string();
 		run_windows_helper("InstallRoot", &[("CertPath", cert_path.as_str()), ("Thumbprint", thumbprint.as_str())])
-	});
+	})();
 	let _ = std::fs::remove_file(&tmp);
 	result
 }
@@ -1192,12 +1222,9 @@ fn untrust_root_windows(cert_pem: &str) -> io::Result<()> {
 	if !is_root_trusted_windows(cert_pem) {
 		return Ok(());
 	}
-	let tmp = std::env::temp_dir().join(format!("testd-root-{}.cer", std::process::id()));
-	std::fs::write(&tmp, pem_to_der(cert_pem)?)?;
-	let result = windows_cert_thumbprint(&tmp)
-		.and_then(|thumbprint| run_windows_helper("RemoveRoot", &[("Thumbprint", thumbprint.as_str())]));
-	let _ = std::fs::remove_file(&tmp);
-	result
+	let der = pem_to_der(cert_pem)?;
+	let thumbprint = sha1_hex(&der);
+	run_windows_helper("RemoveRoot", &[("Thumbprint", thumbprint.as_str())])
 }
 
 /// Decode the first CERTIFICATE block in a PEM document to DER.
@@ -1231,12 +1258,29 @@ fn powershell_single_quote(value: &str) -> String {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_helper_script() -> io::Result<std::path::PathBuf> {
-	let dir = std::env::temp_dir().join(format!("testd-elevated-{}", std::process::id()));
-	std::fs::create_dir_all(&dir)?;
-	let path = dir.join("testd-elevated.ps1");
-	std::fs::write(&path, WINDOWS_ELEVATED_SCRIPT)?;
-	Ok(path)
+fn windows_helper_command(action: &str, args: &[(&str, &str)]) -> String {
+	// Embed the trusted helper source in the encoded command. A temp script
+	// could be replaced between the write and the elevated launch.
+	let script = powershell_single_quote(WINDOWS_ELEVATED_SCRIPT);
+	let mut invocation = format!("& ([ScriptBlock]::Create({script})) -Action {}", powershell_single_quote(action));
+	for (name, value) in args {
+		invocation.push_str(&format!(" -{name} {}", powershell_single_quote(value)));
+	}
+	invocation
+}
+
+/// PowerShell's -EncodedCommand takes UTF-16LE base64. Encoding the whole
+/// invocation keeps paths and arguments out of a re-quotable command line.
+#[cfg(target_os = "windows")]
+fn powershell_encoded(script: &str) -> String {
+	use base64::Engine;
+	use base64::engine::general_purpose::STANDARD;
+
+	let mut bytes = Vec::with_capacity(script.len() * 2);
+	for unit in script.encode_utf16() {
+		bytes.extend_from_slice(&unit.to_le_bytes());
+	}
+	STANDARD.encode(bytes)
 }
 
 #[cfg(target_os = "windows")]
@@ -1253,23 +1297,14 @@ fn is_windows_elevated() -> bool {
 /// the helper is launched with `-Verb RunAs`, so only the helper is elevated.
 #[cfg(target_os = "windows")]
 fn run_windows_helper(action: &str, args: &[(&str, &str)]) -> io::Result<()> {
-	let script = windows_helper_script()?;
-	let result = if is_windows_elevated() {
-		let mut command = silent_command("powershell");
-		command
-			.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
-			.arg(&script)
-			.args(["-Action", action]);
-		for (name, value) in args {
-			command.arg(format!("-{name}")).arg(*value);
-		}
-		command.status().and_then(require_helper_success)
+	let encoded = powershell_encoded(&windows_helper_command(action, args));
+	if is_windows_elevated() {
+		silent_command("powershell")
+			.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", &encoded])
+			.status()
+			.and_then(require_helper_success)
 	} else {
-		let mut argument_line =
-			format!("-NoProfile -ExecutionPolicy Bypass -File \"{}\" -Action {}", script.display(), action);
-		for (name, value) in args {
-			argument_line.push_str(&format!(" -{name} \"{}\"", value.replace('"', "`\"")));
-		}
+		let argument_line = format!("-NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}");
 		let command = format!(
 			"$ErrorActionPreference = 'Stop'; $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -ErrorAction Stop -ArgumentList {}; exit $p.ExitCode",
 			powershell_single_quote(&argument_line)
@@ -1278,9 +1313,7 @@ fn run_windows_helper(action: &str, args: &[(&str, &str)]) -> io::Result<()> {
 			.args(["-NoProfile", "-Command", &command])
 			.status()
 			.and_then(require_helper_success)
-	};
-	let _ = std::fs::remove_dir_all(script.parent().unwrap_or(std::path::Path::new(".")));
-	result
+	}
 }
 
 #[cfg(target_os = "windows")]
@@ -1293,25 +1326,6 @@ fn require_helper_success(status: std::process::ExitStatus) -> io::Result<()> {
 			"elevated testd helper failed (cancelled, denied, or invalid arguments)",
 		))
 	}
-}
-
-#[cfg(target_os = "windows")]
-fn windows_cert_thumbprint(path: &std::path::Path) -> io::Result<String> {
-	let command = format!(
-		"([System.Security.Cryptography.X509Certificates.X509Certificate2]::new({})).Thumbprint",
-		powershell_single_quote(&path.display().to_string())
-	);
-	let output = silent_command("powershell")
-		.args(["-NoProfile", "-Command", &command])
-		.output()?;
-	if !output.status.success() {
-		return Err(io::Error::new(io::ErrorKind::InvalidData, "cannot read certificate thumbprint"));
-	}
-	let thumbprint = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-	if thumbprint.is_empty() || !thumbprint.chars().all(|c| c.is_ascii_hexdigit()) {
-		return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid certificate thumbprint"));
-	}
-	Ok(thumbprint)
 }
 
 /// Compare certificates ignoring line-ending and trailing-whitespace noise.

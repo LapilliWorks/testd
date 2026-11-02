@@ -34,7 +34,7 @@ For the `.test` TLD, run `testd doctor --fix` on every platform to configure the
 testd host
 ```
 
-The daemon owns the TCP intake (`:7737`), the HTTPS edge (`:443`), and the DNS server (`127.0.0.1:7753`, or `:53` on Windows). A second instance fails fast on the instance lock.
+The daemon owns the TCP intake (`:7737`), the HTTPS edge (`:443`), and the DNS server (`127.0.0.1:7753`, or `:53` on Windows). A second instance fails fast on the instance lock. Run `testd dashboard` to print the authenticated dashboard URL; actions require the per-run token in that URL.
 
 On Linux, port 443 needs `CAP_NET_BIND_SERVICE`. The root-managed `testd@.service` grants that capability; a systemd user service must use a high port. For a foreground executable, grant the capability to that executable, or set `[host] edge_addr = '127.0.0.1:8443'` and use `https://app.example.test:8443`.
 

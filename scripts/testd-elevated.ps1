@@ -29,7 +29,10 @@ Set-StrictMode -Version Latest
 $ConfirmPreference = 'None'
 
 function Assert-Tld([string]$value) {
-	if ($value -notmatch '^[a-z0-9]{1,10}$') {
+	# `test` is the product TLD; `testdcheck` is the throwaway release-test
+	# zone. Refuse arbitrary TLDs such as .com, which would redirect unrelated
+	# DNS through this helper.
+	if ($value -notin @('test', 'testdcheck')) {
 		throw "invalid TLD"
 	}
 }
@@ -42,6 +45,9 @@ function Assert-IPv4([string]$value) {
 		if ([int]$octet -lt 0 -or [int]$octet -gt 255) {
 			throw "invalid IPv4 address"
 		}
+	}
+	if ($value -ne '127.0.0.1') {
+		throw "name server must be the loopback DNS server"
 	}
 }
 
@@ -60,6 +66,7 @@ switch ($Action) {
 		$cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($CertPath)
 		if ($cert.Thumbprint -ne $Thumbprint) { throw "certificate thumbprint mismatch" }
 		if ($cert.Subject -ne $cert.Issuer) { throw "certificate is not self-signed" }
+		if (-not ($cert.Subject -match '(^|,\s*)CN=testd root(\s|,|$)')) { throw "certificate is not a testd root" }
 
 		$basic = $cert.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.19' }
 		if (-not $basic) { throw "certificate is not a CA" }

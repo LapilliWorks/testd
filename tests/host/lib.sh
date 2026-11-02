@@ -279,19 +279,27 @@ operator_secret() {
 	' "$(config_path)"
 }
 
+dashboard_token() {
+	sed -n 's/.*"token":"\([^"]*\)".*/\1/p' "$TEST_HOME/.config/testd/control.json" 2>/dev/null || true
+}
+
 dashboard_get() {
-	curl --silent --show-error --fail --max-time 10 --noproxy '*' "http://127.0.0.1:7737$1"
+	local token
+	token="$(dashboard_token)"
+	curl --silent --show-error --fail --max-time 10 --noproxy '*' \
+		-H "X-Testd-Token: $token" "http://127.0.0.1:7737$1"
 }
 
 dashboard_post() {
-	local path="$1" body="${2:-}"
+	local path="$1" body="${2:-}" token
+	token="$(dashboard_token)"
 	if [ -n "$body" ]; then
 		curl --silent --show-error --fail --max-time 20 --noproxy '*' \
-			-H 'X-Testd-Request: 1' -H 'Content-Type: application/json' \
+			-H "X-Testd-Token: $token" -H 'X-Testd-Request: 1' -H 'Content-Type: application/json' \
 			-X POST --data "$body" "http://127.0.0.1:7737$path"
 	else
 		curl --silent --show-error --fail --max-time 20 --noproxy '*' \
-			-H 'X-Testd-Request: 1' -X POST "http://127.0.0.1:7737$path"
+			-H "X-Testd-Token: $token" -H 'X-Testd-Request: 1' -X POST "http://127.0.0.1:7737$path"
 	fi
 }
 

@@ -83,8 +83,16 @@ function System-Status([string]$HostName, [string]$Path = '/') {
 		--output NUL --write-out '%{http_code}' --resolve "${HostName}:${EdgePort}:127.0.0.1" $url
 }
 
+function Dashboard-Token {
+	$path = Join-Path $AppData 'testd\control.json'
+	if (-not (Test-Path $path)) { return '' }
+	return (Get-Content $path -Raw | ConvertFrom-Json).token
+}
+
 function Dashboard-Get([string]$Path = '/') {
-	& curl.exe --silent --show-error --fail --max-time 10 --noproxy '*' "http://127.0.0.1:7737$Path"
+	$token = Dashboard-Token
+	& curl.exe --silent --show-error --fail --max-time 10 --noproxy '*' `
+		-H "X-Testd-Token: $token" "http://127.0.0.1:7737$Path"
 }
 
 function Dashboard-Post([string]$Path, [string]$Body = '') {
@@ -96,14 +104,14 @@ function Dashboard-Post([string]$Path, [string]$Body = '') {
 		try {
 			[IO.File]::WriteAllText($bodyFile, $Body, [Text.UTF8Encoding]::new($false))
 			& curl.exe --silent --show-error --fail --max-time 20 --noproxy '*' `
-				-H 'X-Testd-Request: 1' -H 'Content-Type: application/json' `
+				-H "X-Testd-Token: $(Dashboard-Token)" -H 'X-Testd-Request: 1' -H 'Content-Type: application/json' `
 				--data-binary "@$bodyFile" "http://127.0.0.1:7737$Path"
 		} finally {
 			Remove-Item -LiteralPath $bodyFile -Force -ErrorAction SilentlyContinue
 		}
 	} else {
 		& curl.exe --silent --show-error --fail --max-time 20 --noproxy '*' `
-			-H 'X-Testd-Request: 1' -X POST "http://127.0.0.1:7737$Path"
+			-H "X-Testd-Token: $(Dashboard-Token)" -H 'X-Testd-Request: 1' -X POST "http://127.0.0.1:7737$Path"
 	}
 }
 

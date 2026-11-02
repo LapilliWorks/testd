@@ -22,7 +22,8 @@ days. Credit is given unless you ask otherwise.
   resolver, the root CA trust store, and `/etc/hosts`.
 - The root CA key stays in the host config directory and is never copied to a dev environment.
 - Leaf certificates live 24 hours; the local intermediate lives one year and renews near expiry without replacing the root. Renewal requires the root key and backs up the previous intermediate first.
-- Leaf tokens are approved only over the node's loopback dashboard or control channel, stored with mode `0600`, and revocable. A token request never receives the operator secret.
+- Leaf tokens are approved only over the node's loopback dashboard or control channel, stored with mode `0600`, and revocable. A token request never receives the operator secret. Dashboard mutations and `/api/local/*` require the per-run control token from `control.json`; a bare dashboard URL is read-only.
+- A remote leaf may only target its own address unless `[host] allow_remote_targets` is enabled. This keeps an issued name grant from becoming a proxy into the host's loopback or another network.
 - Browser-facing TLS is rustls with the ring provider. There is no OpenSSL in the dependency tree.
 - Leaf registration and token issuance use plain TCP, not TLS. Bearer credentials and registration data are visible to the network between the leaf and host. Use only trusted local networks or a separately secured transport, such as an SSH tunnel or encrypted private network. Do not expose intake port 7737 to the internet.
 - Intake accepts at most 256 simultaneous connections. NDJSON frames are limited to 64 KiB, HTTP headers to 32 KiB, setup and started-frame reads to 10 seconds, and reply writes to 5 seconds. Idle authenticated leaves keep their registrations.

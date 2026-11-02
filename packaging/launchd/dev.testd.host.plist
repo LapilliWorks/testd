@@ -20,9 +20,5 @@
 	</dict>
 	<key>ProcessType</key>
 	<string>Interactive</string>
-	<key>StandardOutPath</key>
-	<string>/tmp/testd.host.log</string>
-	<key>StandardErrorPath</key>
-	<string>/tmp/testd.host.err</string>
 </dict>
 </plist>

@@ -1,8 +1,9 @@
 #!/bin/sh
 # testd-hosts-helper: manages a block in /etc/hosts for testd domains.
 #
-# Intended to run via sudo with a NOPASSWD sudoers rule. Validates all
-# input strictly so it's safe to grant passwordless execution.
+# Intended to run via sudo with a NOPASSWD sudoers rule. Root invocations are
+# restricted to /etc/hosts, so the rule cannot be used as a general root file
+# writer.
 #
 # Usage: sudo testd-hosts-helper --tld <tld> [--hosts-path /etc/hosts]
 # Stdin: one JSON-quoted domain per line (NDJSON), e.g. "myapp.test"
@@ -47,6 +48,19 @@ echo "$TLD" | grep -qxE '[a-z0-9]{1,10}' || die "invalid tld: $TLD"
 
 # Hosts path: must be an existing regular file.
 [ -f "$HOSTS_PATH" ] || die "hosts file not found: $HOSTS_PATH"
+
+# A passwordless root invocation may only touch the real hosts file. Other
+# paths are accepted only when the helper is run unprivileged (tests, manual
+# use), where the caller already owns the target.
+if [ "$(id -u)" -eq 0 ]; then
+	[ "$HOSTS_PATH" = "/etc/hosts" ] || die "--hosts-path is restricted to /etc/hosts when run as root"
+	# The passwordless rule is for testd's zones, not for rewriting DNS for
+	# arbitrary domains. `testdcheck` is the disposable release-test zone.
+	case "$TLD" in
+		test|testdcheck) ;;
+		*) die "TLD is restricted to test or testdcheck when run as root" ;;
+	esac
+fi
 
 # -- Read and validate domains from stdin --------------------------------------
 

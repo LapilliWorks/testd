@@ -371,7 +371,7 @@ Run each in every browser you support: Chrome, Firefox, Safari, Edge.
 
 1. `https://app.example.test` loads with no certificate interstitial or bypass. The leaf is issued by `testd intermediate`, chains to `testd root`, carries `app.example.test` in its SAN, and expires within 24 hours.
 2. Wait for the leaf to be re-minted, or restart the daemon: a reload still shows a valid certificate with a newer validity window. When the browser suite started the host, use the page's restart button.
-3. The local dashboard opens at `http://127.0.0.1:7737/` and lists the live name. `testd.test` is not a special name on the edge.
+3. The tray opens the authenticated dashboard URL, or `testd dashboard` prints it. The page lists the live name. `testd.test` is not a special name on the edge.
 4. WebSocket: a dev server using HMR websockets connects over `wss` and survives 60 seconds idle.
 5. SSE and a 100 MB upload complete without a truncated response.
 6. Cookies: two names in one project (`app.example.test`, `api.example.test`) share a cookie set on `.example.test`, exactly as `app.example.com` and `api.example.com` would.

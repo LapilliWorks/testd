@@ -62,6 +62,8 @@ testd host            # run the daemon
 testd run :3000       # register the current directory, forever
 ```
 
+`testd dashboard` prints the authenticated local dashboard URL.
+
 `testd run` also wraps a process:
 
 ```sh
@@ -90,7 +92,7 @@ The local dashboard's **Access** card does the same. The tray posts a notificati
 
 A name the token does not cover raises its own request the first time the leaf publishes it. The dashboard's **Access** card shows the requested names, and approving adds that one name to the leaf's grant without touching its other names.
 
-`testd run` accepts `--host`, `--hosts`, and `TESTD_HOSTS` for a one-off list, and reads `[profiles.<name>]` from `~/.config/testd/leaf.toml` for a named one. The host infers the proxy target from the client's connection IP and the port you passed.
+`testd run` accepts `--host`, `--hosts`, and `TESTD_HOSTS` for a one-off list, and reads `[profiles.<name>]` from `~/.config/testd/leaf.toml` for a named one. The host infers the proxy target from the client's connection IP and the port you passed. A remote leaf may only target its own address by default; set `[host] allow_remote_targets = true` to permit an explicit different host.
 
 For unattended clients that cannot wait for an approval, `testd init` also writes an operator secret into `[host] secret`. Present it as `TESTD_TOKEN` on the leaf:
 
@@ -102,7 +104,7 @@ That secret admits registrations directly. Issued tokens are the per-leaf path t
 
 ## Dashboard
 
-The daemon serves its dashboard on the loopback listener, at `http://127.0.0.1:7737/`, with no TLS and no sign-in: the page is reachable only from this machine, and the tray's **Open dashboard** item points at it. It is not proxied by the edge and needs no credential.
+The daemon serves its dashboard on the loopback listener, at `http://127.0.0.1:7737/`, with no TLS. The tray's **Open dashboard** item and `testd dashboard` include a per-run token in the URL fragment; the token is required for dashboard actions and the `/api/local/*` endpoints. A bare URL shows the read-only page but cannot mutate state. The dashboard is not proxied by the edge.
 
 It lists live names with two actions, active shares with a stop button, access requests with approve and deny buttons, issued tokens with a revoke button, the **Quick launches** table, and the certificate actions. On a name, **stop** ends the leaf but keeps its grants, so the next run publishes the names again; **delete** (after a confirmation) deletes the grant for that one name, so the leaf stops publishing it and must ask for a grant next time. A name published with the operator secret or by a local quick launch has no issued grant to delete, so it offers only **stop**; a quick launch is deleted from its own card. `/api/status` is the machine-readable form of the names and shares:
 
@@ -202,6 +204,8 @@ Useful `[host]` keys:
 | `resolver` | `dns` | `dns` (built-in server) or `hosts` (single-node only) |
 | `listen_addr` | `0.0.0.0:7737` | Dev-environment intake |
 | `edge_addr` | `0.0.0.0:443` | HTTPS edge; use a high port if the binary lacks `CAP_NET_BIND_SERVICE` |
+| `allow_remote_targets` | `false` | Permit a remote leaf to name a target other than its own address |
+| `trust_forwarded_for` | `false` | Trust `X-Forwarded-For` from a configured front proxy |
 
 Client state lives in `~/.config/testd/leaf.toml`. It contains node profiles, never credentials:
 

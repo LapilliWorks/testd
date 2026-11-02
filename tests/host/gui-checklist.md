@@ -62,7 +62,7 @@ run at a time; the instance lock must reject a second tray or headless host.
 - [ ] Click the domain: the default browser opens `https://app.example.test` and
       the dev server responds.
 - [ ] Stop `testd run`; the domain disappears from the tray.
-- [ ] "Open dashboard" opens `http://127.0.0.1:7737/` in the browser.
+- [ ] "Open dashboard" opens the authenticated dashboard URL in the browser.
 - [ ] Dashboard shows the same domains, shares, and quick launches as the CLI.
 - [ ] Quit from the tray exits the process, removes `control.json`, releases the instance lock, and stops the DNS and HTTPS listeners. The lock file may remain; another instance can acquire it.
 - [ ] Launch a second instance while the first runs: the second must not start a

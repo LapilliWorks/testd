@@ -10,6 +10,9 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 - `tests/release/macos-resolver-probe.sh` snapshots, configures, checks, removes, and restores a macOS `/etc/resolver` route with evidence kept on disk
 - `tests/release/system_state.py --self-test` snapshots, installs a fixture, restores, and verifies the real resolver and trust artifacts on a disposable host; CI runs it on Linux, macOS, and Windows
 - Gated `host-system` CI job for the full privileged host suite, enabled per dispatch or with the `TESTD_CI_HOST_SYSTEM` repository variable
+- `testd dashboard` prints the authenticated loopback dashboard URL; tray and CLI links carry the per-run dashboard token
+- `[host] allow_remote_targets` and `[host] trust_forwarded_for` opt-ins for explicit remote targets and a trusted front proxy
+- Bounded edge connections, per-source connection limits, a TLS handshake timeout, and a bounded on-demand certificate cache
 
 ### Changed
 
@@ -42,6 +45,12 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 - Windows supervisor test fixtures use noninteractive sleep instead of timeout, which exits with redirected stdin
 - Edge tests allow delayed Windows connection refusal while keeping the 502 and 504 assertions distinct
 - Explicit, documented exceptions for the three informational zbus merger advisories; vulnerability checks remain enforced
+- Dashboard mutations and `/api/local/*` now require the per-run control token; a bare dashboard page is read-only
+- The HTTPS edge only mints certificates for registered names and the `testd` dashboard name, not arbitrary SNI values
+- Remote leaves can only target their own address unless `[host] allow_remote_targets` is enabled; client-supplied `X-Forwarded-For` is ignored unless a front proxy is explicitly trusted
+- Root CA installation no longer stages the certificate in a user-writable temp file; Windows embeds the audited helper source instead of writing a mutable script
+- The hosts helper only writes `/etc/hosts` when run as root, and `init` merges host config instead of replacing user settings; uninstall keeps local state when system cleanup fails
+- Secret files use `0600` from creation and `O_NOFOLLOW`; tailscale share shutdown preserves unrelated serve handlers
 
 ## [0.1.0] - 2026-11-01
 

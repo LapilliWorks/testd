@@ -85,6 +85,8 @@ enum Command {
 	},
 	/// Run the host daemon in headless mode.
 	Host,
+	/// Print the authenticated URL for the local dashboard.
+	Dashboard,
 	/// Handle a testd:// action URL, as delivered by an OS URL-scheme handler.
 	Url {
 		/// testd://fix/resolver or testd://fix/certificate.
@@ -225,6 +227,7 @@ async fn main() -> anyhow::Result<()> {
 			testd_client::deregister(&domains, config).await
 		},
 		Command::Host => host::run().await,
+		Command::Dashboard => dashboard(),
 		Command::Url { url } => url_action(&url),
 		Command::Doctor { fix, json } => {
 			let code = doctor(fix, json).await?;
@@ -240,6 +243,16 @@ async fn main() -> anyhow::Result<()> {
 			uninstall(purge, keep_resolver, keep_certificate)
 		},
 		Command::SetupHostsHelper { prefix } => setup_hosts_helper(prefix),
+	}
+}
+
+fn dashboard() -> anyhow::Result<()> {
+	match control::dashboard_url()? {
+		Some(url) => {
+			println!("{url}");
+			Ok(())
+		},
+		None => anyhow::bail!("{NO_DAEMON}"),
 	}
 }
 
@@ -296,7 +309,7 @@ fn certificate_summary(pem: &str) -> String {
 }
 
 async fn init(caddyfile: Option<String>, yes: bool, resolver_now: bool) -> anyhow::Result<()> {
-	use testd_core::config::write_config_force;
+	use testd_core::config::write_config_update;
 
 	let existing = read_existing();
 	let has_config = testd_core::config::config_exists();
@@ -372,7 +385,7 @@ async fn init(caddyfile: Option<String>, yes: bool, resolver_now: bool) -> anyho
 		Some(secret) => secret,
 		None => testd_core::config::generate_operator_secret()?,
 	};
-	let path = write_config_force(&caddy_config_path, Some(&secret))?;
+	let path = write_config_update(&caddy_config_path, Some(&secret))?;
 	eprintln!("config written to {}", path.display());
 
 	// The operator secret is the bootstrap credential. Re-running keeps it.
@@ -1101,12 +1114,14 @@ fn uninstall(purge: bool, keep_resolver: bool, keep_certificate: bool) -> anyhow
 		remove_trusted_root(config.as_ref(), &mut errors);
 	}
 
-	if let Some(config) = &config {
-		remove_hosts_helper(config, &mut errors);
-	}
+	remove_hosts_helper(config.as_ref(), &mut errors);
 
 	if purge {
-		remove_local_data(&mut errors);
+		if errors.is_empty() {
+			remove_local_data(&mut errors);
+		} else {
+			eprintln!("local data kept because system cleanup failed; fix the errors and run again");
+		}
 	}
 
 	if !errors.is_empty() {
@@ -1135,8 +1150,23 @@ fn remove_trusted_root(config: Option<&testd_core::config::HostConfig>, errors: 
 			}
 		},
 		Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-			eprintln!("no root certificate at {}; nothing to remove", path.display());
-			removed = true;
+			// Linux and macOS can remove their known anchors without the local
+			// certificate. Windows needs it to derive the thumbprint.
+			#[cfg(not(target_os = "windows"))]
+			{
+				match testd_setup::untrust_root("") {
+					Ok(()) => {
+						eprintln!("no root certificate at {}; removed the known anchors", path.display());
+						removed = true;
+					},
+					Err(e) => errors.push(format!("certificate: {e}")),
+				}
+			}
+			#[cfg(target_os = "windows")]
+			errors.push(format!(
+				"certificate: {} is missing; cannot identify the trusted root thumbprint, so trust was not removed",
+				path.display()
+			));
 		},
 		Err(e) => errors.push(format!("certificate: read {}: {e}", path.display())),
 	}
@@ -1149,14 +1179,11 @@ fn remove_trusted_root(config: Option<&testd_core::config::HostConfig>, errors: 
 	}
 }
 
-fn remove_hosts_helper(config: &testd_core::config::HostConfig, errors: &mut Vec<String>) {
+fn remove_hosts_helper(config: Option<&testd_core::config::HostConfig>, errors: &mut Vec<String>) {
 	use std::process::Command;
 
-	if !matches!(config.resolver, testd_core::config::ResolverBackend::Hosts) {
-		return;
-	}
-
-	let helper = &config.hosts_helper_path;
+	let default_helper = std::path::PathBuf::from("/usr/local/libexec/testd-hosts-helper");
+	let helper = config.map(|config| &config.hosts_helper_path).unwrap_or(&default_helper);
 	if helper.exists() {
 		eprintln!("removing the hosts helper {}", helper.display());
 		match Command::new("sudo").args(["rm", "-f"]).arg(helper).status() {
@@ -1229,7 +1256,12 @@ fn setup_hosts_helper(prefix: std::path::PathBuf) -> anyhow::Result<()> {
 	}
 
 	// Install sudoers drop-in.
-	let user = std::env::var("USER").or_else(|_| std::env::var("LOGNAME"))?;
+	let user = std::env::var("SUDO_USER")
+		.or_else(|_| std::env::var("USER"))
+		.or_else(|_| std::env::var("LOGNAME"))?;
+	if user.is_empty() || !user.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
+		anyhow::bail!("refusing to write a sudoers rule for an invalid user name: {user:?}");
+	}
 	let sudoers_line = format!("{user} ALL=(root) NOPASSWD: {}\n", helper_path.display());
 	let sudoers_path = "/etc/sudoers.d/testd-hosts-helper";
 
