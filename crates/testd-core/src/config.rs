@@ -85,6 +85,13 @@ pub struct HostConfig {
 	/// The operator secret a client presents to register names.
 	#[serde(default)]
 	pub secret: String,
+	/// Allow a remote leaf to register a target other than its own address.
+	#[serde(default)]
+	pub allow_remote_targets: bool,
+	/// Trust an inbound X-Forwarded-For from a front proxy. Disabled by default
+	/// because any client can supply that header directly.
+	#[serde(default)]
+	pub trust_forwarded_for: bool,
 }
 
 impl HostConfig {
@@ -277,6 +284,37 @@ mod tests {
 	}
 
 	#[test]
+	fn updating_a_config_preserves_user_settings() {
+		let table: toml::Table = toml::from_str(
+			"[host]\nlisten_addr = \"127.0.0.1:7737\"\nedge_addr = \"127.0.0.1:8443\"\nresolver = \"hosts\"\nsecret = \"old\"\n",
+		)
+		.unwrap();
+		let merged = merge_host_config(table, "/tmp/Caddyfile", Some("new")).unwrap();
+		let host = merged["host"].as_table().unwrap();
+		assert_eq!(host["listen_addr"].as_str(), Some("127.0.0.1:7737"));
+		assert_eq!(host["edge_addr"].as_str(), Some("127.0.0.1:8443"));
+		assert_eq!(host["resolver"].as_str(), Some("hosts"));
+		assert_eq!(host["caddy_config_path"].as_str(), Some("/tmp/Caddyfile"));
+		assert_eq!(host["secret"].as_str(), Some("new"));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn private_files_are_repaired_to_mode_0600() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let dir = std::env::temp_dir().join(format!("testd-private-{}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("secret");
+		std::fs::write(&path, b"stale").unwrap();
+		std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+		write_private(&path, b"secret").unwrap();
+		let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+		assert_eq!(mode, 0o600);
+		std::fs::remove_dir_all(&dir).ok();
+	}
+
+	#[test]
 	fn config_template_escapes_windows_paths() {
 		let caddyfile = r"C:\Users\me\AppData\Roaming\caddy\Caddyfile";
 		let rendered = render_config(caddyfile, Some("s3cret"));
@@ -293,7 +331,7 @@ mod tests {
 	}
 }
 
-/// Write a host config file, replacing an existing one. Used by idempotent `init`.
+/// Write a host config file, replacing an existing one. Used for a fresh setup.
 pub fn write_config_force(caddy_config_path: &str, secret: Option<&str>) -> io::Result<PathBuf> {
 	let dir = config_dir();
 	std::fs::create_dir_all(&dir)?;
@@ -302,6 +340,45 @@ pub fn write_config_force(caddy_config_path: &str, secret: Option<&str>) -> io::
 	let content = render_config(caddy_config_path, secret);
 	write_private(&path, content.as_bytes())?;
 	Ok(path)
+}
+
+/// Update the host settings `init` owns without discarding the user's other
+/// settings or unknown keys.
+pub fn write_config_update(caddy_config_path: &str, secret: Option<&str>) -> io::Result<PathBuf> {
+	let path = config_path();
+	if !path.exists() {
+		return write_config_force(caddy_config_path, secret);
+	}
+	let text = std::fs::read_to_string(&path)?;
+	let table: toml::Table = toml::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+	let host = table.get("host").and_then(|host| host.as_table());
+	let caddy_same = host
+		.and_then(|host| host.get("caddy_config_path"))
+		.and_then(|value| value.as_str())
+		== Some(caddy_config_path);
+	let secret_same =
+		secret.is_none() || host.and_then(|host| host.get("secret")).and_then(|value| value.as_str()) == secret;
+	if caddy_same && secret_same {
+		// Reuse the exact bytes so comments survive, but repair the mode.
+		write_private(&path, text.as_bytes())?;
+		return Ok(path);
+	}
+	let table = merge_host_config(table, caddy_config_path, secret)?;
+	let content = toml::to_string_pretty(&table).map_err(io::Error::other)?;
+	write_private(&path, content.as_bytes())?;
+	Ok(path)
+}
+
+fn merge_host_config(mut table: toml::Table, caddy_config_path: &str, secret: Option<&str>) -> io::Result<toml::Table> {
+	let host = table.entry("host").or_insert_with(|| toml::Value::Table(toml::Table::new()));
+	let toml::Value::Table(host) = host else {
+		return Err(io::Error::new(io::ErrorKind::InvalidData, "[host] is not a table"));
+	};
+	host.insert("caddy_config_path".to_owned(), toml::Value::String(caddy_config_path.to_owned()));
+	if let Some(secret) = secret {
+		host.insert("secret".to_owned(), toml::Value::String(secret.to_owned()));
+	}
+	Ok(table)
 }
 
 /// Path of the leaf node-profile file.
@@ -403,14 +480,17 @@ pub fn write_private(path: &Path, content: &[u8]) -> io::Result<()> {
 	#[cfg(unix)]
 	{
 		use std::io::Write;
-		use std::os::unix::fs::OpenOptionsExt;
+		use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 		let mut file = std::fs::OpenOptions::new()
 			.write(true)
 			.create(true)
 			.truncate(true)
 			.mode(0o600)
+			.custom_flags(libc::O_NOFOLLOW)
 			.open(path)?;
+		// `mode` applies only when the file is created; repair older files too.
+		file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
 		file.write_all(content)?;
 		file.sync_all()?;
 	}

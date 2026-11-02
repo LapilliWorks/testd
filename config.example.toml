@@ -19,6 +19,15 @@ caddy_config_path = "{caddy_config_path}"
 # Local CA and host intermediate directories.
 # pki_dir = "~/.config/testd/pki"
 
+# Allow a leaf on another machine to register a target other than its own
+# address. Disabled by default: an issued token is otherwise limited to the
+# address the leaf connected from, not an arbitrary host or loopback service.
+# allow_remote_targets = false
+
+# Trust the X-Forwarded-For header from a configured front proxy. Leave this
+# off for the built-in edge; clients can otherwise spoof their source address.
+# trust_forwarded_for = false
+
 # The operator secret: the bootstrap credential for this machine and for
 # unattended clients that present it as TESTD_TOKEN. Leaves normally request
 # their own token on first run and an operator approves it; those tokens live

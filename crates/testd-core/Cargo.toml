@@ -12,3 +12,4 @@ tokio = { workspace = true }
 toml = { workspace = true }
 getrandom = { workspace = true, features = ["std"] }
 covo = { workspace = true }
+libc = "0.2"
