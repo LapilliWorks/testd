@@ -255,9 +255,13 @@ else
 fi
 
 printf '\n== configure ==\n'
-log_command "$BIN" doctor --fix >"$backup/configure.log" 2>&1 || true
-configure_code=0
-grep -q '"exit_code": 0' "$backup/configure.log" || configure_code=1
+printf '$ %q %q\n' "$BIN" 'doctor --fix --json' >"$backup/configure.log"
+set +e
+"$BIN" doctor --fix --json >>"$backup/configure.log" 2>&1
+configure_status=$?
+set -e
+printf 'exit %s\n' "$configure_status" >>"$backup/configure.log"
+if [ "$configure_status" -eq 0 ]; then configure_code=pass; else configure_code=fail; fi
 if route_present; then configure_file=pass; else configure_file=fail; fi
 if [ "$HOST_READY" -eq 1 ]; then
 	if wait_for resolves_to_host 10; then configure_resolution=pass; else configure_resolution=fail; fi
@@ -282,7 +286,7 @@ snapshot restored
 printf '\n== probe ==\n'
 printf 'configure file:         %s\n' "$configure_file"
 printf 'configure resolution:   %s\n' "$configure_resolution"
-printf 'configure exit_code 0:  %s\n' "$configure_code"
+printf 'configure doctor exit:  %s\n' "$configure_code"
 printf 'unconfigure file:       %s\n' "$unconfigure_file"
 printf 'unconfigure resolution: %s\n' "$unconfigure_resolution"
 printf 'restored:               %s\n' "$restored"
