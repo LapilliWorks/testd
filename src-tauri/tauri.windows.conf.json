@@ -1,8 +1,8 @@
 {
 	"$schema": "https://schema.tauri.app/config/2",
+	"mainBinaryName": "testd-gui",
 	"bundle": {
 		"targets": ["nsis"],
-		"mainBinaryName": "testd-gui",
 		"windows": {
 			"nsis": {
 				"installMode": "currentUser"
