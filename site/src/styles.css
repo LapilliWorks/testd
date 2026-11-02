@@ -1581,14 +1581,19 @@ h3 {
 	color: var(--paper);
 }
 
-.studio-mark {
-	width: 15px;
-	height: 15px;
-	fill: currentColor;
+.studio-wordmark {
+	display: block;
+	width: auto;
+	height: 24px;
 }
 
-.studio-mark path:nth-child(2) {
-	fill: var(--lava);
+.studio span {
+	font-family: var(--font-sans);
+	font-size: 0.9rem;
+	font-weight: 600;
+	letter-spacing: -0.02em;
+	text-transform: none;
+	color: inherit;
 }
 
 /* ---------- motion ---------- */
