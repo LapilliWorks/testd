@@ -43,7 +43,6 @@ impl DnsResolver {
 			}
 		});
 
-		eprintln!("DNS server listening on {listen_addr}");
 		Ok(Self { tld: tld.to_owned(), domains, listen_addr, answer_addr, elevation })
 	}
 

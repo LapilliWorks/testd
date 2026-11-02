@@ -640,7 +640,25 @@ async fn doctor(fix: bool, json: bool) -> anyhow::Result<i32> {
 			ResolverBackend::Dns => std::net::IpAddr::V4(config.answer_addr),
 			ResolverBackend::Hosts => std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
 		};
-		let resolved = resolve_via_os(&dashboard);
+		let mut resolved = resolve_via_os(&dashboard);
+		// The route can be correct while the host is not running yet. Answer the
+		// dashboard name from a one-shot server so this checks the OS route
+		// instead of requiring `testd host`. `None` means the port is taken,
+		// usually by the running host.
+		let mut probe = None;
+		let mut probe_error = None;
+		if matches!(config.resolver, ResolverBackend::Dns)
+			&& !matches!(&resolved, Some(addrs) if addrs.contains(&expected))
+		{
+			match start_resolution_probe(&config.tld, config.answer_addr).await {
+				Ok(Some(server)) => {
+					probe = Some(server);
+					resolved = resolve_via_os_until(&dashboard, expected, std::time::Duration::from_secs(2)).await;
+				},
+				Ok(None) => {},
+				Err(error) => probe_error = Some(error),
+			}
+		}
 		// A route can exist while mDNSResponder or systemd-resolved still answers
 		// from a stale cache. Rewriting the route also refreshes that cache.
 		let resolved = if fix
@@ -648,12 +666,13 @@ async fn doctor(fix: bool, json: bool) -> anyhow::Result<i32> {
 			&& !matches!(&resolved, Some(addrs) if addrs.contains(&expected))
 		{
 			match testd_setup::setup_os_resolver(&config.tld, dns_addr) {
-				Ok(()) => resolve_via_os(&dashboard),
+				Ok(()) => resolve_via_os_until(&dashboard, expected, std::time::Duration::from_secs(5)).await,
 				Err(_) => resolved,
 			}
 		} else {
 			resolved
 		};
+		drop(probe);
 		match resolved {
 			Some(addrs) if addrs.contains(&expected) => {
 				checks.push(Check::ok("resolution", format!("{dashboard} resolves to {expected}")));
@@ -668,11 +687,11 @@ async fn doctor(fix: bool, json: bool) -> anyhow::Result<i32> {
 			},
 			None => {
 				exit = exit.max(2);
-				checks.push(Check::fail(
-					"resolution",
-					format!("{dashboard} does not resolve"),
-					"run `testd doctor --fix`",
-				));
+				let detail = match probe_error {
+					Some(error) => format!("{dashboard} does not resolve (resolution probe failed: {error})"),
+					None => format!("{dashboard} does not resolve"),
+				};
+				checks.push(Check::fail("resolution", detail, "run `testd doctor --fix`"));
 			},
 		}
 	}
@@ -803,6 +822,40 @@ fn resolve_via_os(name: &str) -> Option<Vec<std::net::IpAddr>> {
 	addrs.sort();
 	addrs.dedup();
 	(!addrs.is_empty()).then_some(addrs)
+}
+
+/// Start a temporary DNS server for the resolution check. Returns `None` when
+/// the DNS port is already in use, which usually means the host owns it.
+async fn start_resolution_probe(
+	tld: &str,
+	answer_addr: std::net::Ipv4Addr,
+) -> std::io::Result<Option<testd_daemon::resolver::dns::DnsResolver>> {
+	use testd_daemon::resolver::Resolver as _;
+
+	match testd_daemon::resolver::dns::DnsResolver::start(tld, answer_addr, Elevation::Sudo).await {
+		Ok(probe) => {
+			probe.apply(&[])?;
+			Ok(Some(probe))
+		},
+		Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => Ok(None),
+		Err(error) => Err(error),
+	}
+}
+
+/// Poll the OS resolver until it returns `expected` or the timeout elapses.
+async fn resolve_via_os_until(
+	name: &str,
+	expected: std::net::IpAddr,
+	timeout: std::time::Duration,
+) -> Option<Vec<std::net::IpAddr>> {
+	let deadline = tokio::time::Instant::now() + timeout;
+	loop {
+		let resolved = resolve_via_os(name);
+		if matches!(&resolved, Some(addrs) if addrs.contains(&expected)) || tokio::time::Instant::now() >= deadline {
+			return resolved;
+		}
+		tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+	}
 }
 
 fn addrs_display(addrs: &[std::net::IpAddr]) -> String {

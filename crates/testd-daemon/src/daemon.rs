@@ -68,6 +68,7 @@ impl Daemon {
 				let dns = DnsResolver::start(&config.tld, config.answer_addr, elevation)
 					.await
 					.map_err(|e| format!("failed to start the DNS server on 127.0.0.1:{DEFAULT_DNS_PORT}: {e}"))?;
+				eprintln!("DNS server listening on {}", dns.listen_addr());
 				Arc::new(dns)
 			},
 			ResolverBackend::Hosts => {
