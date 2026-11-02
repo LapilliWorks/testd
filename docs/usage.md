@@ -43,7 +43,7 @@ Use two labels or more. `app.example.test` and `api.example.test` share a regist
 
 Labels may contain ASCII letters, digits, and hyphens, and may not start or end with a hyphen. Each label is at most 63 bytes, and the full name at most 253 bytes. Targets are a bare port, `host:port`, `ip:port`, or `[ipv6]:port`; port 0 and malformed names are rejected.
 
-The edge speaks HTTP/1.1 and handles WebSocket upgrades, so HMR connections work. The app receives the original `Host` header plus `X-Forwarded-For` and `X-Forwarded-Proto`. The host-to-app hop is plain HTTP.
+The resolver answers registered names with the host's address, not the app target's. The edge speaks HTTP/1.1 and handles WebSocket upgrades, so HMR connections work. The app receives the original `Host` header plus `X-Forwarded-For` and `X-Forwarded-Proto`. The host-to-app hop is plain HTTP.
 
 ## How long a name lives
 
@@ -81,7 +81,7 @@ Use it only when you intend to take over the name. Without it, a duplicate name 
 testd dashboard
 ```
 
-The command prints `http://127.0.0.1:7737/#token=...`. The token is in the fragment, so it does not travel in the HTTP request; the page sends it in the `X-Testd-Token` header for actions. A bare `http://127.0.0.1:7737/` renders the page read-only and cannot change state.
+The command prints `http://127.0.0.1:7737/#token=...`. The token is in the fragment, so it does not travel in the HTTP request; the page sends it in the `X-Testd-Token` header for actions. A bare `http://127.0.0.1:7737/` renders the page read-only and cannot change state. There is no user login; the per-run token is the only authority.
 
 The dashboard shows:
 
@@ -111,7 +111,7 @@ testd doctor --json
 testd doctor --fix
 ```
 
-`doctor` checks configuration, the operator secret, the resolver route, name resolution, PKI validity, root trust, optional Caddy wiring, and the edge. The exit codes are stable:
+`doctor` checks configuration, the operator secret, the resolver route, name resolution, optional Caddy wiring, and the edge. When the built-in TLS edge is enabled it also checks PKI validity and root trust; with `edge_enabled = false`, the external front owns TLS trust. The exit codes are stable:
 
 | Code | Meaning |
 |---|---|
@@ -139,7 +139,7 @@ testd share --stop app.example
 |---|---|---|
 | `cloudflared` | Public internet | `cloudflared` on `PATH`; no account for a quick tunnel |
 | `ngrok` | Public internet | `ngrok` on `PATH`; run `ngrok config add-authtoken` once |
-| `tailscale` | Your tailnet | `tailscale` on `PATH` and the built-in edge |
+| `tailscale` | Your tailnet | `tailscale` on `PATH`; uses the plain edge listener |
 
 The daemon owns the tunnel, not the CLI process, so closing the terminal does not close the share. The share ends when the name ends, and `testd share` says the name is gone rather than leaving a stale URL. The dashboard's Shares card and the tray menu provide the same controls.
 
@@ -147,7 +147,7 @@ A public share is a public route to the app. A tailnet share is only as private 
 
 ## Access requests and tokens
 
-A leaf with no credential for the selected profile asks for access:
+A leaf with no credential for the selected profile asks for access, naming the names it wants:
 
 ```sh
 testd run --host 192.168.1.5 :3000
@@ -161,7 +161,7 @@ testd approve <id>
 testd deny <id>
 ```
 
-`requests` lists the request id, leaf label, requested names, source address, and age. A request waits up to two minutes. A denied or expired request ends that leaf attempt; run it again to ask again. The dashboard's Access card and the tray notification provide the same decisions.
+`requests` lists the request id, leaf label, requested names, source address, and age. The label is supplied by the leaf, for example `user@host`. A request waits up to two minutes. A denied or expired request ends that leaf attempt; run it again to ask again. The dashboard's Access card and the tray notification provide the same decisions.
 
 A token covers exact names. If a leaf publishes a name outside its grant, the host queues a request for that one name and keeps the registration waiting. Approving adds the name to the existing token without touching its other names.
 
@@ -172,7 +172,7 @@ testd tokens
 testd tokens --revoke <id>
 ```
 
-The list shows the token id, label, granted names, issue age, and last use. Secrets are never printed. Revoking closes every connection using that token, releases its names, and makes the leaf forget its stored credential. Run the leaf again to request access.
+A token can be used by more than one connection; those connections share its grants. The list shows the token id, label, granted names, issue age, and last use. Secrets are never printed. Revoking closes every connection using that token, releases its names, and makes the leaf forget its stored credential. Run the leaf again to request access.
 
 For unattended clients, the operator secret can be presented as `TESTD_TOKEN`:
 

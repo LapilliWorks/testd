@@ -84,7 +84,7 @@ For CI, obtain a token once interactively, then store `~/.config/testd/credentia
 
 ## Grants and lifecycle
 
-A token is durable permission. A grant is the token's list of exact names. A claim is a live registration on a connection. The connection is the lease.
+A token is durable permission. A grant is the token's list of exact names. A claim is a live registration on a connection. The connection is the lease. A token is the key, its grants are the doors it may open, and a claim is a door currently held open.
 
 | Event | Token | Grant | Claim | Leaf |
 |---|---|---|---|---|
@@ -95,7 +95,7 @@ A token is durable permission. A grant is the token's list of exact names. A cla
 | Network drop | Kept | Kept | Released when noticed | Reconnects and re-registers |
 | Host reset | Gone | Gone | Gone | Stored credential rejected; remove it and run again |
 
-A name outside a token's grant does not fail the registration outright. The host queues a request for that one name and holds the registration until the operator decides. Approving adds the name to the existing token. Deleting one name removes only that name.
+A name outside a token's grant does not fail the registration outright. The host queues a request for that one name and holds the registration until the operator decides. Approving adds the name to the existing token. Deleting one name removes only that name. If a revoked token was supplied through `TESTD_TOKEN`, unset or replace the variable before running again; the leaf cannot clear it for you.
 
 Quick launches and the operator secret are not issued grants. Names published that way have no per-leaf grant to delete, so the dashboard offers only Stop for them.
 
@@ -119,11 +119,11 @@ Running state is not persisted. Definitions live in `~/.config/testd/launches.js
 |---|---|---|---|
 | `cloudflared` | Public internet | Any reachable target | Provider output |
 | `ngrok` | Public internet | Any reachable target | Provider output |
-| `tailscale` | Tailnet | The built-in edge | `tailscale status --json` |
+| `tailscale` | Tailnet | The plain edge listener | `tailscale status --json` |
 
 `cloudflared` uses a quick tunnel and needs no account. `ngrok` needs `ngrok config add-authtoken` once.
 
-`tailscale serve --bg` cannot proxy a container or LAN address directly. `testd` points it at the host's plain edge listener and registers the tailnet name as an alias there, so the edge proxies to the real target. This requires the built-in edge; with `edge_enabled = false`, the share fails with an explanatory error. If `tailscale serve` already has configuration on port 443, `testd` refuses to overwrite it.
+`tailscale serve --bg` cannot proxy a container or LAN address directly. `testd` points it at the host's plain edge listener and registers the tailnet name as an alias there, so the edge proxies to the real target. This needs the plain HTTP routing listener, which runs with or without the built-in TLS edge. If `tailscale serve` already has configuration on port 443, `testd` refuses to overwrite it.
 
 A `serve --bg` entry survives a daemon restart while the alias does not. On startup, `testd` clears any serve entry whose root handler points at its own edge and leaves every other entry alone.
 
@@ -154,11 +154,11 @@ http_addr = '127.0.0.1:7740'
 trust_forwarded_for = false
 ```
 
-The plain listener is part of the edge. Keep `edge_enabled = true` and move `edge_addr` if an external front must own 443. With `edge_enabled = false`, the plain listener does not start.
+The plain listener always runs. `edge_enabled` controls only the built-in TLS listener. Set `edge_enabled = false` when an external front owns 443; keep it true and move `edge_addr` if both the built-in edge and the front run. If the front runs in a container or another network namespace, bind `http_addr` to an address it can reach.
 
 `testd init` detects a Caddy install and offers to add an import to the global Caddyfile. `testd export-caddyfile` writes the managed Caddyfile and prints the import line. `testd doctor` checks the import and reloads Caddy when a global config is configured; `--fix` adds a missing import.
 
-The generated Caddyfile terminates TLS with Caddy's internal CA and proxies to `http_addr`. Browsers trust that CA, not the testd root. `trust_forwarded_for` must stay off unless a front you control sets the header; otherwise a client can spoof its source address.
+The generated Caddyfile terminates TLS with Caddy's internal CA and proxies to `http_addr`. Browsers trust that CA, not the testd root. With `edge_enabled = false`, `doctor` skips the testd PKI and root checks and requires the external front's certificate to be trusted by the system. `trust_forwarded_for` must stay off unless a front you control sets the header; otherwise a client can spoof its source address.
 
 ## Hosts resolver
 
@@ -245,6 +245,15 @@ The token is an issued token from the CI profile or the operator secret. Prefer 
 `testd run` exits with the child's status; a registration failure stops the child and exits non-zero. `testd doctor --json` provides stable exit codes and check objects for scripts.
 
 Do not put secrets in `.testd.toml`, command lines, or logs. `TESTD_TOKEN` is visible to the same user's process inspection on most systems.
+
+## Design notes
+
+- One host is the authority. DNS, TLS, the registry, and approvals live on the browser machine. There is no central service, account system, cross-host mesh, or public DNS dependency.
+- The connection is the lease. A claim lives exactly as long as the TCP connection that created it, so a crash or lost network releases the name without a cleanup job.
+- The token is durable permission. Re-approving a leaf on every run would be annoying, so tokens and grants persist across reconnects and can be revoked later.
+- Grants are per name. A token covers exact names, not a project wildcard or everything a machine can reach.
+- Registration is plain NDJSON over TCP. It is small and easy to debug, and it delegates transport security to a trusted network, VPN, or another encrypted link.
+- The CA is local. A root installed once per browser machine plus short-lived leaf certificates gives private HTTPS without per-project certificate files.
 
 ## Clean up
 

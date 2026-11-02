@@ -2,6 +2,22 @@
 
 This is the shortest path from a clean machine to a working HTTPS name. It assumes the host is the machine with the browser; the project can run on the same machine or on a remote dev box.
 
+```text
+browser
+  │ DNS: app.example.test → the host
+  ▼
+host machine
+  ├─ DNS for *.test
+  ├─ HTTPS edge on :443
+  └─ reverse proxy → app target
+                         ▲
+                         │ plain TCP control connection
+leaf (VM, container, WSL, remote box)
+  └─ testd run, bearer token
+```
+
+The browser never connects to the leaf. It resolves the name to the host, the host terminates TLS, and the host proxies to the target. The leaf keeps one outbound TCP connection open and registers names on it; the connection is the lifetime of those names.
+
 ## 1. Install
 
 From the repository:
@@ -40,7 +56,8 @@ The daemon owns the listeners:
 | Listener | Default | Purpose |
 |---|---|---|
 | TCP | `0.0.0.0:7737` | Leaf intake; the dashboard answers on `127.0.0.1:7737` |
-| TCP | `0.0.0.0:443` | HTTPS edge for registered names |
+| TCP | `0.0.0.0:443` | HTTPS edge for registered names, when `edge_enabled` is true |
+| TCP | `127.0.0.1:7740` | Plain HTTP routing for an external front |
 | UDP | `127.0.0.1:7753` | DNS for `.test` on Linux and macOS |
 | UDP | `127.0.0.1:53` | DNS for `.test` on Windows |
 

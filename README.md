@@ -145,9 +145,9 @@ The daemon owns the tunnel, not the CLI process, so closing the terminal does no
 |---|---|---|---|
 | `cloudflared` | public internet | anything the host reaches | quick tunnel; no account needed |
 | `ngrok` | public internet | anything the host reaches | needs `ngrok config add-authtoken` once |
-| `tailscale` | your tailnet | anything the host reaches | `tailscale serve` points at the built-in edge, which answers the tailnet name |
+| `tailscale` | your tailnet | anything the host reaches | `tailscale serve` points at the plain edge listener, which answers the tailnet name |
 
-`tailscale serve` cannot proxy a container or LAN address directly, so `testd` points it at the host's plain edge listener instead and registers the tailnet name as an alias there. The edge then proxies to the real target, and the app sees the name it was registered under, exactly as a browser request would. This needs the built-in edge (`edge_enabled = true`, the default).
+`tailscale serve` cannot proxy a container or LAN address directly, so `testd` points it at the host's plain edge listener instead and registers the tailnet name as an alias there. The edge then proxies to the real target, and the app sees the name it was registered under, exactly as a browser request would. This needs the plain HTTP routing listener; it works with the built-in TLS edge on or off.
 
 `serve --bg` keeps its config across restarts while the alias does not, so a host that stopped mid-share would leave the tailnet URL answering 404. On start, `testd` clears any serve entry whose root handler points at its own edge and leaves every other serve entry alone.
 

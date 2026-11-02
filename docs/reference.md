@@ -1,5 +1,21 @@
 # Reference
 
+## Concepts
+
+| Term | Meaning |
+|---|---|
+| Host | The browser machine. It runs the daemon and owns DNS, the HTTPS edge, the local CA, and the token store |
+| Node | The CLI's word for a host daemon address; a node profile is a named list of addresses. No cluster or mesh |
+| Leaf | A dev environment that runs `testd run`, connects outbound, registers names, and serves the app |
+| Operator | The human on the host who approves requests and manages tokens |
+| Claim or registration | A live name-to-target mapping owned by one leaf connection |
+| Token | A bearer credential issued by the host and persisted on both sides |
+| Grant | The exact names a token may publish |
+| Operator secret | The bootstrap credential that can register any valid name and is not an issued token |
+| Profile | A named configuration; node profiles choose hosts, token profiles choose credentials |
+
+A token and its grants are durable permission. A claim is an ephemeral route tied to a connection. A token is the key, its grants are the doors it may open, and a claim is a door currently held open by a leaf.
+
 ## Command line
 
 ```text
@@ -195,9 +211,9 @@ Path: `~/.config/testd/config.toml`; on Windows, `%APPDATA%\testd\config.toml`. 
 |---|---|---|
 | `resolver` | `dns` | `dns` for the built-in server or `hosts` for a managed hosts block |
 | `listen_addr` | `0.0.0.0:7737` | Leaf intake |
-| `edge_addr` | `0.0.0.0:443` | HTTPS edge |
-| `edge_enabled` | `true` | Start the built-in TLS edge and its plain listener |
-| `http_addr` | `127.0.0.1:7740` | Plain HTTP routing for an external front |
+| `edge_addr` | `0.0.0.0:443` | HTTPS edge when `edge_enabled` is true |
+| `edge_enabled` | `true` | Start the built-in TLS listener; the plain listener always runs |
+| `http_addr` | `127.0.0.1:7740` | Plain HTTP routing for an external front; always on |
 | `answer_addr` | `127.0.0.1` | A-record address returned for registered names |
 | `allow_remote_targets` | `false` | Permit a remote leaf to name a target other than its own address |
 | `trust_forwarded_for` | `false` | Trust inbound `X-Forwarded-For` from a configured front |
@@ -264,8 +280,8 @@ The host's token store is the source of truth. A leaf's credential file is a cop
 |---|---|---|---|
 | Leaf intake | `0.0.0.0:7737` | `listen_addr` | Plain TCP, bearer token |
 | Dashboard | `127.0.0.1:7737` | follows `listen_addr` port | Loopback only |
-| HTTPS edge | `0.0.0.0:443` | `edge_addr` | Needs privilege on Linux |
-| Plain HTTP routing | `127.0.0.1:7740` | `http_addr` | Part of the edge |
+| HTTPS edge | `0.0.0.0:443` | `edge_addr` | Only when `edge_enabled`; needs privilege on Linux |
+| Plain HTTP routing | `127.0.0.1:7740` | `http_addr` | Always on; used by external fronts |
 | DNS | `127.0.0.1:7753` | fixed | Linux and macOS |
 | DNS | `127.0.0.1:53` | fixed | Windows |
 
@@ -355,7 +371,7 @@ All `/api/local/*` paths require the token even for `GET`. The dashboard and API
 | `ngrok` | Public | `ngrok http <target>` | `https://*.ngrok-free.app`, `*.ngrok-free.dev`, `*.ngrok.io`, `*.ngrok.app` |
 | `tailscale` | Tailnet | `tailscale serve --bg http://<edge plain address>` | `https://*.ts.net` |
 
-A provider has 30 seconds to report its URL. `tailscale` requires the built-in edge and refuses to overwrite existing `serve` configuration on port 443. One share per registered name.
+A provider has 30 seconds to report its URL. `tailscale` requires the plain HTTP routing listener and refuses to overwrite existing `serve` configuration on port 443. One share per registered name.
 
 ## Platform notes
 
@@ -373,8 +389,8 @@ A provider has 30 seconds to report its URL. `tailscale` requires the built-in e
 | Operator secret set | `doctor` check `secret` |
 | Resolver route | `doctor` check `resolver` |
 | Name resolves through the OS | `doctor` check `resolution` |
-| PKI can issue a leaf | `doctor` check `pki` |
-| Root trusted | `doctor` check `certificate` |
+| PKI can issue a leaf | `doctor` check `pki`, with the built-in edge enabled |
+| Root trusted | `doctor` check `certificate`, with the built-in edge enabled |
 | Edge listening and trusted | `doctor` check `edge` |
 | Optional Caddy wiring | `doctor` checks `caddy`, `caddyfile`, `reload` |
 | Live names and targets | `curl http://127.0.0.1:7737/api/status` |

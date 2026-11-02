@@ -121,7 +121,7 @@ These are robustness limits, not authentication. Network exposure still needs a 
 
 The tray app registers the `testd://` scheme in release builds. The scheme accepts `fix/resolver` and `fix/certificate`; `testd url` forwards them to the running daemon or performs the repair directly. There is no general command channel over the scheme.
 
-The loopback control channel accepts typed commands authenticated by the per-run token in `control.json`: repairs, share start and stop, request decisions, and token revocation. It is not reachable off the machine.
+The loopback control channel accepts typed commands authenticated by the per-run token in `control.json`: repairs, share start and stop, request decisions, and token revocation. It is not reachable off the machine. The token has no name scope, is accepted only by the daemon that wrote it, and does not appear in the token store.
 
 The root-managed systemd unit grants only `CAP_NET_BIND_SERVICE` and keeps `NoNewPrivileges=yes`. The user unit cannot acquire a file capability, so it must use a high edge port. Keep that separation rather than running the daemon as root.
 
@@ -142,3 +142,4 @@ The root-managed systemd unit grants only `CAP_NET_BIND_SERVICE` and keeps `NoNe
 - No vendor SDK for tunnels; providers are spawned processes
 - No remote administration API
 - No guarantee of isolation between projects that share a host or a token profile
+- No name that outlives its leaf connection or target; a sleeping laptop or stopped server takes its names with it
