@@ -268,6 +268,12 @@ class SystemStateTests(unittest.TestCase):
 			self.assertIn('+ $Tld', script, 'NRPT namespaces must stay scoped to the TLD')
 		self.assertIn('testd root', windows)
 
+	def test_self_test_fixture_uses_a_dedicated_root_name(self):
+		self.assertEqual(state.FIXTURE_KEYCHAIN_NAME, 'testd root testing')
+		windows = (ROOT / 'tests/release/windows-system-fixture.ps1').read_text()
+		self.assertIn("CN=testd root testing", windows)
+		self.assertIn('CN=testd root testing', (ROOT / 'tests/release/windows-system-state.ps1').read_text())
+
 	def test_linux_restore_returns_the_exact_previous_bytes(self):
 		with tempfile.TemporaryDirectory() as temporary:
 			host = FakeHost()

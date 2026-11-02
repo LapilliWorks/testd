@@ -3,13 +3,14 @@
 #
 # Actions:
 #   Snapshot  Record the NRPT rules for .<Tld> and the machine-root certificates
-#             named "testd root". Changes nothing, but needs elevation so a
+#             named "testd root" or "testd root testing". Changes nothing, but
+#             needs elevation so a
 #             partial read cannot become a manifest that removes unseen rules.
 #   Restore   Remove what the suite added, put back what it removed, then verify.
 #   Verify    Compare the machine against the snapshot; throw on any difference.
 #
-# Every rule and certificate is name-scoped (.testdcheck and the testd root name),
-# so nothing outside the throwaway TLD or the testd name is touched.
+# Every rule and certificate is name-scoped (.testdcheck and the testd root names),
+# so nothing outside the throwaway TLD or the testd names is touched.
 
 [CmdletBinding()]
 param(
@@ -34,7 +35,7 @@ $ConfirmPreference = 'None'
 
 if ($Tld -notmatch '^[a-z0-9]{1,10}$') { throw "invalid TLD" }
 $Namespace = '.' + $Tld
-$RootName = 'CN=testd root'
+$RootNames = @('CN=testd root', 'CN=testd root testing')
 $NrptFile = Join-Path $Destination 'nrpt.json'
 $RootDirectory = Join-Path $Destination 'roots'
 # Add-DnsClientNrptRule switches that carry a snapshot property, split by type.
@@ -85,7 +86,7 @@ function Get-RootCertificates {
 	$store = [System.Security.Cryptography.X509Certificates.X509Store]::new($name, $location)
 	$store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
 	try {
-		@($store.Certificates | Where-Object { $_.Subject -eq $RootName })
+		@($store.Certificates | Where-Object { $RootNames -contains $_.Subject })
 	} finally {
 		$store.Close()
 	}

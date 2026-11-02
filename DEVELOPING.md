@@ -282,8 +282,8 @@ artifact `doctor --fix` can change in `<report>/system-before/`:
 |---|---|---|
 | Linux (Debian, Ubuntu) | `/etc/systemd/resolved.conf.d/90-testd.conf`, `/usr/local/share/ca-certificates/testd-root.crt` | `systemctl reload systemd-resolved`, `update-ca-certificates` |
 | Linux (Fedora, RHEL) | `/etc/systemd/resolved.conf.d/90-testd.conf`, `/etc/pki/ca-trust/source/anchors/testd-root.crt` | `systemctl reload systemd-resolved`, `update-ca-trust extract` |
-| macOS | `/etc/resolver/<tld>`, every `CN=testd root` in the System keychain | keychain operations are per SHA-1 |
-| Windows | NRPT rules for `.<tld>`, every `CN=testd root` in the machine root store | per thumbprint |
+| macOS | `/etc/resolver/<tld>`, every `CN=testd root` and `CN=testd root testing` in the System keychain | keychain operations are per SHA-1 |
+| Windows | NRPT rules for `.<tld>`, every `CN=testd root` and `CN=testd root testing` in the machine root store | per thumbprint |
 
 The manifest records file bytes, modes, SHA-256 digests, and every pre-existing
 store entry. Restore puts back what the suite removed, removes what it added,

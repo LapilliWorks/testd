@@ -3,7 +3,7 @@
 #
 # The self-test needs a machine that differs from its snapshot; this is the
 # smallest change with the same shape as the real one: an NRPT rule scoped to
-# the throwaway TLD and a machine-root certificate named "testd root".
+# the throwaway TLD and a machine-root certificate named "testd root testing".
 # `windows-system-state.ps1 -Action Restore` must then remove both.
 
 [CmdletBinding()]
@@ -27,7 +27,7 @@ if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrat
 	throw 'The restore self-test needs an elevated shell'
 }
 
-$certificate = New-SelfSignedCertificate -Subject 'CN=testd root' `
+$certificate = New-SelfSignedCertificate -Subject 'CN=testd root testing' `
 	-CertStoreLocation 'Cert:\LocalMachine\Root' -NotAfter (Get-Date).AddDays(1) `
 	-KeyExportPolicy Exportable
 Add-DnsClientNrptRule -Namespace ('.' + $Tld) -NameServers '127.0.0.1' | Out-Null

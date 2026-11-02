@@ -3,8 +3,8 @@
 The host suite assumes no testd daemon is running while it holds this state, and
 that the pre-run integration comes back afterwards. Every artifact `doctor --fix`
 writes is either a plain file or a store entry scoped to the throwaway TLD or to
-the `testd root` name, so a byte-exact backup plus a manifest restores a host
-exactly. Restores are idempotent, so a report can be restored again after a hard
+the `testd root` and `testd root testing` names, so a byte-exact backup plus a
+manifest restores a host exactly. Restores are idempotent, so a report can be restored again after a hard
 kill.
 
 Unix files and the macOS keychain are handled here. Windows NRPT rules and the
@@ -30,7 +30,8 @@ MANIFEST = 'manifest.json'
 BLOBS = 'blobs'
 RESTORED = 'restored.json'
 KEYCHAIN = '/Library/Keychains/System.keychain'
-KEYCHAIN_NAME = 'testd root'
+KEYCHAIN_NAMES = ('testd root', 'testd root testing')
+FIXTURE_KEYCHAIN_NAME = 'testd root testing'
 WINDOWS_SCRIPT = pathlib.Path(__file__).resolve().with_name('windows-system-state.ps1')
 WINDOWS_FIXTURE = pathlib.Path(__file__).resolve().with_name('windows-system-fixture.ps1')
 SELF_TEST_TLD = 'testdrestore'
@@ -169,12 +170,16 @@ def decode_pem(text):
 
 
 def keychain_certificates(host):
-	"""Map SHA-1 to DER for every `testd root` in the macOS system keychain."""
-	command = ['security', 'find-certificate', '-a', '-c', KEYCHAIN_NAME, '-p', KEYCHAIN]
+	"""Map SHA-1 to DER for every testd root in the macOS system keychain."""
 	if not host.exists(KEYCHAIN):
 		return {}
-	text = host.command(command, privileged=True)
-	return {hashlib.sha1(der).hexdigest(): der for der in decode_pem(text)}
+	certificates = {}
+	for name in KEYCHAIN_NAMES:
+		command = ['security', 'find-certificate', '-a', '-c', name, '-p', KEYCHAIN]
+		text = host.command(command, privileged=True)
+		for der in decode_pem(text):
+			certificates[hashlib.sha1(der).hexdigest()] = der
+	return certificates
 
 
 def snapshot(host, directory, artifacts=None):
@@ -386,7 +391,7 @@ def install_fixture(host, directory, workdir):
 	certificate = pathlib.Path(workdir) / 'fixture.pem'
 	try:
 		host.command(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
-			'-subj', f'/CN={KEYCHAIN_NAME}', '-keyout', str(pathlib.Path(workdir) / 'fixture.key'),
+			'-subj', f'/CN={FIXTURE_KEYCHAIN_NAME}', '-keyout', str(pathlib.Path(workdir) / 'fixture.key'),
 			'-out', str(certificate)])
 	except HostError as error:
 		return [f'openssl cannot build the fixture certificate: {error}']
