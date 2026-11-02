@@ -148,8 +148,9 @@ impl Daemon {
 		let engine = Arc::new(engine);
 
 		let edge = if config.edge_enabled {
-			let context = Arc::new(EdgeContext::new(tld.clone(), engine.registrations()));
-			Some(edge::start(context, Some(config.edge_addr), config.http_addr, &config.pki_dir)?)
+			let mut context = EdgeContext::new(tld.clone(), engine.registrations());
+			context.trust_forwarded_for = config.trust_forwarded_for;
+			Some(edge::start(Arc::new(context), Some(config.edge_addr), config.http_addr, &config.pki_dir)?)
 		} else {
 			None
 		};
@@ -185,6 +186,13 @@ impl Daemon {
 	/// The TLD this host serves.
 	pub fn tld(&self) -> &str {
 		&self.tld
+	}
+
+	/// Authenticated dashboard URL, including the per-run control token.
+	pub fn dashboard_url(&self) -> Result<String, String> {
+		crate::control::dashboard_url()
+			.map_err(|e| e.to_string())?
+			.ok_or_else(|| "the control channel is unavailable".to_owned())
 	}
 
 	/// Run the engine. Blocks until the listener fails.

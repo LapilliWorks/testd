@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,18 +21,24 @@ use hyper::body::{Bytes, Incoming};
 use hyper::header::{CONNECTION, CONTENT_TYPE, HOST, HeaderMap, HeaderName, HeaderValue, UPGRADE};
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode, Version};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 
 use testd_pki::Ca;
 
-use crate::registry::Registry;
+use crate::engine::Registrations;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type Body = BoxBody<Bytes, BoxError>;
+
+/// Bounds for the edge. The intake listener has its own connection cap.
+const MAX_EDGE_CONNECTIONS: usize = 512;
+const MAX_EDGE_CONNECTIONS_PER_IP: usize = 64;
+const MAX_CERT_CACHE: usize = 1024;
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Renew a cached leaf when 25% of its validity remains, i.e. after 75% of the
 /// leaf lifetime. For the default 24-hour leaf that is 18 hours.
@@ -43,14 +49,16 @@ pub fn leaf_renewal_after() -> Duration {
 /// Shared state for the edge and the plain router.
 pub struct EdgeContext {
 	pub tld: String,
-	pub registrations: Arc<AsyncMutex<Registry>>,
+	pub registrations: Registrations,
 	/// Connection and response-header timeout for an upstream.
 	pub upstream_timeout: Duration,
+	/// Trust an inbound X-Forwarded-For from a configured front proxy.
+	pub trust_forwarded_for: bool,
 }
 
 impl EdgeContext {
-	pub fn new(tld: impl Into<String>, registrations: Arc<AsyncMutex<Registry>>) -> Self {
-		Self { tld: tld.into(), registrations, upstream_timeout: Duration::from_secs(30) }
+	pub fn new(tld: impl Into<String>, registrations: Registrations) -> Self {
+		Self { tld: tld.into(), registrations, upstream_timeout: Duration::from_secs(30), trust_forwarded_for: false }
 	}
 }
 
@@ -59,6 +67,54 @@ pub struct Edge {
 	pub tls_addr: SocketAddr,
 	pub http_addr: SocketAddr,
 	tasks: Vec<JoinHandle<()>>,
+}
+
+/// Limits both the total number of edge connections and the number from one
+/// source, so a LAN client cannot exhaust the daemon by opening handshakes.
+struct ConnectionLimiter {
+	inner: Mutex<LimiterState>,
+	max_total: usize,
+	max_per_ip: usize,
+}
+
+#[derive(Default)]
+struct LimiterState {
+	total: usize,
+	per_ip: HashMap<IpAddr, usize>,
+}
+
+struct ConnectionPermit {
+	limiter: Arc<ConnectionLimiter>,
+	ip: IpAddr,
+}
+
+impl ConnectionLimiter {
+	fn new(max_total: usize, max_per_ip: usize) -> Self {
+		Self { inner: Mutex::new(LimiterState::default()), max_total, max_per_ip }
+	}
+
+	fn acquire(self: &Arc<Self>, ip: IpAddr) -> Option<ConnectionPermit> {
+		let mut state = self.inner.lock().expect("edge connection limiter poisoned");
+		if state.total >= self.max_total || state.per_ip.get(&ip).copied().unwrap_or(0) >= self.max_per_ip {
+			return None;
+		}
+		state.total += 1;
+		*state.per_ip.entry(ip).or_default() += 1;
+		Some(ConnectionPermit { limiter: Arc::clone(self), ip })
+	}
+}
+
+impl Drop for ConnectionPermit {
+	fn drop(&mut self) {
+		let mut state = self.limiter.inner.lock().expect("edge connection limiter poisoned");
+		state.total = state.total.saturating_sub(1);
+		if let Some(count) = state.per_ip.get_mut(&self.ip) {
+			*count = count.saturating_sub(1);
+			if *count == 0 {
+				state.per_ip.remove(&self.ip);
+			}
+		}
+	}
 }
 
 impl Drop for Edge {
@@ -77,14 +133,16 @@ pub fn start(
 	pki_dir: &std::path::Path,
 ) -> Result<Edge> {
 	let mut tasks = Vec::new();
+	let limiter = Arc::new(ConnectionLimiter::new(MAX_EDGE_CONNECTIONS, MAX_EDGE_CONNECTIONS_PER_IP));
 
 	let plain = std::net::TcpListener::bind(http_addr).context("bind the plain edge listener")?;
 	plain.set_nonblocking(true)?;
 	let plain = TcpListener::from_std(plain)?;
 	let http_addr = plain.local_addr()?;
 	let plain_ctx = ctx.clone();
+	let plain_limiter = Arc::clone(&limiter);
 	tasks.push(tokio::spawn(async move {
-		if let Err(e) = accept_loop(plain, PlainHandler { ctx: plain_ctx }).await {
+		if let Err(e) = accept_loop(plain, PlainHandler { ctx: plain_ctx }, plain_limiter).await {
 			eprintln!("[error] plain edge: {e}");
 		}
 	}));
@@ -101,7 +159,7 @@ pub fn start(
 			let actual = listener.local_addr()?;
 
 			let ca = Arc::new(Ca::load_or_init(pki_dir).context("initialize the local CA")?);
-			let resolver = Arc::new(CertStore::new(ca, ctx.tld.clone()));
+			let resolver = Arc::new(CertStore::new(ca, ctx.tld.clone(), ctx.registrations.clone()));
 			let mut config = rustls::ServerConfig::builder()
 				.with_no_client_auth()
 				.with_cert_resolver(resolver);
@@ -109,8 +167,9 @@ pub fn start(
 			let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
 
 			let tls_ctx = ctx.clone();
+			let tls_limiter = Arc::clone(&limiter);
 			tasks.push(tokio::spawn(async move {
-				if let Err(e) = tls_accept_loop(listener, acceptor, tls_ctx).await {
+				if let Err(e) = tls_accept_loop(listener, acceptor, tls_ctx, tls_limiter).await {
 					eprintln!("[error] HTTPS edge: {e}");
 				}
 			}));
@@ -127,6 +186,8 @@ pub fn start(
 struct CertStore {
 	ca: Arc<Ca>,
 	tld: String,
+	registrations: Registrations,
+	dashboard_name: String,
 	cache_for: Duration,
 	cache: Mutex<HashMap<String, (Arc<rustls::sign::CertifiedKey>, Instant)>>,
 }
@@ -138,16 +199,22 @@ impl std::fmt::Debug for CertStore {
 }
 
 impl CertStore {
-	fn new(ca: Arc<Ca>, tld: String) -> Self {
-		Self::with_cache_duration(ca, tld, leaf_renewal_after())
+	fn new(ca: Arc<Ca>, tld: String, registrations: Registrations) -> Self {
+		Self::with_cache_duration(ca, tld, leaf_renewal_after(), registrations)
 	}
 
-	fn with_cache_duration(ca: Arc<Ca>, tld: String, cache_for: Duration) -> Self {
-		Self { ca, tld, cache_for, cache: Mutex::new(HashMap::new()) }
+	fn with_cache_duration(ca: Arc<Ca>, tld: String, cache_for: Duration, registrations: Registrations) -> Self {
+		let dashboard_name = format!("testd.{tld}");
+		Self { ca, tld, dashboard_name, registrations, cache_for, cache: Mutex::new(HashMap::new()) }
 	}
 
 	fn mint(&self, name: &str) -> Option<Arc<rustls::sign::CertifiedKey>> {
 		if !name.ends_with(&format!(".{}", self.tld)) {
+			return None;
+		}
+		let registered =
+			name == self.dashboard_name || self.registrations.try_lock().is_ok_and(|registry| registry.contains(name));
+		if !registered {
 			return None;
 		}
 		let mut cache = self.cache.lock().unwrap();
@@ -155,6 +222,14 @@ impl CertStore {
 			&& minted.elapsed() < self.cache_for
 		{
 			return Some(key.clone());
+		}
+		if cache.len() >= MAX_CERT_CACHE {
+			cache.retain(|_, (_, minted)| minted.elapsed() < self.cache_for);
+		}
+		if cache.len() >= MAX_CERT_CACHE
+			&& let Some(key) = cache.keys().next().cloned()
+		{
+			cache.remove(&key);
 		}
 		match self.ca.certified_key(name) {
 			Ok(key) => {
@@ -180,29 +255,41 @@ async fn tls_accept_loop(
 	listener: TcpListener,
 	acceptor: tokio_rustls::TlsAcceptor,
 	ctx: Arc<EdgeContext>,
+	limiter: Arc<ConnectionLimiter>,
 ) -> Result<()> {
 	loop {
 		let (stream, peer) = listener.accept().await?;
+		let Some(permit) = limiter.acquire(peer.ip()) else {
+			eprintln!("[warn]   edge connection limit reached: {}", peer.ip());
+			continue;
+		};
 		let acceptor = acceptor.clone();
 		let ctx = ctx.clone();
 		tokio::spawn(async move {
-			match acceptor.accept(stream).await {
-				Ok(tls) => {
+			let _permit = permit;
+			match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+				Ok(Ok(tls)) => {
 					if let Err(e) = serve_connection(tls, Handler { ctx, scheme: "https", plain: false, peer }).await {
 						eprintln!("[warn]   tls {}: {e}", peer.ip());
 					}
 				},
-				Err(e) => eprintln!("[warn]   tls handshake from {}: {e}", peer.ip()),
+				Ok(Err(e)) => eprintln!("[warn]   tls handshake from {}: {e}", peer.ip()),
+				Err(_) => eprintln!("[warn]   tls handshake from {} timed out", peer.ip()),
 			}
 		});
 	}
 }
 
-async fn accept_loop(listener: TcpListener, handler: PlainHandler) -> Result<()> {
+async fn accept_loop(listener: TcpListener, handler: PlainHandler, limiter: Arc<ConnectionLimiter>) -> Result<()> {
 	loop {
 		let (stream, peer) = listener.accept().await?;
+		let Some(permit) = limiter.acquire(peer.ip()) else {
+			eprintln!("[warn]   edge connection limit reached: {}", peer.ip());
+			continue;
+		};
 		let handler = handler.clone();
 		tokio::spawn(async move {
+			let _permit = permit;
 			if let Err(e) = serve_connection(stream, handler.into_handler(peer)).await {
 				eprintln!("[warn]   http {}: {e}", peer.ip());
 			}
@@ -237,11 +324,12 @@ where
 		let handler = handler.clone();
 		async move { Ok::<_, Infallible>(handle(handler, request).await) }
 	});
-	hyper::server::conn::http1::Builder::new()
+	let mut builder = hyper::server::conn::http1::Builder::new();
+	builder
 		.keep_alive(true)
-		.serve_connection(TokioIo::new(io), service)
-		.with_upgrades()
-		.await?;
+		.timer(TokioTimer::new())
+		.header_read_timeout(HEADER_READ_TIMEOUT);
+	builder.serve_connection(TokioIo::new(io), service).with_upgrades().await?;
 	Ok(())
 }
 
@@ -273,7 +361,7 @@ async fn handle(handler: Handler, request: Request<Incoming>) -> Response<Body> 
 
 /// On-demand TLS permission endpoint for an external front such as Caddy.
 fn ask(ctx: &EdgeContext, host: &str) -> Response<Body> {
-	let known = {
+	let known = host == format!("testd.{}", ctx.tld) || {
 		let registry = ctx.registrations.try_lock();
 		registry.as_ref().is_ok_and(|registry| registry.contains(host))
 	};
@@ -292,9 +380,14 @@ async fn proxy(handler: Handler, request: Request<Incoming>, host: &str, target:
 		.unwrap_or_else(|| "/".to_owned());
 
 	let mut headers = filter_request_headers(&parts.headers, client_upgrade.is_some());
+	if !handler.ctx.trust_forwarded_for {
+		headers.remove("forwarded");
+		headers.remove("x-forwarded-for");
+	}
 	let forwarded = match headers.get("x-forwarded-for").and_then(|value| value.to_str().ok()) {
-		Some(existing) => format!("{existing}, {}", handler.peer.ip()),
-		None => handler.peer.ip().to_string(),
+		// Only a configured front proxy may supply the client address.
+		Some(existing) if handler.ctx.trust_forwarded_for => format!("{existing}, {}", handler.peer.ip()),
+		_ => handler.peer.ip().to_string(),
 	};
 	if let Ok(value) = HeaderValue::from_str(&forwarded) {
 		headers.insert("x-forwarded-for", value);
@@ -502,6 +595,7 @@ pub fn caddyfile(tld: &str, http_addr: SocketAddr) -> String {
 mod tests {
 	use super::*;
 	use std::path::PathBuf;
+	use tokio::sync::Mutex as AsyncMutex;
 
 	fn temp_dir() -> PathBuf {
 		static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -514,6 +608,20 @@ mod tests {
 		dir
 	}
 
+	fn registrations_with(name: &str) -> Registrations {
+		let mut registry = crate::registry::Registry::default();
+		let connection = registry.connection_id();
+		registry
+			.register(
+				connection,
+				testd_core::Registration { domain: name.into(), target: "127.0.0.1:3000".into() },
+				false,
+				&[],
+			)
+			.unwrap();
+		Arc::new(AsyncMutex::new(registry))
+	}
+
 	#[test]
 	fn renewal_happens_when_a_quarter_of_the_leaf_lifetime_remains() {
 		assert_eq!(leaf_renewal_after(), Duration::from_secs(18 * 3600));
@@ -523,7 +631,12 @@ mod tests {
 	fn a_cached_leaf_is_reused_until_its_renewal_threshold() {
 		let dir = temp_dir();
 		let ca = Arc::new(Ca::load_or_init(&dir).unwrap());
-		let store = CertStore::with_cache_duration(ca.clone(), "test".into(), Duration::from_secs(3600));
+		let store = CertStore::with_cache_duration(
+			ca.clone(),
+			"test".into(),
+			Duration::from_secs(3600),
+			registrations_with("app.test"),
+		);
 		let first = store.mint("app.test").unwrap();
 		let second = store.mint("app.test").unwrap();
 		assert_eq!(first.cert[0].as_ref(), second.cert[0].as_ref());
@@ -551,10 +664,27 @@ mod tests {
 	fn an_expired_cache_entry_is_minted_again() {
 		let dir = temp_dir();
 		let ca = Arc::new(Ca::load_or_init(&dir).unwrap());
-		let store = CertStore::with_cache_duration(ca, "test".into(), Duration::ZERO);
+		let store = CertStore::with_cache_duration(ca, "test".into(), Duration::ZERO, registrations_with("app.test"));
 		let first = store.mint("app.test").unwrap();
 		let second = store.mint("app.test").unwrap();
 		assert_ne!(first.cert[0].as_ref(), second.cert[0].as_ref());
+		std::fs::remove_dir_all(&dir).ok();
+	}
+
+	#[test]
+	fn only_registered_names_and_the_dashboard_get_certificates() {
+		let dir = temp_dir();
+		let ca = Arc::new(Ca::load_or_init(&dir).unwrap());
+		let store = CertStore::with_cache_duration(
+			ca,
+			"test".into(),
+			Duration::from_secs(3600),
+			registrations_with("app.test"),
+		);
+		assert!(store.mint("app.test").is_some());
+		assert!(store.mint("testd.test").is_some());
+		assert!(store.mint("unknown.test").is_none());
+		assert!(store.mint("app.example").is_none());
 		std::fs::remove_dir_all(&dir).ok();
 	}
 }

@@ -25,6 +25,8 @@ const DASHBOARD_TEMPLATE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/dash
 pub struct HttpContext {
 	pub tld: String,
 	pub pki_dir: PathBuf,
+	/// Per-run token for the dashboard. Mutations and API reads require it.
+	pub local_token: Option<String>,
 	pub registrations: crate::engine::Registrations,
 	/// Live connections, to tell a name's grant from a bare registration.
 	pub connections: Arc<Connections>,
@@ -46,6 +48,7 @@ const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// A custom header cannot be sent by a cross-site form and forces a CORS
 /// preflight, which this server does not grant.
 const REQUEST_HEADER: &str = "x-testd-request";
+const TOKEN_HEADER: &str = "x-testd-token";
 
 pub async fn handle(stream: PeekedStream, ctx: &HttpContext, peer: SocketAddr) -> io::Result<()> {
 	if !peer.ip().is_loopback() {
@@ -101,6 +104,10 @@ where
 		return respond(&mut writer, "403 Forbidden", "text/plain", b"A dashboard request header is required.").await;
 	}
 
+	if requires_dashboard_auth(&method, &path) && !authorized(&headers, ctx.local_token.as_deref()) {
+		return respond(&mut writer, "401 Unauthorized", "text/plain", b"A dashboard token is required.").await;
+	}
+
 	let body = if method == "POST" {
 		tokio::time::timeout(REQUEST_TIMEOUT, read_body(&mut reader, &headers))
 			.await
@@ -147,6 +154,23 @@ async fn read_http_line<R: tokio::io::AsyncBufRead + Unpin>(
 		.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "HTTP headers timed out"))??;
 	line.map(|bytes| String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)))
 		.transpose()
+}
+
+fn requires_dashboard_auth(method: &str, path: &str) -> bool {
+	method == "POST" || path.starts_with("/api/local/")
+}
+
+fn authorized(headers: &[(String, String)], expected: Option<&str>) -> bool {
+	let Some(expected) = expected.filter(|token| !token.is_empty()) else { return false };
+	let Some(actual) = header_value(headers, TOKEN_HEADER) else { return false };
+	constant_time_eq(expected.as_bytes(), actual.as_bytes())
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+	if left.len() != right.len() {
+		return false;
+	}
+	left.iter().zip(right).fold(0u8, |difference, (a, b)| difference | (a ^ b)) == 0
 }
 
 fn is_loopback_host(host: Option<&str>) -> bool {
@@ -311,7 +335,9 @@ async fn respond_with<W: AsyncWriteExt + Unpin>(
 	extra: &[(&str, String)],
 ) -> io::Result<()> {
 	let mut header = format!(
-		"HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n",
+		"HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\
+		 X-Frame-Options: DENY\r\nX-Content-Type-Options: nosniff\r\n\
+		 Content-Security-Policy: frame-ancestors 'none'\r\n",
 		body.len()
 	);
 	for (name, value) in extra {

@@ -760,6 +760,9 @@
 
 <script>
 	const THEME_KEY = 'testd.theme';
+	const dashboardToken = (() => {
+		try { return new URLSearchParams(location.hash.slice(1)).get('token') || ''; } catch (e) { return ''; }
+	})();
 	const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
 
 	function storedTheme() {
@@ -797,9 +800,10 @@
 	applyTheme(storedTheme());
 
 	async function post(path, body) {
+		if (!dashboardToken) throw new Error('Open the dashboard from the tray or run `testd dashboard`.');
 		const response = await fetch(path, {
 			method: 'POST',
-			headers: { 'Content-Type': 'application/json', 'X-Testd-Request': '1' },
+			headers: { 'Content-Type': 'application/json', 'X-Testd-Request': '1', 'X-Testd-Token': dashboardToken },
 			body: JSON.stringify(body || {}),
 		});
 		let data = {};
@@ -809,7 +813,8 @@
 	}
 
 	async function getJson(path) {
-		const response = await fetch(path);
+		if (!dashboardToken) throw new Error('Open the dashboard from the tray or run `testd dashboard`.');
+		const response = await fetch(path, { headers: { 'X-Testd-Token': dashboardToken } });
 		if (!response.ok) throw new Error(response.statusText);
 		return response.json();
 	}
@@ -1215,11 +1220,19 @@
 		}
 	}
 
-	loadLaunches();
-	certificateState();
-	loadAccess();
-	setInterval(() => { if (!document.hidden) loadAccess(); }, 3000);
-	setInterval(() => { if (!document.hidden) loadLaunches(); }, 4000);
+	if (new URLSearchParams(location.hash.slice(1)).get('view') === 'launches') {
+		document.getElementById('launches')?.scrollIntoView();
+	}
+
+	if (dashboardToken) {
+		loadLaunches();
+		certificateState();
+		loadAccess();
+		setInterval(() => { if (!document.hidden) loadAccess(); }, 3000);
+		setInterval(() => { if (!document.hidden) loadLaunches(); }, 4000);
+	} else {
+		notice('Dashboard token missing. Open the URL from the tray or run `testd dashboard`.');
+	}
 </script>
 </body>
 </html>

@@ -294,7 +294,13 @@ pub fn start_daemon(
 	let daemon = Arc::new(rt.block_on(async { Daemon::new_gui().await })?);
 	enable_autostart_once(app);
 	let health = daemon.health();
-	let dashboard_url = daemon.engine.local_dashboard_url();
+	let dashboard_url = match daemon.dashboard_url() {
+		Ok(url) => url,
+		Err(e) => {
+			trace(&format!("dashboard token unavailable: {e}"));
+			daemon.engine.local_dashboard_url()
+		},
+	};
 	// A menu event runs on the app's main thread. Anything that calls back into
 	// the menu or the OS from there freezes the whole window, so clicks only post
 	// a message and the async loop does the work.
@@ -312,7 +318,11 @@ pub fn start_daemon(
 	let mut icon_state = IconState::current(health.healthy(), has_request);
 	let icon = tray_icon(icon_state)?;
 	let click_dashboard = dashboard_url.clone();
-	let launches_url = format!("{dashboard_url}#launches");
+	let launches_url = if dashboard_url.contains('#') {
+		format!("{dashboard_url}&view=launches")
+	} else {
+		format!("{dashboard_url}#view=launches")
+	};
 	let action_daemon = Arc::clone(&daemon);
 	let action_rt = rt.handle().clone();
 	let action_menu = action_tx.clone();

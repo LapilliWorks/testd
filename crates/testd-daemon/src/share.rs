@@ -359,6 +359,19 @@ impl Shares {
 			.context("the built-in edge is not running, so the provider has no local front")?
 			.clone();
 		let host = self.tailscale_host(binary).await?;
+		let upstream = format!("http://{}", front.plain_addr);
+		let status =
+			match run_briefly(binary, &["serve".to_owned(), "status".to_owned(), "--json".to_owned()], SWEEP_TIMEOUT)
+				.await
+			{
+				Ok(Some(output)) if output.status.success() => String::from_utf8_lossy(&output.stdout).into_owned(),
+				Ok(Some(output)) => bail!("tailscale serve status failed with {}", output.status),
+				Ok(None) => bail!("tailscale serve status timed out"),
+				Err(e) => bail!("could not inspect tailscale serve: {e}"),
+			};
+		if !can_take_over_443(&status, &upstream) {
+			bail!("tailscale serve already has configuration on :443; refusing to overwrite it");
+		}
 
 		front.registry.lock().await.set_alias(&host, target);
 		let args = Provider::Tailscale.start_args(&front.plain_addr.to_string());
@@ -456,8 +469,32 @@ impl Shares {
 			let _ = child.kill().await;
 			return;
 		}
-		let Some(args) = share.stop_args else { return };
+		if share.stop_args.is_none() {
+			return;
+		}
 		let binary = self.binary_for(share.provider);
+		if share.provider == Provider::Tailscale {
+			let Some(front) = &self.front else { return };
+			let upstream = format!("http://{}", front.plain_addr);
+			let status = match run_briefly(
+				&binary,
+				&["serve".to_owned(), "status".to_owned(), "--json".to_owned()],
+				SWEEP_TIMEOUT,
+			)
+			.await
+			{
+				Ok(Some(output)) if output.status.success() => String::from_utf8_lossy(&output.stdout).into_owned(),
+				_ => {
+					eprintln!("[warn]   could not inspect tailscale serve; leaving :443 alone");
+					return;
+				},
+			};
+			if !leftover_serves(&status, &upstream).contains(&443) {
+				eprintln!("[warn]   tailscale serve :443 has other handlers; leaving it in place");
+				return;
+			}
+		}
+		let args = share.stop_args.unwrap_or_default();
 		let result = run_with_retry(&binary, &args).await;
 		match result {
 			Ok(output) if output.status.success() => {},
@@ -480,14 +517,23 @@ pub fn status_host(status: &str) -> Option<String> {
 	if name.is_empty() { None } else { Some(name.to_owned()) }
 }
 
-/// Serve ports whose root handler proxies to `upstream`, from
-/// `tailscale serve status --json`.
+/// Serve ports whose entire handler set is our root handler. A port with any
+/// additional handler is not ours to turn off.
 fn leftover_serves(status: &str, upstream: &str) -> Vec<u16> {
 	let Ok(value) = serde_json::from_str::<serde_json::Value>(status) else { return Vec::new() };
 	let Some(web) = value.get("Web").and_then(|web| web.as_object()) else { return Vec::new() };
 	let mut ports: Vec<u16> = Vec::new();
 	for (host_port, entry) in web {
-		let proxy = entry.pointer("/Handlers/~1/Proxy").and_then(|proxy| proxy.as_str());
+		let Some(handlers) = entry.get("Handlers").and_then(|handlers| handlers.as_object()) else {
+			continue;
+		};
+		if handlers.len() != 1 {
+			continue;
+		}
+		let proxy = handlers
+			.get("/")
+			.and_then(|handler| handler.get("Proxy"))
+			.and_then(|proxy| proxy.as_str());
 		if proxy != Some(upstream) {
 			continue;
 		}
@@ -499,6 +545,26 @@ fn leftover_serves(status: &str, upstream: &str) -> Vec<u16> {
 	}
 	ports.sort_unstable();
 	ports
+}
+
+/// Whether starting a root handler on :443 would leave someone else's handlers
+/// in place to be removed by the next `serve --https=443 off`.
+fn can_take_over_443(status: &str, upstream: &str) -> bool {
+	let Ok(value) = serde_json::from_str::<serde_json::Value>(status) else { return false };
+	let Some(web) = value.get("Web").and_then(|web| web.as_object()) else { return true };
+	web.iter()
+		.filter(|(host_port, _)| host_port.ends_with(":443"))
+		.all(|(_, entry)| {
+			let Some(handlers) = entry.get("Handlers").and_then(|handlers| handlers.as_object()) else {
+				return false;
+			};
+			handlers.len() == 1
+				&& handlers
+					.get("/")
+					.and_then(|handler| handler.get("Proxy"))
+					.and_then(|proxy| proxy.as_str())
+					== Some(upstream)
+		})
 }
 
 /// How often a spawn is retried when the kernel reports the binary as busy.
@@ -598,6 +664,17 @@ mod tests {
 		assert!(leftover_serves(status, "http://127.0.0.1:7741").is_empty());
 		assert!(leftover_serves("", "http://127.0.0.1:7740").is_empty());
 		assert!(leftover_serves(r#"{"Web":{}}"#, "http://127.0.0.1:7740").is_empty());
+	}
+
+	#[test]
+	fn a_foreign_handler_on_443_blocks_the_share() {
+		let upstream = "http://127.0.0.1:7740";
+		let ours = r#"{"Web":{"node.tail.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:7740"}}}}}"#;
+		let foreign = r#"{"Web":{"node.tail.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:7740"},"/api":{"Proxy":"http://127.0.0.1:9000"}}}}}"#;
+		assert!(can_take_over_443(ours, upstream));
+		assert!(!can_take_over_443(foreign, upstream));
+		assert!(can_take_over_443(r#"{"Web":{}}"#, upstream));
+		assert_eq!(leftover_serves(foreign, upstream), Vec::<u16>::new());
 	}
 
 	#[test]

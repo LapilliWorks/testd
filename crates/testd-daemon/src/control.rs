@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader as TokioBufReader};
 use tokio::net::{TcpListener, TcpStream as TokioTcpStream};
 
-use testd_core::config::{ClientConfig, config_dir};
+use testd_core::config::{ClientConfig, config_dir, write_private};
 
 use crate::access::{Access, Approved, PendingView, TokenView};
 use crate::engine::Registrations;
@@ -163,6 +163,26 @@ pub enum ShareStarted {
 /// Location of the control file for this user.
 pub fn control_path() -> PathBuf {
 	config_dir().join(CONTROL_FILE)
+}
+
+/// Authenticated URL for the local dashboard, or `None` when no daemon wrote a
+/// control file. The token is a fragment: it is not sent in the HTTP request
+/// line or Referer header, and the dashboard reads it in the browser.
+pub fn dashboard_url() -> io::Result<Option<String>> {
+	dashboard_url_at(&control_path())
+}
+
+fn dashboard_url_at(path: &Path) -> io::Result<Option<String>> {
+	let data = match std::fs::read(path) {
+		Ok(data) => data,
+		Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+		Err(e) => return Err(e),
+	};
+	let control: ControlFile = serde_json::from_slice(&data).map_err(invalid_data)?;
+	let client = control
+		.client_addr
+		.ok_or_else(|| invalid_data("control file has no client address"))?;
+	Ok(Some(format!("http://{client}/#token={}", control.token)))
 }
 
 /// Local client credentials for GUI-supervised launches.
@@ -410,14 +430,10 @@ fn write_control_file(path: &Path, addr: SocketAddr, client_addr: SocketAddr, to
 		ControlFile { addr: addr.to_string(), token: token.to_owned(), client_addr: Some(client_addr.to_string()) };
 	let data = serde_json::to_vec(&control).map_err(invalid_data)?;
 
-	// Write then rename so a handler never reads a partial file.
+	// Write then rename so a handler never reads a partial file. The temp file
+	// carries the token and must be private from the moment it is created.
 	let tmp = path.with_extension("tmp");
-	std::fs::write(&tmp, data)?;
-	#[cfg(unix)]
-	{
-		use std::os::unix::fs::PermissionsExt;
-		std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-	}
+	write_private(&tmp, &data)?;
 	std::fs::rename(&tmp, path)
 }
 
@@ -746,6 +762,9 @@ mod tests {
 		let config = client_config_at(&path).unwrap();
 		assert_eq!(config.hosts, vec!["127.0.0.1:17737"]);
 		assert_eq!(config.token, server.token());
+		let url = dashboard_url_at(&path).unwrap().unwrap();
+		assert!(url.starts_with("http://127.0.0.1:17737/#token="), "{url}");
+		assert!(url.ends_with(server.token()), "{url}");
 	}
 
 	#[tokio::test]

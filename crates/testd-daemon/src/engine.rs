@@ -32,6 +32,8 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_INTAKE_CONNECTIONS: usize = 256;
+/// A single source cannot consume every intake slot.
+const MAX_INTAKE_CONNECTIONS_PER_IP: usize = 64;
 
 /// Event emitted when the registration set changes.
 #[derive(Debug, Clone)]
@@ -125,10 +127,12 @@ impl HostEngine {
 		let mut revocations = self.access.revocations();
 		let connections = Arc::new(Connections::default());
 		let capacity = Arc::new(tokio::sync::Semaphore::new(MAX_INTAKE_CONNECTIONS));
+		let per_ip = Arc::new(PerIpConnections::default());
 
 		let http_ctx = Arc::new(HttpContext {
 			tld: self.tld.clone(),
 			pki_dir: self.config.pki_dir.clone(),
+			local_token: self.local_token.clone(),
 			registrations: self.registrations.clone(),
 			connections: Arc::clone(&connections),
 			operator_tx,
@@ -147,6 +151,7 @@ impl HostEngine {
 			resolver_checked: AtomicBool::new(false),
 			answer_addr: self.config.answer_addr,
 			secret: self.config.secret.clone(),
+			allow_remote_targets: self.config.allow_remote_targets,
 			local_token: self.local_token.clone(),
 			connections,
 		});
@@ -159,11 +164,16 @@ impl HostEngine {
 						eprintln!("[warn]   intake connection limit reached: {}", addr.ip());
 						continue;
 					};
+					let Some(per_ip_permit) = per_ip.acquire(addr.ip()) else {
+						eprintln!("[warn]   intake per-source connection limit reached: {}", addr.ip());
+						continue;
+					};
 					let shared = shared.clone();
 					let http_ctx = http_ctx.clone();
 
 					tokio::spawn(async move {
 						let _permit = permit;
+						let _per_ip = per_ip_permit;
 						if let Err(e) = dispatch(stream, addr, shared, http_ctx).await {
 							eprintln!("[error]  {}: {e}", addr.ip());
 						}
@@ -320,6 +330,8 @@ struct Shared {
 	answer_addr: std::net::Ipv4Addr,
 	/// The operator secret from `[host] secret`.
 	secret: String,
+	/// Allow a remote leaf to name a target other than its own address.
+	allow_remote_targets: bool,
 	local_token: Option<String>,
 	/// Authenticated connections the operator can act on.
 	connections: Arc<Connections>,
@@ -349,6 +361,40 @@ impl Connection {
 ///
 /// A plain mutex keeps every lookup independent of the registration lock, so a
 /// dropped connection can clean itself up from a destructor.
+#[derive(Default)]
+struct PerIpConnections {
+	counts: std::sync::Mutex<HashMap<std::net::IpAddr, usize>>,
+}
+
+struct PerIpPermit {
+	connections: Arc<PerIpConnections>,
+	ip: std::net::IpAddr,
+}
+
+impl PerIpConnections {
+	fn acquire(self: &Arc<Self>, ip: std::net::IpAddr) -> Option<PerIpPermit> {
+		let mut counts = self.counts.lock().expect("intake connection map poisoned");
+		let count = counts.get(&ip).copied().unwrap_or(0);
+		if count >= MAX_INTAKE_CONNECTIONS_PER_IP {
+			return None;
+		}
+		counts.insert(ip, count + 1);
+		Some(PerIpPermit { connections: Arc::clone(self), ip })
+	}
+}
+
+impl Drop for PerIpPermit {
+	fn drop(&mut self) {
+		let mut counts = self.connections.counts.lock().expect("intake connection map poisoned");
+		if let Some(count) = counts.get_mut(&self.ip) {
+			*count = count.saturating_sub(1);
+			if *count == 0 {
+				counts.remove(&self.ip);
+			}
+		}
+	}
+}
+
 #[derive(Default)]
 pub struct Connections {
 	inner: std::sync::Mutex<HashMap<u64, Connection>>,
@@ -564,6 +610,17 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 					}
 					// Bare port → prepend client IP. Full host:port → use as-is.
 					let target = if target.contains(':') { target } else { format!("{}:{target}", addr.ip()) };
+					if !shared.allow_remote_targets && !addr.ip().is_loopback() && !target_is_client(&target, addr.ip())
+					{
+						let message = format!(
+							"remote leaves may only target their own address: {target}; \
+							 set [host] allow_remote_targets = true to permit explicit targets"
+						);
+						if reply(&out, Response::Error { message }).await.is_err() {
+							break;
+						}
+						continue;
+					}
 					let registration = Registration { domain: fqdn.clone(), target: target.clone() };
 
 					let reserved: Vec<&str> = reserved.iter().map(String::as_str).collect();
@@ -742,6 +799,11 @@ async fn ensure_resolver_for(shared: &Shared, addr: SocketAddr) {
 		Ok(Err(e)) => eprintln!("[warn]   resolver setup failed: {e}; run `testd doctor --fix` on the host"),
 		Err(e) => eprintln!("[warn]   resolver setup task failed: {e}"),
 	}
+}
+
+/// Whether an explicit target points at the leaf's own address.
+fn target_is_client(target: &str, client: std::net::IpAddr) -> bool {
+	target.parse::<SocketAddr>().is_ok_and(|addr| addr.ip() == client)
 }
 
 /// A connection is admitted with the operator secret, an issued token, or the
@@ -982,6 +1044,14 @@ async fn apply(shared: &Shared) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn remote_targets_must_match_the_leaf_address() {
+		let client = "192.168.1.9".parse().unwrap();
+		assert!(target_is_client("192.168.1.9:3000", client));
+		assert!(!target_is_client("127.0.0.1:3000", client));
+		assert!(!target_is_client("localhost:3000", client));
+	}
 
 	#[tokio::test]
 	async fn closure_preempts_a_full_reply_queue_and_a_blocked_writer() {

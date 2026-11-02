@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use testd_client::Entry;
 use testd_client::supervisor::{self, EntryState, LaunchEvent, LaunchSpec, OutputStream};
-use testd_core::config::config_dir;
+use testd_core::config::{config_dir, write_private};
 
 const FILE: &str = "launches.json";
 const MAX_LOG_LINES: usize = 500;
@@ -129,12 +129,7 @@ impl LaunchBook {
 			std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
 		}
 		let tmp = path.with_extension("json.tmp");
-		std::fs::write(&tmp, data).map_err(|e| e.to_string())?;
-		#[cfg(unix)]
-		{
-			use std::os::unix::fs::PermissionsExt;
-			let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-		}
+		write_private(&tmp, &data).map_err(|e| e.to_string())?;
 		#[cfg(windows)]
 		if path.exists() {
 			std::fs::remove_file(path).map_err(|e| e.to_string())?;
