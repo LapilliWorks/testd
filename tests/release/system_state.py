@@ -182,8 +182,11 @@ def decode_pem(text):
 		for block in blocks if block.strip()]
 
 
+COVO_SUFFIX = re.compile(r'^[bcdfghjklmnprstvaiou]+(?:-[bcdfghjklmnprstvaiou]+)*$')
+
+
 def is_testd_root_name(common_name):
-	"""Match legacy, serial-suffixed, and fixture testd root names."""
+	"""Match legacy and pronounceable testd root names, not the fixture."""
 	if common_name == KEYCHAIN_PREFIX:
 		return True
 	if common_name == FIXTURE_KEYCHAIN_NAME:
@@ -191,8 +194,7 @@ def is_testd_root_name(common_name):
 	suffix = common_name[len(KEYCHAIN_PREFIX):]
 	if not suffix.startswith(' '):
 		return False
-	suffix = suffix[1:]
-	return len(suffix) == 8 and all(character in '0123456789abcdefABCDEF' for character in suffix)
+	return COVO_SUFFIX.fullmatch(suffix[1:]) is not None
 
 
 def is_snapshot_root_name(common_name):

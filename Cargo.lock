@@ -4309,6 +4309,7 @@ name = "testd-pki"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "covo",
  "getrandom 0.3.4",
  "rcgen",
  "rustls",
@@ -4324,6 +4325,7 @@ name = "testd-setup"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "covo",
  "testd-core",
  "x509-parser",
 ]

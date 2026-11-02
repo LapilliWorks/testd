@@ -186,9 +186,9 @@ impl Ca {
 fn root_params() -> Result<CertificateParams> {
 	let mut params = CertificateParams::new(Vec::<String>::new())?;
 	let serial = random_serial_bytes();
-	// The serial prefix distinguishes roots from different installations in a
+	// A pronounceable name distinguishes roots from different installations in a
 	// keychain. It is chosen before signing, unlike the certificate fingerprint.
-	let common_name = format!("testd root {}", hex(&serial[..4]));
+	let common_name = format!("testd root {}", covo::encode(&serial[..4]));
 	params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
 	params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign, KeyUsagePurpose::DigitalSignature];
 	params.distinguished_name = distinguished_name(&common_name);
@@ -419,20 +419,20 @@ mod tests {
 	}
 
 	#[test]
-	fn roots_carry_a_unique_serial_prefix_in_the_common_name() {
+	fn roots_carry_a_unique_pronounceable_name() {
 		let first = temp_dir();
 		let second = temp_dir();
 		let one = Ca::load_or_init(&first).unwrap();
 		let two = Ca::load_or_init(&second).unwrap();
 		let name = |ca: &Ca| {
 			let info = inspect_certificate(ca.root_cert_pem()).unwrap();
-			info.subject.rsplit_once(' ').unwrap().1.to_owned()
+			let (_, suffix) = info.subject.rsplit_once(' ').unwrap();
+			suffix.to_owned()
 		};
 		let one = name(&one);
 		let two = name(&two);
-		assert_eq!(one.len(), 8);
-		assert!(one.chars().all(|character| character.is_ascii_hexdigit()));
-		assert_eq!(two.len(), 8);
+		assert_eq!(covo::decode(&one).unwrap().len(), 4);
+		assert_eq!(covo::decode(&two).unwrap().len(), 4);
 		assert_ne!(one, two, "separate roots must be distinguishable by name");
 		std::fs::remove_dir_all(&first).ok();
 		std::fs::remove_dir_all(&second).ok();

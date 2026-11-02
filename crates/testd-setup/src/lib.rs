@@ -663,13 +663,14 @@ mod tests {
 	}
 
 	#[test]
-	fn testd_root_names_accept_legacy_and_serial_suffixes() {
+	fn testd_root_names_accept_legacy_and_pronounceable_suffixes() {
+		let suffix = covo::encode(b"test");
 		assert!(is_testd_root_cn("testd root"));
-		assert!(is_testd_root_cn("testd root 0123abcd"));
-		assert!(is_testd_root_cn("testd root 0123ABCD"));
+		assert!(is_testd_root_cn(&format!("testd root {suffix}")));
 		assert!(!is_testd_root_cn("testd root testing"));
-		assert!(!is_testd_root_cn("testd root 0123abc"));
-		assert!(!is_testd_root_cn("testd root 0123abcd extra"));
+		assert!(!is_testd_root_cn("testd root testing-extra"));
+		assert!(!is_testd_root_cn("testd root 0123abcd"));
+		assert!(!is_testd_root_cn("testd root ragiba fihula visuba"));
 		assert!(!is_testd_root_cn("testd intermediate"));
 	}
 
@@ -788,7 +789,7 @@ mod tests {
 
 // --- root CA trust ---
 
-/// Prefix of the testd root common name; new roots append eight serial hex digits.
+/// Prefix of the testd root common name; new roots append a pronounceable name.
 #[cfg(any(target_os = "macos", test))]
 const ROOT_CN: &str = "testd root";
 
@@ -915,7 +916,7 @@ fn is_testd_root_cn(common_name: &str) -> bool {
 	let Some(suffix) = common_name.strip_prefix(ROOT_CN).and_then(|rest| rest.strip_prefix(' ')) else {
 		return false;
 	};
-	suffix.len() == 8 && suffix.chars().all(|character| character.is_ascii_hexdigit())
+	covo::decode(suffix).is_ok_and(|bytes| bytes.len() == 4 && covo::encode(&bytes) == suffix)
 }
 
 #[cfg(target_os = "macos")]

@@ -280,13 +280,13 @@ class SystemStateTests(unittest.TestCase):
 
 	def test_keychain_scope_accepts_new_roots_but_not_the_fixture(self):
 		self.assertTrue(state.is_testd_root_name('testd root'))
-		self.assertTrue(state.is_testd_root_name('testd root 0123abcd'))
-		self.assertTrue(state.is_testd_root_name('testd root 0123ABCD'))
+		self.assertTrue(state.is_testd_root_name('testd root vitoba-borubi-hikola'))
+		self.assertTrue(state.is_testd_root_name('testd root bafaba-roputa'))
 		self.assertFalse(state.is_testd_root_name('testd root testing'))
-		self.assertFalse(state.is_testd_root_name('testd root 0123abc'))
-		self.assertFalse(state.is_testd_root_name('testd root 0123abcd extra'))
+		self.assertFalse(state.is_testd_root_name('testd root 0123abcd'))
+		self.assertFalse(state.is_testd_root_name('testd root testing-extra'))
 		self.assertTrue(state.is_snapshot_root_name('testd root testing'))
-		self.assertTrue(state.is_snapshot_root_name('testd root 0123abcd'))
+		self.assertTrue(state.is_snapshot_root_name('testd root vitoba-borubi-hikola'))
 
 	def test_linux_restore_returns_the_exact_previous_bytes(self):
 		with tempfile.TemporaryDirectory() as temporary:
