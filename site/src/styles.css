@@ -144,7 +144,7 @@ h3 {
 }
 
 h1 {
-	font-size: clamp(2.7rem, 6.3vw, 5.5rem);
+	font-size: clamp(2.7rem, 6.3vw, 5.2rem);
 	line-height: 0.94;
 	letter-spacing: -0.055em;
 }
@@ -410,7 +410,7 @@ h3 {
 .hero-head {
 	grid-area: head;
 	display: grid;
-	grid-template-columns: minmax(0, 1fr) minmax(220px, 0.38fr);
+	grid-template-columns: minmax(0, 1.2fr) minmax(220px, 0.3fr);
 	gap: 1rem 4rem;
 	align-items: end;
 	animation: rise 0.65s cubic-bezier(0.2, 0.7, 0.2, 1) both;
