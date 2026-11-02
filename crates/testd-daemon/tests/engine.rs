@@ -332,6 +332,27 @@ fn get(path: &str, headers: &[(&str, &str)]) -> String {
 	request
 }
 
+/// Read one `data:` payload from the dashboard event stream.
+async fn next_dashboard_state<R>(reader: &mut R) -> serde_json::Value
+where
+	R: tokio::io::AsyncBufRead + Unpin,
+{
+	use tokio::io::AsyncBufReadExt;
+	loop {
+		let mut line = String::new();
+		let read = tokio::time::timeout(std::time::Duration::from_secs(5), reader.read_line(&mut line))
+			.await
+			.expect("a dashboard event arrives")
+			.unwrap();
+		assert!(read > 0, "the dashboard event stream ended");
+		let Some(data) = line.strip_prefix("data:") else { continue };
+		let data = data.trim();
+		if !data.is_empty() {
+			return serde_json::from_str(data).expect("the event payload is JSON");
+		}
+	}
+}
+
 /// One dashboard mutation from loopback, with the header that proves intent.
 fn post(token: &str, path: &str, body: &str) -> String {
 	format!(
@@ -578,6 +599,44 @@ async fn the_loopback_dashboard_is_local_and_exposes_local_actions() {
 
 	let rebinding = http(harness.addr, &get("/", &[])).await;
 	assert!(rebinding.starts_with("HTTP/1.1 403"), "a foreign Host is refused: {rebinding}");
+}
+
+#[tokio::test]
+async fn dashboard_events_follow_registrations_and_access() {
+	use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+	let harness = start().await;
+	let mut stream = TcpStream::connect(harness.addr).await.unwrap();
+	let request =
+		get("/api/local/events", &[("x-testd-token", LOCAL_TOKEN)]).replace("Host: testd.test", "Host: 127.0.0.1");
+	stream.write_all(request.as_bytes()).await.unwrap();
+	let mut reader = BufReader::new(stream);
+
+	let mut status = String::new();
+	tokio::time::timeout(std::time::Duration::from_secs(5), reader.read_line(&mut status))
+		.await
+		.expect("the event stream starts")
+		.unwrap();
+	assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+	loop {
+		let mut header = String::new();
+		reader.read_line(&mut header).await.unwrap();
+		if header.trim().is_empty() {
+			break;
+		}
+	}
+
+	let initial = next_dashboard_state(&mut reader).await;
+	assert!(initial["domains"].as_array().unwrap().is_empty(), "{initial}");
+
+	let mut alice = Client::connect(harness.addr, &harness.token).await;
+	assert!(matches!(alice.request(register("app", "3000", false)).await, Response::Ok));
+	let registered = next_dashboard_state(&mut reader).await;
+	assert_eq!(registered["domains"][0]["domain"], "app.test", "{registered}");
+
+	let (_waiting, _id) = request_access(&harness, "alex@laptop", &["api"]).await;
+	let requested = next_dashboard_state(&mut reader).await;
+	assert_eq!(requested["requests"][0]["label"], "alex@laptop", "{requested}");
 }
 
 #[tokio::test]

@@ -24,7 +24,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::engine::Registrations;
 
@@ -175,6 +175,8 @@ pub struct Shares {
 	active: Mutex<BTreeMap<String, Active>>,
 	/// Serializes the startup sweep against a tailscale share starting.
 	reclaim: Mutex<()>,
+	/// Any change to the active set, for live frontends.
+	revision: watch::Sender<u64>,
 }
 
 struct Active {
@@ -199,11 +201,34 @@ impl Shares {
 		let binary = std::env::var_os("TESTD_TUNNEL")
 			.filter(|value| !value.is_empty())
 			.map(PathBuf::from);
-		Self { default, binary, front, active: Mutex::new(BTreeMap::new()), reclaim: Mutex::new(()) }
+		Self {
+			default,
+			binary,
+			front,
+			active: Mutex::new(BTreeMap::new()),
+			reclaim: Mutex::new(()),
+			revision: watch::channel(0).0,
+		}
 	}
 
 	pub fn new(default: Provider, binary: Option<PathBuf>, front: Option<Front>) -> Self {
-		Self { default, binary, front, active: Mutex::new(BTreeMap::new()), reclaim: Mutex::new(()) }
+		Self {
+			default,
+			binary,
+			front,
+			active: Mutex::new(BTreeMap::new()),
+			reclaim: Mutex::new(()),
+			revision: watch::channel(0).0,
+		}
+	}
+
+	/// Any change to the active set, for live frontends.
+	pub fn state_changes(&self) -> watch::Receiver<u64> {
+		self.revision.subscribe()
+	}
+
+	fn bump(&self) {
+		self.revision.send_modify(|revision| *revision = revision.wrapping_add(1));
 	}
 
 	/// Start a share for `name` at `target`. Returns the public URL.
@@ -237,6 +262,8 @@ impl Shares {
 		}
 		let url = share.url.clone();
 		active.insert(name.to_owned(), share);
+		drop(active);
+		self.bump();
 		Ok(url)
 	}
 
@@ -245,7 +272,9 @@ impl Shares {
 		let removed = self.active.lock().await.remove(name);
 		match removed {
 			Some(share) => {
+				self.bump();
 				self.release(share).await;
+				self.bump();
 				true
 			},
 			None => false,

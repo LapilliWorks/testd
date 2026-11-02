@@ -38,6 +38,8 @@ pub struct HttpContext {
 	pub shares: Option<Arc<crate::share::Shares>>,
 	/// Issued leaf tokens and access requests awaiting approval.
 	pub access: Arc<Access>,
+	/// Registration changes, for live dashboard updates.
+	pub engine_events: tokio::sync::broadcast::Sender<crate::engine::EngineEvent>,
 }
 
 /// Launch definitions, JSON mutations, and certificate output all fit.
@@ -119,6 +121,8 @@ where
 	match (method.as_str(), path.as_str()) {
 		("GET", "/") => serve_dashboard(&mut writer, ctx).await,
 		("GET", "/api/status") => serve_status(&mut writer, ctx).await,
+		("GET", "/api/local/state") => serve_state(&mut writer, ctx).await,
+		("GET", "/api/local/events") => serve_events(&mut writer, ctx).await,
 		("GET", "/ca.crt") => serve_ca_cert(&mut writer, &ctx.pki_dir).await,
 		("GET", "/ok.svg") => {
 			respond(&mut writer, "200 OK", "image/svg+xml", br#"<svg xmlns="http://www.w3.org/2000/svg"/>"#).await
@@ -187,13 +191,29 @@ fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a s
 }
 
 async fn serve_dashboard<W: AsyncWriteExt + Unpin>(writer: &mut W, ctx: &HttpContext) -> io::Result<()> {
+	let dashboard = dashboard_claims(ctx).await;
+	let shares = match &ctx.shares {
+		Some(shares) => shares.list().await,
+		None => Vec::new(),
+	};
+	let body = render_dashboard(ctx, &dashboard.claims, &dashboard.granted, &shares);
+	respond(writer, "200 OK", "text/html; charset=utf-8", body.as_bytes()).await
+}
+
+/// Claims and the names that carry an issued grant, for the dashboard.
+struct DashboardClaims {
+	claims: Vec<Claim>,
+	granted: HashSet<String>,
+}
+
+async fn dashboard_claims(ctx: &HttpContext) -> DashboardClaims {
 	// A share's name is answered by the edge for the provider's benefit; it is
 	// not a registration, so it belongs in the shares card, not the name list.
 	let (claims, aliases) = {
 		let registry = ctx.registrations.lock().await;
 		(registry.claims(), registry.aliases())
 	};
-	let aliases: Vec<String> = aliases.into_iter().map(|alias| alias.domain).collect();
+	let aliases: HashSet<String> = aliases.into_iter().map(|alias| alias.domain).collect();
 	let claims: Vec<Claim> = claims
 		.into_iter()
 		.filter(|claim| !aliases.contains(&claim.registration.domain))
@@ -206,12 +226,130 @@ async fn serve_dashboard<W: AsyncWriteExt + Unpin>(writer: &mut W, ctx: &HttpCon
 		.filter(|claim| ctx.connections.grant(claim.connection).is_some())
 		.map(|claim| claim.registration.domain.clone())
 		.collect();
-	let shares = match &ctx.shares {
-		Some(shares) => shares.list().await,
-		None => Vec::new(),
-	};
-	let body = render_dashboard(ctx, &claims, &granted, &shares);
-	respond(writer, "200 OK", "text/html; charset=utf-8", body.as_bytes()).await
+	DashboardClaims { claims, granted }
+}
+
+#[derive(serde::Serialize)]
+struct DashboardState {
+	tld: String,
+	domains: Vec<DomainView>,
+	advisory: Vec<String>,
+	shares: Vec<crate::share::ShareView>,
+	launches: Vec<crate::launch::LaunchView>,
+	requests: Vec<crate::access::PendingView>,
+	tokens: Vec<crate::access::TokenView>,
+}
+
+#[derive(serde::Serialize)]
+struct DomainView {
+	domain: String,
+	target: String,
+	project: Option<String>,
+	granted: bool,
+}
+
+async fn dashboard_state(ctx: &HttpContext) -> DashboardState {
+	let dashboard = dashboard_claims(ctx).await;
+	let regs: Vec<Registration> = dashboard.claims.iter().map(|claim| claim.registration.clone()).collect();
+	let domains = dashboard
+		.claims
+		.iter()
+		.map(|claim| DomainView {
+			domain: claim.registration.domain.clone(),
+			target: claim.registration.target.clone(),
+			project: testd_core::naming::project_label(&claim.registration.domain).map(str::to_owned),
+			granted: dashboard.granted.contains(&claim.registration.domain),
+		})
+		.collect();
+	DashboardState {
+		tld: ctx.tld.clone(),
+		advisory: advisory(&regs),
+		domains,
+		shares: match &ctx.shares {
+			Some(shares) => shares.list().await,
+			None => Vec::new(),
+		},
+		launches: ctx.launches.as_ref().map(|book| book.list()).unwrap_or_default(),
+		requests: ctx.access.pending(),
+		tokens: ctx.access.tokens(),
+	}
+}
+
+async fn serve_state<W: AsyncWriteExt + Unpin>(writer: &mut W, ctx: &HttpContext) -> io::Result<()> {
+	respond_json(writer, "200 OK", &dashboard_state(ctx).await).await
+}
+
+/// Server-sent snapshots. The browser reads the stream with `fetch`, so the
+/// per-run token stays in a request header instead of the URL.
+async fn serve_events<W: AsyncWriteExt + Unpin>(writer: &mut W, ctx: &HttpContext) -> io::Result<()> {
+	// Subscribe before the first snapshot so a change during the snapshot still
+	// wakes the stream; duplicate snapshots are suppressed below.
+	let mut engine_events = ctx.engine_events.subscribe();
+	let mut access_changes = Some(ctx.access.state_changes());
+	let mut launch_changes = ctx.launches.as_ref().map(|book| book.state_changes());
+	let mut share_changes = ctx.shares.as_ref().map(|shares| shares.state_changes());
+
+	const HEADERS: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n\
+		Cache-Control: no-store\r\nConnection: keep-alive\r\nX-Accel-Buffering: no\r\n\
+		X-Content-Type-Options: nosniff\r\nContent-Security-Policy: frame-ancestors 'none'\r\n\r\n";
+	write_sse(writer, HEADERS.as_bytes()).await?;
+
+	let mut last = serde_json::to_string(&dashboard_state(ctx).await).unwrap_or_default();
+	write_sse(writer, format!("event: state\ndata: {last}\n\n").as_bytes()).await?;
+
+	let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
+	heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+	heartbeat.tick().await;
+
+	loop {
+		let changed = tokio::select! {
+			_ = heartbeat.tick() => {
+				write_sse(writer, b": keep-alive\n\n").await?;
+				false
+			},
+			result = engine_events.recv() => match result {
+				Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+				Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
+			},
+			changed = wait_change(&mut access_changes) => {
+				if !changed { return Ok(()); }
+				true
+			},
+			changed = wait_change(&mut launch_changes) => {
+				if !changed { return Ok(()); }
+				true
+			},
+			changed = wait_change(&mut share_changes) => {
+				if !changed { return Ok(()); }
+				true
+			},
+		};
+		if !changed {
+			continue;
+		}
+		let next = serde_json::to_string(&dashboard_state(ctx).await).unwrap_or_default();
+		if next != last {
+			write_sse(writer, format!("event: state\ndata: {next}\n\n").as_bytes()).await?;
+			last = next;
+		}
+	}
+}
+
+/// Wait on an optional change channel. Without one, the branch never fires.
+async fn wait_change<T: Clone>(receiver: &mut Option<tokio::sync::watch::Receiver<T>>) -> bool {
+	match receiver {
+		Some(receiver) => receiver.changed().await.is_ok(),
+		None => std::future::pending().await,
+	}
+}
+
+async fn write_sse<W: AsyncWriteExt + Unpin>(writer: &mut W, data: &[u8]) -> io::Result<()> {
+	tokio::time::timeout(RESPONSE_TIMEOUT, async {
+		writer.write_all(data).await?;
+		writer.flush().await
+	})
+	.await
+	.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "event stream write timed out"))?
 }
 
 async fn serve_status<W: AsyncWriteExt + Unpin>(writer: &mut W, ctx: &HttpContext) -> io::Result<()> {

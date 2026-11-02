@@ -96,6 +96,8 @@ pub struct LaunchBook {
 	definitions: Mutex<Vec<LaunchDefinition>>,
 	running: Mutex<HashMap<String, Running>>,
 	path: PathBuf,
+	/// Any change to definitions or live state, for live frontends.
+	revision: watch::Sender<u64>,
 }
 
 impl LaunchBook {
@@ -118,7 +120,21 @@ impl LaunchBook {
 				Vec::new()
 			},
 		};
-		Self { definitions: Mutex::new(definitions), running: Mutex::new(HashMap::new()), path }
+		Self {
+			definitions: Mutex::new(definitions),
+			running: Mutex::new(HashMap::new()),
+			path,
+			revision: watch::channel(0).0,
+		}
+	}
+
+	/// Any change to launch definitions or live state, for live frontends.
+	pub fn state_changes(&self) -> watch::Receiver<u64> {
+		self.revision.subscribe()
+	}
+
+	fn bump(&self) {
+		self.revision.send_modify(|revision| *revision = revision.wrapping_add(1));
 	}
 
 	fn save(&self) -> Result<(), String> {
@@ -167,6 +183,7 @@ impl LaunchBook {
 		}
 		drop(definitions);
 		self.save()?;
+		self.bump();
 		Ok(definition)
 	}
 
@@ -184,7 +201,9 @@ impl LaunchBook {
 			.expect("launch definitions poisoned")
 			.retain(|saved| saved.id != id);
 		self.running.lock().expect("launch state poisoned").remove(id);
-		self.save()
+		self.save()?;
+		self.bump();
+		Ok(())
 	}
 
 	/// Every definition with its live state, output, and last error.
@@ -247,6 +266,7 @@ impl LaunchBook {
 			.lock()
 			.expect("launch state poisoned")
 			.insert(id.to_owned(), Running { stop, rebind, state: Arc::clone(&state), done });
+		self.bump();
 
 		let book = Arc::clone(self);
 		let id = id.to_owned();
@@ -263,6 +283,7 @@ impl LaunchBook {
 		if state.stop.try_send(()).is_err() {
 			return Err("launch is already stopping".into());
 		}
+		self.bump();
 		Ok(())
 	}
 
@@ -329,11 +350,14 @@ async fn run_launch(
 			let mut state = state.lock().expect("launch state poisoned");
 			state.running = false;
 			state.error = Some(format!("{e:#}"));
+			drop(state);
+			book.bump();
 			return;
 		},
 	};
 	let Some(mut events) = launch.take_events() else {
 		state.lock().expect("launch state poisoned").running = false;
+		book.bump();
 		return;
 	};
 
@@ -342,6 +366,10 @@ async fn run_launch(
 			event = events.recv() => {
 				let Some(event) = event else { break };
 				record(&state, &event);
+				let changed = matches!(&event, LaunchEvent::State { .. } | LaunchEvent::Exited { .. } | LaunchEvent::Failed { .. });
+				if changed {
+					book.bump();
+				}
 				let done = matches!(&event, LaunchEvent::Exited { .. } | LaunchEvent::Failed { .. });
 				if done {
 					break;
@@ -352,6 +380,7 @@ async fn run_launch(
 				while let Ok(event) = events.try_recv() {
 					record(&state, &event);
 				}
+				book.bump();
 				break;
 			},
 			Some(request) = rebind.recv() => {
@@ -368,6 +397,7 @@ impl LaunchBook {
 		if let Some(running) = self.running.lock().expect("launch state poisoned").get(id) {
 			running.state.lock().expect("launch state poisoned").running = false;
 		}
+		self.bump();
 	}
 }
 
@@ -421,7 +451,12 @@ mod tests {
 	}
 
 	fn book(path: PathBuf) -> LaunchBook {
-		LaunchBook { definitions: Mutex::new(Vec::new()), running: Mutex::new(HashMap::new()), path }
+		LaunchBook {
+			definitions: Mutex::new(Vec::new()),
+			running: Mutex::new(HashMap::new()),
+			path,
+			revision: watch::channel(0).0,
+		}
 	}
 
 	#[test]

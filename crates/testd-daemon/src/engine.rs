@@ -163,6 +163,7 @@ impl HostEngine {
 			health_refresh: self.health_refresh.clone(),
 			shares: self.shares.clone(),
 			access: Arc::clone(&self.access),
+			engine_events: self.event_tx.clone(),
 		});
 
 		let shared = Arc::new(Shared {

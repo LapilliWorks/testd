@@ -110,6 +110,8 @@ pub struct Access {
 	/// Wake the engine to reconcile live connections against the token store.
 	/// Changes may coalesce, but no revoked credential can be missed.
 	revocations: watch::Sender<()>,
+	/// Any change to requests or tokens, for live frontends.
+	revision: watch::Sender<u64>,
 }
 
 #[derive(Default)]
@@ -161,7 +163,13 @@ impl Access {
 		};
 		let (changes, _) = watch::channel(Vec::new());
 		let (revocations, _) = watch::channel(());
-		Ok(Self { path, state: Mutex::new(state), changes, revocations })
+		let (revision, _) = watch::channel(0);
+		Ok(Self { path, state: Mutex::new(state), changes, revocations, revision })
+	}
+
+	/// Any change to waiting requests or issued tokens, for live frontends.
+	pub fn state_changes(&self) -> watch::Receiver<u64> {
+		self.revision.subscribe()
 	}
 
 	/// The current waiting list, also delivered as changes to frontends.
@@ -280,6 +288,7 @@ impl Access {
 					}
 					return Err(format!("request {id} disconnected before the token was delivered"));
 				}
+				self.bump();
 				Ok(Approved::Token(token))
 			},
 			PendingKind::Name { token_id } => {
@@ -302,6 +311,7 @@ impl Access {
 				// A legacy token already allowed every name, and a caller that
 				// disconnected keeps the grant the operator approved.
 				let _ = pending.decision.send(Decision::ApproveName);
+				self.bump();
 				Ok(Approved::Name)
 			},
 		}
@@ -352,6 +362,7 @@ impl Access {
 		}
 		drop(state);
 		self.revocations.send_replace(());
+		self.bump();
 		Ok(())
 	}
 
@@ -365,6 +376,8 @@ impl Access {
 		if let Err(e) = self.save(&state) {
 			eprintln!("[warn]   failed to record token use: {e}");
 		}
+		drop(state);
+		self.bump();
 		Some(issued)
 	}
 
@@ -399,6 +412,7 @@ impl Access {
 			state.tokens[index].names = before;
 			return Err(format!("failed to save the token store: {e}"));
 		}
+		self.bump();
 		Ok(())
 	}
 
@@ -420,6 +434,11 @@ impl Access {
 
 	fn publish(&self, state: &State) {
 		let _ = self.changes.send(Self::snapshot(state));
+		self.bump();
+	}
+
+	fn bump(&self) {
+		self.revision.send_modify(|revision| *revision = revision.wrapping_add(1));
 	}
 
 	fn save(&self, state: &State) -> io::Result<()> {
