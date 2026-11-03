@@ -930,7 +930,7 @@ def snapshot_probe(engine):
 	script = state.powershell_quote(str(ROOT / 'tests/release/windows-system-state.ps1'))
 	command = (
 		"$Tld = 'testdcheck';"
-		"$Destination = Join-Path $env:TEMP ('testd-snapshot-' + [guid]::NewGuid().ToString('N'));"
+		"$Destination = Join-Path ([IO.Path]::GetTempPath()) ('testd-snapshot-' + [guid]::NewGuid().ToString('N'));"
 		'New-Item -ItemType Directory -Path $Destination | Out-Null;'
 		'$tokens = $null; $errors = $null;'
 		f'$ast = [System.Management.Automation.Language.Parser]::ParseFile({script}, [ref]$tokens, [ref]$errors);'
