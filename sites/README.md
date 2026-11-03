@@ -70,6 +70,6 @@ CI builds and link-checks `dist/` on every run and does not deploy it; publicati
 
 ## Brand assets
 
-`sites/product/src/assets/testd-icon.svg` and `testd-mark.svg` are geometric redrawings of the repository's `app-icon.png`. The mark is the `t.` glyph; the icon adds the square frame. The site header and footer use the full icon. `favicon.svg` is the small-size mark with a paper tile.
+`sites/product/src/assets/testd-icon.svg` is the slim brand icon used across the sites; `testd-mark.svg` is its bare `t.` glyph. `src-tauri/icons/icon.png` is the fat app icon that the GUI and tray bundle use. The sites keep static copies of the slim icon at `sites/product/public/favicon.svg` and `docs/public/logo.svg`; the docs use `logo.svg` for both the header logo and the favicon.
 
 The palette follows the Lapilli studio sheet: basalt `#141414`, paper `#F2EEE4`, lapilli `#E4542B`, ash `#8C8A83`. The footer uses the Direction 01 shard wordmark: the reversed file on the dark ground and the standard file on the light 404 page. Fonts are self-hosted through Fontsource: Archivo for text and JetBrains Mono for code.

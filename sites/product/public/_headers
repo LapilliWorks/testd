@@ -17,5 +17,5 @@
 /og.png
 	Cache-Control: public, max-age=86400
 
-/docs/favicon.svg
+/docs/logo.svg
 	Cache-Control: public, max-age=86400

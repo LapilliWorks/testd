@@ -19,7 +19,7 @@ export default defineConfig({
 	lastUpdated: false,
 	titleTemplate: ':title | testd docs',
 	head: [
-		['link', { rel: 'icon', type: 'image/svg+xml', href: '/docs/favicon.svg' }],
+		['link', { rel: 'icon', type: 'image/svg+xml', href: '/docs/logo.svg' }],
 		['meta', { name: 'theme-color', content: '#f2eee4' }],
 		['meta', { property: 'og:type', content: 'website' }],
 		['meta', { property: 'og:site_name', content: 'testd docs' }],
