@@ -4,13 +4,14 @@
 set -eu
 
 usage() {
-	echo 'usage: sites/bin/site.sh [--host <addr>] <dev|build|preview|check|links|shell|clean>' >&2
+	echo 'usage: sites/bin/site.sh [--host <addr>] [--port <port>] <dev|build|preview|check|links|shell|clean>' >&2
 	exit 2
 }
 
 # Flags may sit before or after the action.
 action=''
 host_arg=''
+port_arg=''
 while [ $# -gt 0 ]; do
 	case $1 in
 	--host)
@@ -20,6 +21,15 @@ while [ $# -gt 0 ]; do
 		;;
 	--host=*)
 		host_arg=${1#--host=}
+		shift
+		;;
+	--port)
+		[ $# -ge 2 ] || usage
+		port_arg=$2
+		shift 2
+		;;
+	--port=*)
+		port_arg=${1#--port=}
 		shift
 		;;
 	-*)
@@ -42,6 +52,25 @@ case $action in
 dev | build | preview | check | links | shell | clean) ;;
 *) usage ;;
 esac
+if [ -n "$port_arg" ]; then
+	case $action in
+	dev | preview) ;;
+	*)
+		echo 'port: only dev and preview publish a port' >&2
+		usage
+		;;
+	esac
+	case $port_arg in
+	'' | *[!0-9]*)
+		echo "invalid port: $port_arg" >&2
+		usage
+		;;
+	esac
+	[ "$port_arg" -ge 1 ] && [ "$port_arg" -le 65535 ] || {
+		echo "port out of range: $port_arg" >&2
+		usage
+	}
+fi
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 
@@ -65,8 +94,11 @@ image=${TESTD_SITE_IMAGE:-oven/bun:1.4.4}
 deps=${TESTD_SITE_VOLUME:-testd-site-node-modules}
 cache=testd-site-bun-cache
 out=testd-site-out
-dev_port=${TESTD_SITE_PORT:-5173}
-preview_port=${TESTD_SITE_PREVIEW_PORT:-4173}
+# The container listens on the ports the configs declare; only the host side moves.
+dev_container_port=5173
+preview_container_port=4173
+dev_port=${port_arg:-${TESTD_SITE_PORT:-5173}}
+preview_port=${port_arg:-${TESTD_SITE_PREVIEW_PORT:-4173}}
 # 0.0.0.0 serves the site to the network, 127.0.0.1 serves it to this host only.
 # A typed flag outranks the environment; both outrank the loopback default.
 bind_host=${host_arg:-${TESTD_SITE_HOST:-127.0.0.1}}
@@ -117,9 +149,9 @@ run() {
 		set -- "$@" --env TESTD_SITE_OUT_DIR=/out
 	fi
 	case $action in
-	dev) set -- "$@" --publish "$bind_host:$dev_port:$dev_port" ;;
+	dev) set -- "$@" --publish "$bind_host:$dev_port:$dev_container_port" ;;
 	preview)
-		set -- "$@" --publish "$bind_host:$preview_port:$preview_port"
+		set -- "$@" --publish "$bind_host:$preview_port:$preview_container_port"
 		set -- "$@" --volume "$root/dist:/src/dist$dir_label"
 		;;
 	links) set -- "$@" --volume "$root/dist:/src/dist$dir_label" ;;
