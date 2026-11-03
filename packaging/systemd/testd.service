@@ -1,6 +1,6 @@
 [Unit]
 Description=testd host daemon (user)
-Documentation=https://github.com/testd/testd
+Documentation=https://github.com/LapilliWorks/testd
 After=network-online.target
 Wants=network-online.target
 

@@ -31,7 +31,7 @@ From the repository:
 cargo install --path .
 ```
 
-Release archives and generated Homebrew formulas are also published. Verify `SHA256SUMS` before installing. The tray app is a separate Tauri build. See [DEVELOPING.md](https://github.com/testd/testd/blob/master/DEVELOPING.md#release) for building and packaging.
+Release archives and generated Homebrew formulas are also published. Verify `SHA256SUMS` before installing. The tray app is a separate Tauri build. See [DEVELOPING.md](https://github.com/LapilliWorks/testd/blob/master/DEVELOPING.md#release) for building and packaging.
 
 ## 2. Prepare the host
 

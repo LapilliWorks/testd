@@ -7,7 +7,7 @@ Older majors keep working but do not receive fixes.
 
 ## Reporting a vulnerability
 
-Use [GitHub private vulnerability reporting](https://github.com/testd/testd/security/advisories/new). Do not open a public issue for a suspected vulnerability. Private reporting must be enabled on the public repository before its first release. Include:
+Use [GitHub private vulnerability reporting](https://github.com/LapilliWorks/testd/security/advisories/new). Do not open a public issue for a suspected vulnerability. Private reporting must be enabled on the public repository before its first release. Include:
 
 - affected version and platform
 - reproduction steps or a proof of concept

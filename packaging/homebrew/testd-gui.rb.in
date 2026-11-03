@@ -8,10 +8,10 @@ cask "testd-gui" do
     sha256 '@INTEL_SHA256@'
   end
 
-  url "https://github.com/testd/testd/releases/download/v#{version}/Testd_#{version}_#{arch}.dmg"
+  url "https://github.com/LapilliWorks/testd/releases/download/v#{version}/Testd_#{version}_#{arch}.dmg"
   name "Testd"
   desc "Tray app for the testd local dev domain manager"
-  homepage "https://github.com/testd/testd"
+  homepage "https://github.com/LapilliWorks/testd"
 
   depends_on macos: ">= :ventura"
 

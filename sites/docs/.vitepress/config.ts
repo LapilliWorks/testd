@@ -1,6 +1,6 @@
 import { defineConfig } from 'vitepress';
 
-const REPO = 'https://github.com/testd/testd';
+const REPO = 'https://github.com/LapilliWorks/testd';
 const SITE = 'https://testd.dev';
 const outDir = process.env.TESTD_SITE_OUT_DIR
 	? `${process.env.TESTD_SITE_OUT_DIR}/docs`

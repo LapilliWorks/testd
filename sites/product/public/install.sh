@@ -3,7 +3,7 @@
 # Env: TESTD_VERSION, TESTD_INSTALL_DIR, TESTD_REPO, GITHUB_TOKEN.
 set -eu
 
-repo=${TESTD_REPO:-testd/testd}
+repo=${TESTD_REPO:-LapilliWorks/testd}
 install_dir=${TESTD_INSTALL_DIR:-"$HOME/.local/bin"}
 version=${TESTD_VERSION:-}
 
