@@ -2,13 +2,19 @@ import { defineConfig } from 'vitepress';
 
 const REPO = 'https://github.com/testd/testd';
 const SITE = 'https://testd.dev';
+const outDir = process.env.TESTD_SITE_OUT_DIR
+	? `${process.env.TESTD_SITE_OUT_DIR}/docs`
+	: '../../dist/docs';
 
 export default defineConfig({
 	lang: 'en-US',
 	title: 'testd',
 	description: 'Stable HTTPS names for containers, VMs, WSL, and remote dev boxes.',
 	base: '/docs/',
-	outDir: '../site/dist/docs',
+	// The Markdown pages live at the repository root; this directory holds the site app.
+	srcDir: '../../docs',
+	outDir,
+	cacheDir: process.env.TESTD_DOCS_CACHE_DIR,
 	cleanUrls: false,
 	lastUpdated: false,
 	titleTemplate: ':title | testd docs',
@@ -90,6 +96,10 @@ export default defineConfig({
 		},
 	},
 	vite: {
-		server: { port: 5174 },
+		server: {
+			host: '127.0.0.1',
+			port: Number(process.env.TESTD_DOCS_PORT ?? 5174),
+			strictPort: true,
+		},
 	},
 });

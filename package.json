@@ -1,19 +1,24 @@
 {
-	"name": "testd-workspace",
+	"name": "testd-web",
 	"private": true,
 	"type": "module",
-	"workspaces": [
-		"site",
-		"docs"
-	],
 	"scripts": {
-		"dev": "bun run --cwd site dev",
-		"dev:docs": "bun run --cwd docs dev",
-		"build": "bun run build:site && bun run build:docs",
-		"build:site": "bun run --cwd site build",
-		"build:docs": "bun run --cwd docs build",
-		"preview": "bun run --cwd site preview",
-		"check": "bun run --cwd site check && bun run --cwd docs check",
-		"check:links": "bun run --cwd site check:links"
+		"dev": "sh sites/bin/site.sh dev",
+		"build": "bun run build:product && bun run build:docs",
+		"build:product": "vite build sites/product",
+		"build:docs": "vitepress build sites/docs",
+		"preview": "vite preview sites/product",
+		"check": "tsc -p . && tsc -p sites/product && tsc -p sites/docs",
+		"check:links": "bun scripts/check-links.ts"
+	},
+	"dependencies": {
+		"@fontsource-variable/archivo": "^5.3.0",
+		"@fontsource-variable/jetbrains-mono": "^5.3.0"
+	},
+	"devDependencies": {
+		"@types/node": "^24",
+		"typescript": "^5.9.3",
+		"vite": "^5.4.14",
+		"vitepress": "^1.6.4"
 	}
 }
