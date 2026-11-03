@@ -40,6 +40,23 @@ The same work runs in the container, so a host without Bun can still build and c
 
 `site.sh build` exports the tree out of its build volume, so `dist/` belongs to the host user. `preview` and `links` read that exported tree.
 
+## Publish
+
+Production is a Cloudflare Pages project built from this repository by Git integration. Every push to `master` publishes; other branches get a preview URL. The dashboard settings:
+
+| Setting | Value |
+|---|---|
+| Production branch | `master` |
+| Build command | `bun install --frozen-lockfile && bun run build` |
+| Build output directory | `dist` |
+| Root directory | `/` (default) |
+
+The Pages build image includes Bun (1.4.4, the same version as the container image); set `BUN_VERSION` only to pin another one. Vite copies `sites/product/public/_headers` and `_redirects` into `dist/`, and Pages applies both. `testd.dev` is the project's custom domain, so the tree carries no `CNAME` file.
+
+Workers static assets would serve the same tree and also honour `_headers` and `_redirects`, but they need a `wrangler.jsonc`, a deploy command, and a Worker name that matches the project. Choose Workers when the site needs code at the edge; until then Pages keeps the configuration in the dashboard and the repository free of deploy files.
+
+CI builds and link-checks `dist/` on every run and does not deploy it; publication belongs to the Pages Git integration alone.
+
 ## Layout
 
 - `sites/product/`: product landing page, styles, static files, and its Vite config
