@@ -124,6 +124,16 @@ ensure_image() {
 	$runtime pull "$image"
 }
 
+# An all-interface publish omits the host address, so the runtime binds every
+# address family instead of IPv4 alone.
+publish_spec() {
+	if [ "$bind_host" = '0.0.0.0' ]; then
+		printf '%s:%s' "$1" "$2"
+	else
+		printf '%s:%s:%s' "$bind_host" "$1" "$2"
+	fi
+}
+
 run() {
 	set -- run --rm
 	if [ -t 0 ] && [ -t 1 ]; then set -- "$@" -it; fi
@@ -150,9 +160,9 @@ run() {
 		set -- "$@" --env TESTD_SITE_OUT_DIR=/out
 	fi
 	case $action in
-	dev) set -- "$@" --publish "$bind_host:$dev_port:$dev_container_port" ;;
+	dev) set -- "$@" --publish "$(publish_spec "$dev_port" "$dev_container_port")" ;;
 	preview)
-		set -- "$@" --publish "$bind_host:$preview_port:$preview_container_port"
+		set -- "$@" --publish "$(publish_spec "$preview_port" "$preview_container_port")"
 		set -- "$@" --volume "$root/dist:/src/dist$dir_label"
 		;;
 	links) set -- "$@" --volume "$root/dist:/src/dist$dir_label" ;;
@@ -184,7 +194,9 @@ require_dist() {
 
 report_url() {
 	if [ "$bind_host" = '0.0.0.0' ]; then
-		echo "serving on port $1 of every interface: use this machine's address, not localhost" >&2
+		echo "serving on port $1 of every interface" >&2
+		echo "  local:   http://127.0.0.1:$1/" >&2
+		echo "  network: this machine's address, port $1" >&2
 	else
 		echo "serving http://$bind_host:$1/ (--host 0.0.0.0 or TESTD_SITE_HOST=0.0.0.0 to serve the network)" >&2
 	fi
