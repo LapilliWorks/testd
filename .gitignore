@@ -7,11 +7,11 @@ src-tauri/icons/ios/
 src-tauri/icons/alt-plate/
 src-tauri/gen/
 /worktrees/
-# JS workspace output and caches.
+# Web dependencies, output, and caches.
 node_modules/
-/site/dist/
-/docs/.vitepress/cache/
-/docs/.vitepress/dist/
+/dist/
+/sites/docs/.vitepress/cache/
+/sites/docs/.vitepress/dist/
 /.playwright-cli/
 # Local design references; not shipped.
 /lapilli-directions.pdf

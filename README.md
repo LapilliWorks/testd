@@ -19,11 +19,11 @@ No Caddy, no per-project `/etc/hosts` edits, and no per-project certificates. A 
 
 ## Documentation
 
-- [Quickstart](docs/quickstart.md): install, first host, first name
-- [Daily usage](docs/usage.md): names, dashboard, sharing, access, troubleshooting
-- [Advanced usage](docs/advanced.md): remote leaves, profiles, quick launches, tunnels, external fronts
-- [Reference](docs/reference.md): commands, configuration, files, endpoints, limits
-- [Security](docs/security.md): trust boundaries, credentials, exposure, hardening
+- [Quickstart](sites/docs/quickstart.md): install, first host, first name
+- [Daily usage](sites/docs/usage.md): names, dashboard, sharing, access, troubleshooting
+- [Advanced usage](sites/docs/advanced.md): remote leaves, profiles, quick launches, tunnels, external fronts
+- [Reference](sites/docs/reference.md): commands, configuration, files, endpoints, limits
+- [Security](sites/docs/security.md): trust boundaries, credentials, exposure, hardening
 
 The same pages are published at <https://testd.dev/docs/>. The product site lives at <https://testd.dev>.
 

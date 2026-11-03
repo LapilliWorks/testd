@@ -22,18 +22,35 @@ The workspace includes `testd-gui`. On a machine without GTK/WebKit, add `--excl
 
 ## Website
 
-The product site and documentation are independent Vite apps in `site/` and `docs/`, managed by a Bun workspace at the repository root.
+The product site and documentation live under `sites/`. The site runs in a container, so no local `bun install` is needed to develop, build, or check it.
+
+```sh
+./sites/bin/site.sh dev      # product at http://127.0.0.1:5173/, docs at /docs/
+./sites/bin/site.sh build    # dist/, with the docs under dist/docs
+./sites/bin/site.sh preview  # serves dist/ at http://127.0.0.1:4173/
+./sites/bin/site.sh check
+./sites/bin/site.sh links
+./sites/bin/site.sh shell
+./sites/bin/site.sh clean
+# or
+bun run dev
+```
+
+The script runs the official Bun image (`oven/bun:1.4.4`) with `sites/` and `scripts/` mounted, installs dependencies into the `testd-site-node-modules` volume, and runs the stock `vitepress` and `vite` CLI entrypoints with Bun. It prefers Podman and falls back to Docker; set `TESTD_SITE_RUNTIME` to pin one. The product server is the public origin and proxies `/docs/` to VitePress on loopback.
+
+Set `TESTD_SITE_PORT` to publish a different host port, `TESTD_SITE_PREVIEW_PORT` for preview, and `TESTD_SITE_IMAGE` or `TESTD_SITE_VOLUME` to override the image or dependency volume. `--host 0.0.0.0` (or `TESTD_SITE_HOST`) serves the site to the network. Remove the volumes with `./sites/bin/site.sh clean`.
+
+The build and check scripts remain the local path used by CI; they need `bun install` first and run outside the container:
 
 ```sh
 bun install
-bun run dev       # product site at http://localhost:5173
-bun run dev:docs  # VitePress docs at http://localhost:5174/docs/
-bun run build     # site/dist, with the docs under site/dist/docs
+bun run build     # dist/, with the docs under dist/docs
+bun run preview   # serves the built tree at http://localhost:4173/
 bun run check
 bun run check:links
 ```
 
-`bun run build` writes the product site first and the docs second, so the shared output directory ends up with both. Deploy `site/dist/` as one static tree.
+`bun run build` writes the product site first and the docs second; deploy `dist/` as one static tree. `bun run preview -- --host 0.0.0.0` exposes the built tree on every interface.
 
 ## Test
 
@@ -84,7 +101,7 @@ The desktop suite launches the supplied app/installer and records each existing 
 
 ## Contents
 
-- [Quickstart](docs/quickstart.md) for using the installed tool
+- [Quickstart](sites/docs/quickstart.md) for using the installed tool
 - [Host testing](#host-testing) for checks that need real machines
 - [Browser validation](#browser-validation) for manual checks in real browsers
 - [Release](#release) for the release checklist and artifacts

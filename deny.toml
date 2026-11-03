@@ -3,7 +3,7 @@
 version = 2
 yanked = "warn"
 # Informational merger/deprecation notices, not vulnerability advisories.
-# notify-rust and Tauri single-instance still require zbus 5; see docs/dependency-policy.md.
+# notify-rust and Tauri single-instance still require zbus 5; see sites/docs/dependency-policy.md.
 ignore = [
 	"RUSTSEC-2026-0370", # zvariant: merged into zbus 6
 	"RUSTSEC-2026-0371", # zbus_names: merged into zbus 6

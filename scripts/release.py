@@ -53,7 +53,7 @@ def package(args):
 	archive = args.output / (base + ('.zip' if platform == 'windows' else '.tar.gz'))
 	if archive.exists():
 		raise FileExistsError(archive)
-	documents = ['LICENSE', 'NOTICE', 'README.md', 'DEVELOPING.md', 'SECURITY.md', 'docs/quickstart.md']
+	documents = ['LICENSE', 'NOTICE', 'README.md', 'DEVELOPING.md', 'SECURITY.md', 'sites/docs/quickstart.md']
 	files = [(binary, binary.name), *[(ROOT / name, name) for name in documents]]
 	files += [(path, str(path.relative_to(ROOT))) for path in ROOT.glob('packaging/systemd/*.service')]
 	files += [(ROOT / 'packaging/launchd/dev.testd.host.plist', 'packaging/launchd/dev.testd.host.plist')]
