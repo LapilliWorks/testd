@@ -4221,7 +4221,7 @@ dependencies = [
 
 [[package]]
 name = "testd"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "anyhow",
  "clap",
@@ -4239,7 +4239,7 @@ dependencies = [
 
 [[package]]
 name = "testd-client"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "anyhow",
  "if-addrs",
@@ -4256,7 +4256,7 @@ dependencies = [
 
 [[package]]
 name = "testd-core"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "covo",
  "getrandom 0.3.4",
@@ -4269,7 +4269,7 @@ dependencies = [
 
 [[package]]
 name = "testd-daemon"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4299,7 +4299,7 @@ dependencies = [
 
 [[package]]
 name = "testd-gui"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "open",
  "serde",
@@ -4318,7 +4318,7 @@ dependencies = [
 
 [[package]]
 name = "testd-pki"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "anyhow",
  "covo",
@@ -4334,7 +4334,7 @@ dependencies = [
 
 [[package]]
 name = "testd-setup"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "base64 0.22.1",
  "covo",

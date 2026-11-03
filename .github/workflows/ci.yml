@@ -240,7 +240,8 @@ jobs:
         run: |
           python scripts/release.py release-notes "${GITHUB_REF_NAME#v}" > release-notes.md
           if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "$GITHUB_REF_NAME" \
-              --notes-file release-notes.md
+            flags=(--verify-tag --draft --title "$GITHUB_REF_NAME" --notes-file release-notes.md)
+            case "$GITHUB_REF_NAME" in *-*) flags+=(--prerelease) ;; esac
+            gh release create "$GITHUB_REF_NAME" "${flags[@]}"
           fi
           gh release upload "$GITHUB_REF_NAME" dist/*

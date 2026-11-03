@@ -33,6 +33,10 @@ runner = load('release_checks', ROOT / 'tests/release/run.py')
 state = load('system_state', ROOT / 'tests/release/system_state.py')
 
 
+def workspace_version():
+	return release.tomllib.loads((ROOT / 'Cargo.toml').read_text())['package']['version']
+
+
 class ReleaseTests(unittest.TestCase):
 	def test_advisory_exceptions_are_limited_to_the_dbus_merger(self):
 		policy = release.tomllib.loads((ROOT / 'deny.toml').read_text())
@@ -86,21 +90,25 @@ class ReleaseTests(unittest.TestCase):
 				self.assertNotIn('Remove-CimInstance', script)
 
 	def test_workspace_versions_match(self):
-		release.check_version('0.1.0')
+		release.check_version(workspace_version())
 		with self.assertRaises(ValueError):
-			release.check_version('0.2.0')
+			release.check_version('0.0.0')
 
 	def test_homebrew_definitions_use_real_cached_bytes_and_both_architectures(self):
+		version = workspace_version()
+		source = f'testd-{version}-source.tar.gz'
+		arm = f'Testd_{version}_aarch64.dmg'
+		intel = f'Testd_{version}_x64.dmg'
 		with tempfile.TemporaryDirectory() as temporary:
 			root = pathlib.Path(temporary)
-			for name in ['testd-0.1.0-source.tar.gz', 'Testd_0.1.0_aarch64.dmg', 'Testd_0.1.0_x64.dmg']:
+			for name in [source, arm, intel]:
 				(root / name).write_bytes(name.encode())
-			release.homebrew(SimpleNamespace(version='0.1.0', artifacts=root, output=root / 'tap'))
+			release.homebrew(SimpleNamespace(version=version, artifacts=root, output=root / 'tap'))
 			formula = (root / 'tap/testd.rb').read_text()
 			cask = (root / 'tap/testd-gui.rb').read_text()
-			self.assertIn(release.digest(root / 'testd-0.1.0-source.tar.gz'), formula)
-			self.assertIn(release.digest(root / 'Testd_0.1.0_aarch64.dmg'), cask)
-			self.assertIn(release.digest(root / 'Testd_0.1.0_x64.dmg'), cask)
+			self.assertIn(release.digest(root / source), formula)
+			self.assertIn(release.digest(root / arm), cask)
+			self.assertIn(release.digest(root / intel), cask)
 			self.assertNotIn('@VERSION@', formula + cask)
 			self.assertIn('arch arm:', cask)
 			self.assertIn('doctor --json", 1', formula)

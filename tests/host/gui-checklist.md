@@ -29,7 +29,7 @@ Windows (elevated shell not required for the app itself):
 
 ```powershell
 cargo tauri build
-target\release\bundle\nsis\Testd_0.1.0_x64-setup.exe
+target\release\bundle\nsis\Testd_0.1.0-alpha_x64-setup.exe
 ```
 
 Run `tests/release/run.py desktop` from an elevated PowerShell on Windows so
