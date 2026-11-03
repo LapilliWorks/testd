@@ -33,7 +33,9 @@ $ConfirmPreference = 'None'
 # native tools whose output the checks read.
 . "$PSScriptRoot\utf8-output.ps1"
 
-if ($Tld -notmatch '^[a-z0-9]{1,10}$') { throw "invalid TLD" }
+# The TLD is one DNS label, and the self-test's throwaway zone is longer than
+# ten characters, so bound it only by the label limit.
+if ($Tld -notmatch '^[a-z0-9]{1,63}$') { throw "invalid TLD" }
 $Namespace = '.' + $Tld
 $RootPattern = '^CN=testd root( [bcdfghjklmnprstvaiou]+(-[bcdfghjklmnprstvaiou]+)*)?$|^CN=testd root testing$'
 $NrptFile = Join-Path $Destination 'nrpt.json'
