@@ -12,11 +12,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "signal", "process", "time", "sync"] }
 toml = "1"
-testd-client = { path = "crates/testd-client", version = "0.1.0" }
-testd-core = { path = "crates/testd-core", version = "0.1.0" }
-testd-daemon = { path = "crates/testd-daemon", version = "0.1.0" }
-testd-setup = { path = "crates/testd-setup", version = "0.1.0" }
-testd-pki = { path = "crates/testd-pki", version = "0.1.0" }
+testd-client = { path = "crates/testd-client", version = "0.1.0-alpha" }
+testd-core = { path = "crates/testd-core", version = "0.1.0-alpha" }
+testd-daemon = { path = "crates/testd-daemon", version = "0.1.0-alpha" }
+testd-setup = { path = "crates/testd-setup", version = "0.1.0-alpha" }
+testd-pki = { path = "crates/testd-pki", version = "0.1.0-alpha" }
 fs2 = "0.4"
 anyhow = "1"
 bytes = "1"
@@ -35,7 +35,7 @@ covo = "0.1"
 
 [package]
 name = "testd"
-version = "0.1.0"
+version = "0.1.0-alpha"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "testd-gui"
-version = "0.1.0"
+version = "0.1.0-alpha"
 edition.workspace = true
 # tauri 2.12 requires 1.90; the CLI and daemon stay at the workspace MSRV.
 rust-version = "1.90"
