@@ -21,7 +21,9 @@ Set-StrictMode -Version Latest
 # drive that -CertStoreLocation resolves, so import it first.
 Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
 
-if ($Tld -notmatch '^[a-z0-9]{1,10}$') { throw 'invalid TLD' }
+# The TLD is one DNS label, and the self-test's throwaway zone is longer than
+# ten characters, so bound it only by the label limit.
+if ($Tld -notmatch '^[a-z0-9]{1,63}$') { throw 'invalid TLD' }
 $identity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
 	throw 'The restore self-test needs an elevated shell'
