@@ -1,461 +1,435 @@
 <!doctype html>
 <html lang="en">
 	<head>
-		<meta charset="utf-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1" />
-		<title>testd: HTTPS names for dev environments</title>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 		<meta
 			name="description"
-			content="One host daemon, a local CA, and stable names under .test for containers, VMs, WSL, and remote dev boxes. No account, no telemetry, ISC licensed."
+			content="testd gives your projects stable HTTPS .test names, wherever they run: containers, VMs, WSL, or remote machines."
 		/>
-		<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-		<link rel="canonical" href="https://testd.dev/" />
-		<meta property="og:type" content="website" />
-		<meta property="og:title" content="testd: HTTPS names for dev environments" />
+		<meta name="theme-color" content="#f2eee5" />
+		<meta property="og:title" content="testd · HTTPS for wherever you build" />
 		<meta
 			property="og:description"
-			content="Stable HTTPS names for dev environments that are not your laptop. One daemon, a local CA, and names under .test."
+			content="Stable HTTPS names for local and remote development. No per-project hosts edits, certificates, or accounts."
 		/>
-		<meta property="og:url" content="https://testd.dev/" />
-		<meta property="og:image" content="https://testd.dev/og.png" />
-		<meta name="twitter:card" content="summary_large_image" />
-		<meta name="theme-color" content="#f2eee4" />
+		<meta property="og:type" content="website" />
+		<meta property="og:image" content="/app-icon.png" />
+		<link rel="icon" type="image/png" href="/app-icon.png" />
+		<title>testd · HTTPS for wherever you build</title>
 	</head>
 	<body>
 		<a class="skip-link" href="#main">Skip to content</a>
 
-		<header class="site-header">
-			<div class="wrap header-inner">
-				<a class="brand" href="/" aria-label="testd home">
-					<svg class="brand-mark" viewBox="0 0 1024 1024" aria-hidden="true">
-						<rect x="120" y="120" width="784" height="784" fill="none" stroke="currentColor" stroke-width="16" />
-						<path fill="currentColor" d="M561 374H610V439H668V476H610V560C610 620 614 660 624 677C634 692 650 690 668 684L680 705C668 710 640 714 615 710C590 706 568 692 562 668C561 658 561 620 561 560V476H518V439H561Z" />
-						<path fill="currentColor" d="M380 634H454V710H380Z" />
-					</svg>
+		<header class="site-header" data-header>
+			<div class="header-inner">
+				<a class="brand" href="#top" aria-label="testd home">
+					<img class="brand-icon" src="/app-icon.png" alt="" width="40" height="40" />
 					<span class="brand-name">testd</span>
+					<span class="brand-caption">Local dev<br />infrastructure</span>
 				</a>
 
-				<button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">
-					<span class="nav-toggle-line"></span>
-					<span class="nav-toggle-line"></span>
-					<span class="sr-only">Menu</span>
+				<button
+					class="nav-toggle"
+					type="button"
+					aria-expanded="false"
+					aria-controls="primary-nav"
+					aria-label="Open navigation"
+					data-nav-toggle
+				>
+					<span></span><span></span>
 				</button>
 
-				<nav class="site-nav" id="site-nav" aria-label="Main">
-					<a href="#how">How it works</a>
-					<a href="#capabilities">Operations</a>
-					<a href="#security">Security</a>
+				<nav class="primary-nav" id="primary-nav" aria-label="Primary navigation" data-nav>
+					<a href="#how-it-works">How it works</a>
+					<a href="#features">Features</a>
+					<a href="#quickstart">Quickstart</a>
 					<a href="/docs/">Docs</a>
-					<a class="nav-external" href="https://github.com/testd/testd">GitHub <span aria-hidden="true">↗</span></a>
 				</nav>
 
-				<a class="button button-small header-cta" href="#install">Install</a>
+				<div class="header-actions">
+					<a class="github-link" href="https://github.com/testd/testd" target="_blank" rel="noreferrer">
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path
+								fill="currentColor"
+								d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.87c-2.78.6-3.37-1.18-3.37-1.18-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.9 1.53 2.35 1.09 2.92.83.09-.65.35-1.09.63-1.34-2.22-.25-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.64 0 0 .84-.27 2.75 1.02A9.56 9.56 0 0 1 12 6.82a9.5 9.5 0 0 1 2.5.34c1.91-1.29 2.75-1.02 2.75-1.02.55 1.37.2 2.39.1 2.64.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.85V21c0 .27.18.58.69.48A10 10 0 0 0 12 2Z"
+							/>
+						</svg>
+						<span>GitHub</span>
+					</a>
+					<a class="button button-small" href="#quickstart">
+						Get started
+						<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h9M8.5 4.5 12 8l-3.5 3.5" /></svg>
+					</a>
+				</div>
 			</div>
 		</header>
 
 		<main id="main">
-			<section class="hero">
-				<div class="wrap hero-grid">
-					<div class="hero-head">
-						<p class="eyebrow"><span class="eyebrow-mark" aria-hidden="true"></span>Local DNS · local CA · no account</p>
-						<h1>
-							HTTPS names<br />
-							for dev environments<br />
-							that aren't <span class="accent">your laptop.</span>
-						</h1>
-						<aside class="hero-aside">
-							<span>/ 01</span>
-							<p>The naming authority stays on the machine with the browser. There is nothing to configure inside the project.</p>
-						</aside>
-					</div>
-
-					<div class="hero-body">
-						<p class="lead">
-							Run one daemon on the machine with the browser. Containers, VMs, WSL distros, and remote boxes register over a
-							single TCP connection and get a name under <code>.test</code> with a certificate the browser already trusts.
+			<section class="hero" id="top">
+				<div class="hero-strata" aria-hidden="true">
+					<svg viewBox="0 0 1440 760" preserveAspectRatio="none">
+						<path d="M-80 680C190 510 288 710 537 560S948 430 1530 564" />
+						<path d="M-70 714C196 544 310 740 556 592S971 465 1530 598" />
+						<path d="M-60 748C206 578 327 770 575 624S989 500 1530 632" />
+					</svg>
+				</div>
+				<div class="container hero-grid">
+					<div class="hero-copy">
+						<p class="eyebrow hero-eyebrow"><span class="status-dot"></span> Open-source development infrastructure</p>
+						<h1>HTTPS for<br /><span>wherever</span><br />you build.</h1>
+						<p class="hero-description">
+							Stable <code>.test</code> names for projects running in containers, VMs, WSL, or remote machines. One host handles DNS, certificates, and routing.
 						</p>
 						<div class="hero-actions">
-							<a class="button" href="/docs/quickstart.html">Read the quickstart</a>
-							<a class="button button-ghost" href="#install">Install testd</a>
+							<a class="button button-primary" href="#quickstart">
+								Start building
+								<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h9M8.5 4.5 12 8l-3.5 3.5" /></svg>
+							</a>
+							<a class="text-link" href="/docs/quickstart.html">Read the quickstart <span aria-hidden="true">↗</span></a>
 						</div>
-						<ul class="hero-notes" aria-label="At a glance">
-							<li>ISC licensed</li>
-							<li>No telemetry</li>
-							<li>One daemon</li>
+						<div class="hero-command">
+							<span class="prompt" aria-hidden="true">$</span>
+							<code id="hero-command">testd run app.example:3000</code>
+							<button class="copy-button" type="button" data-copy-target="hero-command" aria-label="Copy testd run command">
+								<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1" /><path d="M10.5 5.5v-3h-8v8h3" /></svg>
+								<span class="copy-label">Copy</span>
+							</button>
+						</div>
+						<div class="hero-meta" aria-label="Product facts">
+							<span>Linux / macOS / Windows</span>
+							<span>ISC licensed</span>
+							<span>No telemetry</span>
+						</div>
+					</div>
+
+					<div class="route-card" aria-label="A route from a browser through the testd host to a container">
+						<div class="route-card-header">
+							<span>Route specimen / 001</span>
+							<span class="live-label"><span class="status-dot"></span> Live</span>
+						</div>
+						<div class="route-stage">
+							<svg class="route-contours" viewBox="0 0 600 440" fill="none" aria-hidden="true">
+								<path d="M-40 326 99 191l106 28L337 72l218 38 91 105-72 198-170 62-176-55L25 487Z" />
+								<path d="m-5 331 112-117 99 27L342 99l202 35 77 88-62 174-154 56-166-50L34 463Z" />
+								<path d="m33 337 83-100 92 26L348 127l184 31 64 73-52 148-138 50-156-45L70 439Z" />
+								<path d="m76 340 49-78 83 24L354 155l165 27 51 56-41 125-124 43-145-41-151 49Z" />
+								<path d="m119 343 16-54 73 20L361 184l145 23 37 38-30 101-109 36-134-36-151 43Z" />
+							</svg>
+							<svg class="route-lines" viewBox="0 0 600 440" fill="none" aria-hidden="true">
+								<path class="route-line-base" d="M160 295 286 220 441 137" />
+								<path class="route-line-active" d="M160 295 286 220 441 137" />
+								<circle class="route-packet" r="4">
+									<animateMotion dur="3.6s" repeatCount="indefinite" path="M160 295 286 220 441 137" />
+								</circle>
+							</svg>
+
+							<div class="topology-node node-leaf">
+								<div class="node-icon">
+									<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z" /><path d="m4 7.5 8 4.5 8-4.5M12 12v9M8 5.25l8 4.5" /></svg>
+								</div>
+								<div><span class="node-kicker">Dev environment</span><strong>Container</strong><code>:3000</code></div>
+							</div>
+
+							<div class="topology-node node-host">
+								<div class="node-icon host-icon"><img src="/app-icon.png" alt="" /></div>
+								<div><span class="node-kicker">Host machine</span><strong>testd host</strong><code>DNS + TLS + proxy</code></div>
+							</div>
+
+							<div class="topology-node node-browser">
+								<div class="node-icon">
+									<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 9h18M7 6.5h.01M10 6.5h.01" /></svg>
+								</div>
+								<div><span class="node-kicker">Browser</span><strong>200 OK</strong><code>HTTPS</code></div>
+							</div>
+
+							<span class="route-annotation annotation-intake">Plain TCP / :7737</span>
+							<span class="route-annotation annotation-edge">TLS / :443</span>
+						</div>
+						<div class="route-address">
+							<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="7" width="9" height="7" rx="1.5" /><path d="M5.5 7V4.8a2.5 2.5 0 0 1 5 0V7" /></svg>
+							<span>https://app.example.test</span>
+							<span class="address-status">Secure</span>
+						</div>
+						<div class="route-card-footer">
+							<div><strong>.test</strong><span>Automatic DNS</span></div>
+							<div><strong>24h</strong><span>Leaf certificates</span></div>
+							<div><strong>0</strong><span>Data reported</span></div>
+						</div>
+					</div>
+				</div>
+				<div class="container hero-footnote">
+					<span>One small binary. The whole route.</span>
+					<div aria-hidden="true"><span>DNS</span><i></i><span>TLS</span><i></i><span>HTTP</span><i></i><span>HMR</span></div>
+				</div>
+			</section>
+
+			<section class="principle section-rule">
+				<div class="container principle-grid reveal">
+					<p class="section-index">00 / THE PREMISE</p>
+					<h2>One less layer between you and the thing you’re making.</h2>
+					<div class="principle-copy">
+						<p>Development already has enough moving parts. Your naming layer shouldn’t add more.</p>
+						<ul class="plain-checks">
+							<li>No per-project <code>/etc/hosts</code> edits</li>
+							<li>No certificate files to choreograph</li>
+							<li>No Caddy required in the runtime path</li>
 						</ul>
 					</div>
-
-					<figure class="session" aria-label="A testd host session and a leaf registration">
-						<div class="session-bar">
-							<span class="session-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-							<span class="session-title">host / browser machine</span>
-							<span class="session-state"><span aria-hidden="true"></span>running</span>
-						</div>
-						<div class="session-body">
-							<p class="session-cmd"><span class="prompt" aria-hidden="true">$</span> testd host</p>
-							<dl class="session-checks">
-								<div><dt>DNS</dt><dd>*.test → 127.0.0.1</dd></div>
-								<div><dt>EDGE</dt><dd>:443 · local CA</dd></div>
-								<div><dt>INTAKE</dt><dd>:7737 · token auth</dd></div>
-							</dl>
-							<div class="session-lease">
-								<span class="lease-label">leaf / container / VM / WSL</span>
-								<code>testd run app.example:3000</code>
-								<span class="lease-line" aria-hidden="true"></span>
-							</div>
-						</div>
-						<figcaption>The registration is the lease. Close the connection and the name goes with it.</figcaption>
-					</figure>
 				</div>
 			</section>
 
-			<section class="section section-compare" id="why">
-				<div class="wrap">
-					<div class="section-head">
-						<p class="section-kicker">01 / the trade</p>
-						<h2>Same browser. A better boundary.</h2>
-						<p class="section-lead">
-							The naming authority belongs on the machine with the browser, not inside every project. testd moves DNS, TLS, and
-							registration to one place, then gets out of the way.
-						</p>
+			<section class="section architecture" id="how-it-works">
+				<div class="container">
+					<div class="section-heading reveal">
+						<div>
+							<p class="section-index">01 / HOW IT WORKS</p>
+							<h2>Your machine is the host.<br />Your app stays where it is.</h2>
+						</div>
+						<p>Run the daemon on the machine with your browser. Each dev environment registers over a single outbound connection.</p>
 					</div>
 
-					<div class="compare">
-						<div class="compare-col compare-old">
-							<h3>Without testd</h3>
-							<ul>
-								<li>A hosts edit, a vhost, and a certificate for every project</li>
-								<li>Self-signed warnings, or a browser flag you learn to ignore</li>
-								<li>Port forwarding that only works inside one IDE</li>
-								<li>A public tunnel opened just to look at a page on your phone</li>
-							</ul>
+					<div class="architecture-panel reveal">
+						<div class="architecture-grid">
+							<article class="architecture-node">
+								<div class="architecture-node-top"><span>01</span><span>Browser machine</span></div>
+								<div class="architecture-symbol">
+									<svg viewBox="0 0 48 48" aria-hidden="true"><rect x="5" y="7" width="38" height="32" rx="3" /><path d="M5 16h38M12 11.5h.01M18 11.5h.01M14 25h20M14 31h13" /></svg>
+								</div>
+								<h3>Open a real name.</h3>
+								<code>app.example.test</code>
+								<p>The browser resolves <code>.test</code> to your host and connects over trusted HTTPS.</p>
+							</article>
+
+							<div class="architecture-link" aria-label="HTTPS request">
+								<span>HTTPS</span><div><i></i><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 3 5 5-5 5" /></svg></div><small>:443</small>
+							</div>
+
+							<article class="architecture-node architecture-host">
+								<div class="architecture-node-top"><span>02</span><span>testd host</span></div>
+								<div class="architecture-symbol host-symbol"><img src="/app-icon.png" alt="" /></div>
+								<h3>One local authority.</h3>
+								<div class="host-parts"><span>DNS</span><span>Local CA</span><span>HTTPS edge</span></div>
+								<p>Resolves the name, mints a short-lived certificate, and proxies to the live target.</p>
+							</article>
+
+							<div class="architecture-link architecture-link-reverse" aria-label="Plain TCP registration">
+								<span>NDJSON / TCP</span><div><i></i><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 3 5 5-5 5" /></svg></div><small>:7737</small>
+							</div>
+
+							<article class="architecture-node">
+								<div class="architecture-node-top"><span>03</span><span>Dev environment</span></div>
+								<div class="architecture-symbol">
+									<svg viewBox="0 0 48 48" aria-hidden="true"><path d="m24 5 16 9v20l-16 9-16-9V14l16-9Z" /><path d="m8 14 16 9 16-9M24 23v20M16 9.5l16 9" /></svg>
+								</div>
+								<h3>Keep building.</h3>
+								<code>testd run :3000</code>
+								<p>Your app remains in its container, VM, WSL instance, or remote box. HMR works too.</p>
+							</article>
 						</div>
-						<div class="compare-col compare-new">
-							<h3>With testd</h3>
-							<ul>
-								<li>One fixed TLD, resolved by the host for every name you register</li>
-								<li>Leaf certificates minted on demand, valid for 24 hours</li>
-								<li>Names that exist only while the process that created them runs</li>
-								<li>Nothing reachable from the internet unless you ask for a share</li>
-							</ul>
+						<div class="architecture-note">
+							<span class="note-mark">↳</span>
+							<p><strong>The connection is the lease.</strong> Stop the process or close the terminal, and its names disappear. No stale routes. No cleanup job.</p>
+							<a href="/docs/advanced.html#grants-and-lifecycle">Claims, grants &amp; tokens <span aria-hidden="true">↗</span></a>
 						</div>
 					</div>
 				</div>
 			</section>
 
-			<section class="section section-steps" id="how">
-				<div class="wrap">
-					<div class="section-head">
-						<p class="section-kicker">02 / first name</p>
-						<h2>Three commands, then the name is live.</h2>
-						<p class="section-lead">Names are <code>&lt;service&gt;.&lt;project&gt;</code>. The host appends the TLD.</p>
-					</div>
-
-					<ol class="steps">
-						<li>
-							<span class="step-index">01</span>
-							<h3>Prepare the host</h3>
-							<p>
-								Creates <code>~/.config/testd/config.toml</code>, a local CA, and an operator secret. Resolver configuration and root
-								trust wait for the first remote registration, or run <code>doctor --fix</code> now.
-							</p>
-							<div class="code" data-copy>
-								<pre><code>testd init
-testd host</code></pre>
-								<button class="code-copy" type="button">Copy</button>
-							</div>
-						</li>
-						<li>
-							<span class="step-index">02</span>
-							<h3>Register a name</h3>
-							<p>
-								The leaf asks the host for access. Approve it on the host with <code>testd approve &lt;id&gt;</code> or from the local
-								dashboard. The token is saved and reused.
-							</p>
-							<div class="code" data-copy>
-								<pre><code>testd run app.example:3000 -- npm run dev</code></pre>
-								<button class="code-copy" type="button">Copy</button>
-							</div>
-						</li>
-						<li>
-							<span class="step-index">03</span>
-							<h3>Open the name</h3>
-							<p>
-								The host resolves the name, terminates TLS, and proxies to the dev environment. Closing the terminal removes the name;
-								the next run registers it again.
-							</p>
-							<div class="open-name">
-								<span class="open-name-label">Open</span>
-								<code>https://app.example.test</code>
-							</div>
-						</li>
-					</ol>
-				</div>
-			</section>
-
-			<section class="band" id="architecture">
-				<div class="wrap band-grid">
-					<div class="band-copy">
-						<p class="section-kicker kicker-light">03 / the model</p>
-						<h2>One authority.<br />One connection.<br />No mesh.</h2>
-						<p class="band-lead">
-							The host owns DNS, TLS, the registry, and approvals. A leaf holds one outbound TCP connection and registers names on
-							it. The browser never connects to the leaf.
-						</p>
-						<ul class="band-points">
-							<li>The connection is the lease; a crash or lost network releases the name.</li>
-							<li>Tokens are durable permission, scoped to exact names and revocable.</li>
-							<li>There is no central service, account system, or cross-host mesh.</li>
+			<section class="section dashboard-section" id="features">
+				<div class="container dashboard-grid">
+					<div class="dashboard-copy reveal">
+						<p class="section-index">02 / AT A GLANCE</p>
+						<h2>A live view.<br />Not another<br />control plane.</h2>
+						<p>The loopback dashboard keeps the useful things close: names, targets, shares, access requests, tokens, and certificate health.</p>
+						<ul class="feature-list">
+							<li><span>01</span><div><strong>Live by default</strong><p>Updates stream in without a reload.</p></div></li>
+							<li><span>02</span><div><strong>Local by design</strong><p>Read-only without its per-run control token.</p></div></li>
+							<li><span>03</span><div><strong>Ready when you are</strong><p>Also available from the cross-platform tray app.</p></div></li>
 						</ul>
+						<a class="text-link" href="/docs/usage.html#the-dashboard">Explore the dashboard <span aria-hidden="true">↗</span></a>
 					</div>
 
-					<div class="arch" role="img" aria-label="A browser reaches the host over HTTPS. The host proxies to the app target over HTTP. A leaf registers names with the host over TCP.">
-						<div class="arch-node arch-browser">
-							<span class="arch-kicker">browser</span>
-							<strong>app.example.test</strong>
+					<div class="dashboard-window reveal" aria-label="Illustration of the testd local dashboard">
+						<div class="window-chrome">
+							<div class="window-dots" aria-hidden="true"><i></i><i></i><i></i></div>
+							<div class="window-address"><span class="mini-lock">⌁</span> 127.0.0.1:7737</div>
+							<span class="window-local">LOCAL</span>
 						</div>
-						<div class="arch-link arch-link-https"><span>HTTPS 443</span></div>
-						<div class="arch-node arch-host">
-							<span class="arch-kicker">host</span>
-							<strong>DNS · edge · CA · registry</strong>
-						</div>
-						<div class="arch-link arch-link-http"><span>HTTP</span></div>
-						<div class="arch-node arch-target">
-							<span class="arch-kicker">target</span>
-							<strong>:3000</strong>
-						</div>
-						<div class="arch-leaf">
-							<span class="arch-tcp">NDJSON / TCP 7737</span>
-							<span class="arch-kicker">leaf / container / VM / WSL</span>
-							<code>testd run app.example:3000</code>
+						<div class="dashboard-app">
+							<aside class="dashboard-sidebar">
+								<div class="dashboard-brand"><img src="/app-icon.png" alt="" /><strong>testd</strong></div>
+								<div class="sidebar-nav">
+									<span class="active"><i></i>Overview</span><span><i></i>Names</span><span><i></i>Shares</span><span><i></i>Access</span>
+								</div>
+								<div class="sidebar-host"><span class="status-dot"></span><div><strong>Host online</strong><small>workstation</small></div></div>
+							</aside>
+							<div class="dashboard-main">
+								<div class="dashboard-title"><div><small>WORKSTATION / OVERVIEW</small><h3>Good routes, all round.</h3></div><span class="dashboard-time">LIVE <i></i></span></div>
+								<div class="dashboard-stats"><div><span>Live names</span><strong>03</strong></div><div><span>Active shares</span><strong>01</strong></div><div><span>Access requests</span><strong class="ember-text">01</strong></div></div>
+								<div class="dashboard-card names-card">
+									<div class="dashboard-card-title"><strong>Live names</strong><span>Target</span></div>
+									<div class="name-row"><span class="service-icon">A</span><div><strong>app.example</strong><small>https://app.example.test</small></div><code>10.0.0.5:3000</code><i class="row-status"></i></div>
+									<div class="name-row"><span class="service-icon">↗</span><div><strong>api.example</strong><small>https://api.example.test</small></div><code>10.0.0.5:8080</code><i class="row-status"></i></div>
+									<div class="name-row"><span class="service-icon">D</span><div><strong>docs.example</strong><small>https://docs.example.test</small></div><code>127.0.0.1:4173</code><i class="row-status"></i></div>
+								</div>
+								<div class="dashboard-bottom">
+									<div class="dashboard-card share-mini"><div class="dashboard-card-title"><strong>Active share</strong><span class="tiny-tag">TAILNET</span></div><strong>app.example</strong><code>https://devbox.tail.ts.net</code><span class="share-line"><i></i> Connected through Tailscale</span></div>
+									<div class="dashboard-card request-mini"><div class="dashboard-card-title"><strong>Access request</strong><span>NOW</span></div><code>mara@devbox:example</code><strong>worker.example</strong><div class="request-actions"><span>Approve</span><span>Deny</span></div></div>
+								</div>
+							</div>
 						</div>
 					</div>
-				</div>
-
-				<div class="wrap trust-wrap">
-					<h3 class="trust-title">Trust boundaries</h3>
-					<dl class="trust">
-						<div><dt>Browser → edge</dt><dd>TLS with a locally trusted root</dd></div>
-						<div><dt>Leaf → host</dt><dd>Plain TCP and a bearer token; use a trusted network or VPN</dd></div>
-						<div><dt>Host → app</dt><dd>Plain HTTP/1.1 on the last hop</dd></div>
-						<div><dt>Dashboard</dt><dd>Loopback only, plus a per-run token</dd></div>
-					</dl>
 				</div>
 			</section>
 
-			<section class="section" id="capabilities">
-				<div class="wrap">
-					<div class="section-head">
-						<p class="section-kicker">04 / operations</p>
-						<h2>Built for the unglamorous parts.</h2>
-						<p class="section-lead">
-							Approvals, revocation, sharing, repair, and the desktop surface are part of the product, not an afterthought.
-						</p>
+			<section class="section details-section">
+				<div class="container">
+					<div class="section-heading compact reveal">
+						<div><p class="section-index">03 / THE DETAILS</p><h2>Small surface.<br />Solid foundations.</h2></div>
+						<p>Purposeful defaults for everyday development, with escape hatches when your setup gets interesting.</p>
 					</div>
+					<div class="feature-grid">
+						<article class="feature-card certificate-card reveal">
+							<div class="feature-card-top"><span>LOCAL HTTPS</span><span>01</span></div>
+							<div class="certificate-visual" aria-hidden="true">
+								<svg viewBox="0 0 220 180" fill="none">
+									<path d="m110 10 80 46v92l-80 46-80-46V56l80-46Z" />
+									<path d="m110 29 64 37v74l-64 37-64-37V66l64-37Z" />
+									<path d="m110 49 47 27v54l-47 27-47-27V76l47-27Z" />
+									<path class="certificate-check" d="m82 105 19 19 39-45" />
+								</svg>
+								<span>24<small>H</small></span>
+							</div>
+							<h3>Certificates, handled.</h3>
+							<p>A local CA mints leaf certificates on demand. They live for 24 hours; the root key never leaves your host.</p>
+						</article>
 
-					<div class="capabilities">
-						<article>
-							<span class="cap-index">01</span>
-							<h3>Access requests and tokens</h3>
-							<p>
-								A new machine asks for a grant. Approve it once; the token covers exact names and can be revoked without touching
-								the operator secret or any other leaf.
-							</p>
+						<article class="feature-card remote-card reveal">
+							<div class="feature-card-top"><span>REMOTE DEVELOPMENT</span><span>02</span></div>
+							<div class="remote-visual" aria-hidden="true"><span>HOST</span><div><i></i><i></i><i></i></div><span>LEAF</span></div>
+							<h3>Your environment can be elsewhere.</h3>
+							<p>Connect containers, VMs, WSL, and remote boxes. Named profiles remember your hosts; reconnects reuse approved grants.</p>
+							<div class="feature-tags"><span>Multi-host profiles</span><span>WebSockets + HMR</span></div>
 						</article>
-						<article>
-							<span class="cap-index">02</span>
-							<h3>Shares and tunnels</h3>
-							<p>
-								Reach a name from a phone, a webhook, or a colleague with cloudflared, ngrok, or a tailnet. The daemon owns the tunnel,
-								so closing the terminal does not close the share.
-							</p>
+
+						<article class="feature-card access-card reveal">
+							<div class="feature-card-top"><span>SCOPED ACCESS</span><span>03</span></div>
+							<div class="access-visual" aria-hidden="true"><span class="key-shape">⌁</span><div><i></i><i></i><i></i></div></div>
+							<h3>Permission, name by name.</h3>
+							<p>Approve a new environment once. Issued tokens cover exact names, persist across reconnects, and can be revoked without disturbing others.</p>
+							<a href="/docs/security.html#secrets">Read the trust model <span aria-hidden="true">↗</span></a>
 						</article>
-						<article>
-							<span class="cap-index">03</span>
-							<h3>Quick launches</h3>
-							<p>
-								Save a command in the dashboard or the tray. testd starts it, detects the listening port, and registers the name only
-								after the target accepts.
-							</p>
-						</article>
-						<article>
-							<span class="cap-index">04</span>
-							<h3>Doctor and repair</h3>
-							<p>
-								One command checks configuration, the resolver, PKI, trust, and the edge. Exit codes are stable, and <code>--json</code>
-								is meant for scripts.
-							</p>
-						</article>
-						<article>
-							<span class="cap-index">05</span>
-							<h3>Tray and notifications</h3>
-							<p>
-								Run the daemon, open the dashboard, approve requests, and start launches from the menu. Repair notifications carry an
-								action, not just a warning.
-							</p>
-						</article>
-						<article>
-							<span class="cap-index">06</span>
-							<h3>External fronts</h3>
-							<p>
-								Already run Caddy or another front? Keep it. <code>testd export-caddyfile</code> writes the managed config, and the
-								built-in edge is optional.
-							</p>
+
+						<article class="feature-card launches-card reveal">
+							<div class="feature-card-top"><span>QUICK LAUNCHES</span><span>04</span></div>
+							<div class="launch-command"><span>$</span><code>npm run dev</code><i></i></div>
+							<h3>From saved command to live name.</h3>
+							<p>Start projects from the dashboard or tray. testd can detect the listening port, probe the target, and register when it is ready.</p>
 						</article>
 					</div>
 				</div>
 			</section>
 
-			<section class="section section-security" id="security">
-				<div class="wrap security-grid">
-					<div class="security-copy">
-						<p class="section-kicker">05 / trust</p>
-						<h2>Small trust surface.</h2>
-						<p class="section-lead">
-							testd is a development tool, not a public ingress controller. It gives names and HTTPS to machines you control and keeps
-							the authority local.
-						</p>
-						<a class="text-link" href="/docs/security.html">Read the security model <span aria-hidden="true">→</span></a>
+			<section class="section share-section">
+				<div class="container share-panel reveal">
+					<div class="share-copy">
+						<p class="section-index">04 / EXPLICIT EXPOSURE</p>
+						<h2>Private until you<br />decide otherwise.</h2>
+						<p>Names stay on your host. When a phone, webhook, or teammate needs access, start a share. The daemon owns the tunnel and closes it when the name goes away.</p>
+						<a class="text-link" href="/docs/usage.html#share-a-name">Learn about sharing <span aria-hidden="true">↗</span></a>
 					</div>
-
-					<ul class="security-list">
-						<li>
-							<strong>The root key stays on the host.</strong>
-							<span>The root is installed once per browser machine. Leaf certificates live 24 hours and are minted on demand.</span>
-						</li>
-						<li>
-							<strong>Issued tokens are scoped and revocable.</strong>
-							<span>The operator secret is bootstrap only. A leaked issued token can publish only its granted names.</span>
-						</li>
-						<li>
-							<strong>Registration traffic is plain TCP.</strong>
-							<span>Use a trusted LAN, a VPN, or another encrypted transport. Do not expose intake port 7737 to the internet.</span>
-						</li>
-						<li>
-							<strong>No account, no telemetry, no public dependency.</strong>
-							<span>No public DNS, ACME, or vendor API in the product. Tunnel providers are spawned processes, never linked SDKs.</span>
-						</li>
-					</ul>
-
-					<blockquote class="quote">
-						<p>A token is the key, its grants are the doors it may open, and a claim is a door currently held open.</p>
-						<cite>Advanced usage, grants and lifecycle</cite>
-					</blockquote>
+					<div class="share-terminal">
+						<div class="share-terminal-top"><span>SHARE / app.example</span><span class="status-dot"></span></div>
+						<div class="share-code"><span>$</span><code id="share-command">testd share app.example --provider tailscale</code><button class="copy-button copy-button-dark" type="button" data-copy-target="share-command" aria-label="Copy share command"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1" /><path d="M10.5 5.5v-3h-8v8h3" /></svg><span class="copy-label">Copy</span></button></div>
+						<div class="provider-list"><div><span class="provider-mark">C</span><strong>cloudflared</strong><small>Public · no account</small></div><div><span class="provider-mark">N</span><strong>ngrok</strong><small>Public · your account</small></div><div><span class="provider-mark">T</span><strong>tailscale</strong><small>Your tailnet</small></div></div>
+						<p><span>!</span> A public share is a public route. Share only what you intend to expose.</p>
+					</div>
 				</div>
 			</section>
 
-			<section class="section section-install" id="install">
-				<div class="wrap install-grid">
-					<div class="install-copy">
-						<p class="section-kicker">06 / install</p>
-						<h2>Up in three commands.</h2>
-						<p class="section-lead">
-							Build from source, use the install script, or install through Homebrew. The tray app is a separate Tauri build; the CLI
-							works on its own.
-						</p>
-						<ul class="install-notes">
-							<li>macOS, Linux, and Windows</li>
-							<li>Public releases carry <code>SHA256SUMS</code></li>
-							<li>No in-app updater or commercial service</li>
-						</ul>
+			<section class="section security-section">
+				<div class="container">
+					<div class="security-heading reveal"><p class="section-index">05 / CLEAR BOUNDARIES</p><h2>Local means local.</h2><p>No account system. No central service. No telemetry, usage reporting, or name reporting.</p></div>
+					<div class="security-grid reveal">
+						<div><span class="security-number">01</span><h3>Root key stays home</h3><p>Your CA private key remains on the host, never in a dev environment.</p></div>
+						<div><span class="security-number">02</span><h3>Dashboard on loopback</h3><p>Administrative actions need a per-run token. The edge never proxies the dashboard.</p></div>
+						<div><span class="security-number">03</span><h3>Remote targets constrained</h3><p>Remote leaves can target only their own address unless you explicitly opt in.</p></div>
+						<div><span class="security-number">04</span><h3>Plainly documented</h3><p>Registration uses plain TCP. Use a trusted network or encrypted transport; never expose :7737 publicly.</p></div>
 					</div>
-
-					<div class="install-panel">
-						<div class="install-option">
-							<div class="option-head"><span>Install script</span><span class="option-note">macOS, Linux</span></div>
-							<div class="code" data-copy>
-								<pre><code>curl -fsSL https://testd.dev/install.sh | sh</code></pre>
-								<button class="code-copy" type="button">Copy</button>
-							</div>
-						</div>
-						<div class="install-option">
-							<div class="option-head"><span>Homebrew</span><span class="option-note">macOS, Linux</span></div>
-							<div class="code" data-copy>
-								<pre><code>brew install testd/tap/testd</code></pre>
-								<button class="code-copy" type="button">Copy</button>
-							</div>
-						</div>
-						<div class="install-option">
-							<div class="option-head"><span>From source</span><span class="option-note">Rust</span></div>
-							<div class="code" data-copy>
-								<pre><code>cargo install --path .</code></pre>
-								<button class="code-copy" type="button">Copy</button>
-							</div>
-						</div>
-					</div>
+					<a class="security-link reveal" href="/docs/security.html">Read the complete security model <span aria-hidden="true">↗</span></a>
 				</div>
+			</section>
 
-				<div class="wrap first-run">
-					<div class="first-run-copy">
-						<h3>Then the first name</h3>
-						<p>
-							On Linux, port 443 needs <code>CAP_NET_BIND_SERVICE</code> or a high <code>edge_addr</code>. The quickstart covers the
-							capability, the systemd unit, and the high-port alternative.
-						</p>
-						<a class="text-link" href="/docs/quickstart.html">Open the quickstart <span aria-hidden="true">→</span></a>
+			<section class="section quickstart-section" id="quickstart">
+				<div class="container">
+					<div class="quickstart-heading reveal">
+						<p class="section-index">06 / QUICKSTART</p>
+						<h2>From zero to HTTPS<br />in three moves.</h2>
+						<div><p>Set up the host once. Then give every project a name with a single command.</p><a class="text-link" href="https://github.com/testd/testd/releases" target="_blank" rel="noreferrer">Download a release <span aria-hidden="true">↗</span></a></div>
 					</div>
-					<div class="code code-tall" data-copy>
-						<pre><code><span class="code-comment"># host, once</span>
+
+					<div class="quickstart-grid reveal">
+						<ol class="setup-steps">
+							<li><span>01</span><div><h3>Prepare the host</h3><p>Create the local CA, configure the resolver, and start the daemon.</p></div></li>
+							<li><span>02</span><div><h3>Name your project</h3><p>Run the command where your app lives. Add your dev command after <code>--</code> to tie their lifetimes together. A new remote environment asks for one approval on the host.</p></div></li>
+							<li><span>03</span><div><h3>Open the address</h3><p>Your browser gets a stable, trusted URL. Keep the command running; stop it to release the name.</p><code class="result-url">https://app.example.test</code></div></li>
+						</ol>
+
+						<div class="quickstart-console">
+							<div class="console-header"><div class="window-dots" aria-hidden="true"><i></i><i></i><i></i></div><span>your-project · zsh</span><span>80 × 24</span></div>
+							<div class="console-body">
+								<div class="code-block">
+									<div class="code-label"><span>01 / ON THE HOST</span><button class="copy-button copy-button-dark" type="button" data-copy-target="host-setup" aria-label="Copy host setup commands"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1" /><path d="M10.5 5.5v-3h-8v8h3" /></svg><span class="copy-label">Copy</span></button></div>
+									<pre id="host-setup"><code><span class="code-comment"># once, to prepare this machine</span>
 testd init
 testd doctor --fix
-testd host
 
-<span class="code-comment"># project, then open the name</span>
-testd run app.example:3000 -- npm run dev</code></pre>
-						<button class="code-copy" type="button">Copy</button>
+<span class="code-comment"># keep the host running</span>
+testd host</code></pre>
+								</div>
+								<div class="code-block project-code">
+									<div class="code-label"><span>02 / IN YOUR PROJECT</span><button class="copy-button copy-button-dark" type="button" data-copy-active-panel aria-label="Copy project command"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1" /><path d="M10.5 5.5v-3h-8v8h3" /></svg><span class="copy-label">Copy</span></button></div>
+									<div class="code-tabs" role="tablist" aria-label="Project location">
+										<button id="local-tab" type="button" role="tab" aria-selected="true" aria-controls="local-panel" data-code-tab="local">This machine</button>
+										<button id="remote-tab" type="button" role="tab" aria-selected="false" aria-controls="remote-panel" tabindex="-1" data-code-tab="remote">Remote environment</button>
+									</div>
+									<pre id="local-panel" role="tabpanel" aria-labelledby="local-tab" data-code-panel="local"><code>testd run app.example:3000 \
+  -- npm run dev</code></pre>
+									<pre id="remote-panel" role="tabpanel" aria-labelledby="remote-tab" data-code-panel="remote" hidden><code>testd run --host 192.168.1.5 \
+  app.example:3000 -- npm run dev</code></pre>
+									<div class="console-output"><span>→</span><div><strong>app.example</strong> registered<br /><span>https://app.example.test</span></div><i class="status-dot"></i></div>
+								</div>
+							</div>
+							<div class="console-footer"><span><i></i> Name live while process is running</span><span>UTF-8</span></div>
+						</div>
 					</div>
+					<p class="quickstart-note reveal">Installing from source? Clone the repository and run <code>cargo install --path .</code>. Linux port 443 requires a capability or a high port. <a href="/docs/quickstart.html">Full installation notes <span aria-hidden="true">↗</span></a></p>
+				</div>
+			</section>
+
+			<section class="studio-section">
+				<div class="container studio-grid reveal">
+					<div class="studio-mark" aria-hidden="true">
+						<svg viewBox="0 0 180 160" fill="none"><path d="m90 8 65 38v76l-65 38-65-38V46L90 8Z" /><path d="m90 31 46 27v52l-46 27-46-27V58l46-27Z" /><path d="m90 55 27 16v31l-27 16-27-16V71l27-16Z" /><path d="m90 8v47M25 46l38 25M155 46l-38 25M25 122l38-20M155 122l-38-20M90 118v42" /></svg>
+					</div>
+					<div class="studio-name"><p class="section-index">MADE BY LAPILLI WORKS</p><img src="/lapilli-wordmark.svg" alt="Lapilli" /></div>
+					<div class="studio-copy"><p class="studio-definition"><em>Lapilli</em>, Latin for “little stones”: fragments formed in a volcanic eruption.</p><p>We are a software studio making considered software and SaaS: good design, high quality, a human touch, and an unconventional point of view.</p></div>
 				</div>
 			</section>
 		</main>
 
 		<footer class="site-footer">
-			<div class="wrap footer-top">
-				<div class="footer-brand">
-					<a class="brand brand-light" href="/" aria-label="testd home">
-						<svg class="brand-mark" viewBox="0 0 1024 1024" aria-hidden="true">
-							<rect x="120" y="120" width="784" height="784" fill="none" stroke="currentColor" stroke-width="16" />
-							<path fill="currentColor" d="M561 374H610V439H668V476H610V560C610 620 614 660 624 677C634 692 650 690 668 684L680 705C668 710 640 714 615 710C590 706 568 692 562 668C561 658 561 620 561 560V476H518V439H561Z" />
-							<path fill="currentColor" d="M380 634H454V710H380Z" />
-						</svg>
-						<span class="brand-name">testd</span>
-					</a>
-					<p>Stable HTTPS names for projects that do not run on your laptop.</p>
-				</div>
-
-				<div class="footer-cols">
-					<div>
-						<h3>Product</h3>
-						<a href="#how">How it works</a>
-						<a href="#capabilities">Operations</a>
-						<a href="#security">Security</a>
-						<a href="#install">Install</a>
-					</div>
-					<div>
-						<h3>Docs</h3>
-						<a href="/docs/">Overview</a>
-						<a href="/docs/quickstart.html">Quickstart</a>
-						<a href="/docs/reference.html">Reference</a>
-						<a href="/docs/security.html">Security model</a>
-					</div>
-					<div>
-						<h3>Project</h3>
-						<a href="https://github.com/testd/testd">GitHub <span aria-hidden="true">↗</span></a>
-						<a href="https://github.com/testd/testd/blob/master/CHANGELOG.md">Changelog <span aria-hidden="true">↗</span></a>
-						<a href="https://github.com/testd/testd/blob/master/LICENSE">License <span aria-hidden="true">↗</span></a>
-						<a href="https://github.com/testd/testd/blob/master/SECURITY.md">Report a vulnerability <span aria-hidden="true">↗</span></a>
-					</div>
-				</div>
+			<div class="container footer-main">
+				<div class="footer-brand"><a class="brand" href="#top"><img class="brand-icon" src="/app-icon.png" alt="" /><span class="brand-name">testd</span></a><p>Stable HTTPS names for<br />wherever you build.</p><span>Free &amp; open source · ISC</span></div>
+				<div class="footer-column"><h2>Product</h2><a href="#how-it-works">How it works</a><a href="#features">Features</a><a href="#quickstart">Quickstart</a><a href="https://github.com/testd/testd/releases" target="_blank" rel="noreferrer">Releases ↗</a></div>
+				<div class="footer-column"><h2>Resources</h2><a href="/docs/">Documentation</a><a href="/docs/reference.html">CLI reference</a><a href="/docs/security.html">Security</a><a href="https://github.com/testd/testd" target="_blank" rel="noreferrer">Source code ↗</a></div>
+				<div class="footer-studio"><img src="/lapilli-wordmark-reversed.svg" alt="Lapilli" /><span>A Lapilli Works product</span></div>
 			</div>
-
-			<div class="wrap footer-bottom">
-				<span>ISC licensed · © <span id="year">2026</span> Lapilli Works</span>
-				<a class="studio" href="https://lapil.li">
-					<img class="studio-wordmark" src="/lapilli-wordmark-reversed.svg" alt="Lapilli" width="1000" height="686" />
-					<span>Works</span>
-				</a>
-			</div>
+			<div class="container footer-bottom"><span>© <span data-year>2026</span> the testd authors</span><span>Built close to the metal. Made for people.</span><a href="#top">Back to top ↑</a></div>
 		</footer>
 
-		<script type="module" src="/src/main.ts"></script>
+		<div class="toast" role="status" aria-live="polite" data-toast></div>
+		<script type="module" src="/main.ts"></script>
 	</body>
 </html>
