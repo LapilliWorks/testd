@@ -530,6 +530,7 @@ class BrowserTests(unittest.TestCase):
 		with tempfile.TemporaryDirectory() as directory:
 			run = self.create_run(directory)
 			events = []
+			binary_path = pathlib.Path('/bin/true')
 
 			@contextlib.contextmanager
 			def start_host(*args, **kwargs):
@@ -543,14 +544,14 @@ class BrowserTests(unittest.TestCase):
 				patch.object(runner, 'check_ports'), \
 				patch.object(runner, 'local_host_status', side_effect=runner.HostUnavailable('missing')), \
 				patch.object(runner, 'wait_for_host', return_value={'tld': 'test'}) as wait, \
-				patch.object(runner, 'binary', return_value=pathlib.Path('/bin/true')), \
+				patch.object(runner, 'binary', return_value=binary_path), \
 				patch.object(runner, 'require_host_resolution'), \
 				patch.object(run, 'serve', side_effect=start_host) as serve, \
 				patch.object(run, 'command', return_value='') as command, \
 				redirect_stdout(io.StringIO()):
 				runner.browser(run)
 			self.assertEqual(events, ['start', 'stop'])
-			serve.assert_called_once_with('host-fixture', ['/bin/true', 'host'], stop_signal=signal.SIGINT)
+			serve.assert_called_once_with('host-fixture', [str(binary_path), 'host'], stop_signal=signal.SIGINT)
 			wait.assert_called_once_with(7737, 'process', 'output')
 			command.assert_called_once()
 
@@ -759,6 +760,7 @@ class CommandOutputTests(unittest.TestCase):
 			self.assertEqual(popen.call_args.kwargs['start_new_session'], runner.SYSTEM != 'Windows')
 			self.assertNotIn('process_group', popen.call_args.kwargs)
 
+	@unittest.skipUnless(hasattr(os, 'getpgid'), 'process groups are POSIX-only')
 	def test_a_detached_child_is_signalled_alone(self):
 		process = Mock(pid=4321)
 		with patch.object(runner, 'SYSTEM', 'Linux'), patch.object(runner.os, 'getpgid', return_value=1), \
@@ -767,6 +769,7 @@ class CommandOutputTests(unittest.TestCase):
 		process.send_signal.assert_called_once_with(signal.SIGTERM)
 		killpg.assert_not_called()
 
+	@unittest.skipUnless(hasattr(os, 'getpgid'), 'process groups are POSIX-only')
 	def test_a_session_leader_takes_its_group_down(self):
 		process = Mock(pid=4321)
 		with patch.object(runner, 'SYSTEM', 'Linux'), patch.object(runner.os, 'getpgid', return_value=4321), \
