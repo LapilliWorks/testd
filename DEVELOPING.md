@@ -6,7 +6,7 @@
 - Python 3.12 or newer for release tooling and reports; Bun for browser fixtures
 - `cargo-cyclonedx` for workspace SBOM generation
 - `cargo-nextest` for tests and `cargo-deny` for dependency checks
-- `cargo-tauri` and the platform's Tauri prerequisites for the tray app: Xcode command-line tools on macOS, WebKitGTK/GTK on Linux, MSVC on Windows
+- `tauri-cli` and the platform's Tauri prerequisites for the tray app: Xcode command-line tools on macOS, WebKitGTK/GTK on Linux, MSVC on Windows
 - On Fedora/RHEL, `qt5-qttools` provides `qtpaths`, which the Linux AppImage bundler needs
 
 ## Build

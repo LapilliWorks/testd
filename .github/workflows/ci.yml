@@ -174,10 +174,10 @@ jobs:
       - id: tauri-cli
         uses: actions/cache@v4
         with:
-          path: ~/.cargo/bin/cargo-tauri*
-          key: cargo-tauri-v2-${{ runner.os }}-${{ runner.arch }}
+          path: ~/.cargo/bin/tauri-cli*
+          key: tauri-cli-v2-${{ runner.os }}-${{ runner.arch }}
       - if: steps.tauri-cli.outputs.cache-hit != 'true'
-        run: cargo install cargo-tauri --locked --version '^2'
+        run: cargo install tauri-cli --locked --version '^2'
       - run: cargo build --release --bin testd --locked --target ${{ matrix.target }}
       - run: cargo tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
       - run: >-
