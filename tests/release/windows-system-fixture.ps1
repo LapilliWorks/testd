@@ -17,10 +17,6 @@ Set-StrictMode -Version Latest
 # native tools whose output the checks read.
 . "$PSScriptRoot\utf8-output.ps1"
 
-# -Command does not load Microsoft.PowerShell.Security, which owns the Cert:
-# drive that -CertStoreLocation resolves, so import it first.
-Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
-
 # The TLD is one DNS label, and the self-test's throwaway zone is longer than
 # ten characters, so bound it only by the label limit.
 if ($Tld -notmatch '^[a-z0-9]{1,63}$') { throw 'invalid TLD' }
@@ -29,8 +25,29 @@ if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrat
 	throw 'The restore self-test needs an elevated shell'
 }
 
-$certificate = New-SelfSignedCertificate -Subject 'CN=testd root testing' `
-	-CertStoreLocation 'Cert:\LocalMachine\Root' -NotAfter (Get-Date).AddDays(1) `
-	-KeyExportPolicy Exportable
+# Build and store the root through .NET rather than New-SelfSignedCertificate:
+# importing Microsoft.PowerShell.Security for the Cert: drive collides with the
+# Security snap-in Windows PowerShell already has loaded, which reports its type
+# data as a duplicate and stops the import. The state script opens the store
+# the same direct way.
+$key = [System.Security.Cryptography.RSACryptoServiceProvider]::new(2048)
+$request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
+	'CN=testd root testing', $key,
+	[System.Security.Cryptography.HashAlgorithmName]::SHA256,
+	[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+$selfSigned = $request.CreateSelfSigned(
+	[DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOffset]::UtcNow.AddDays(1))
+# Add the public part only, so nothing depends on the ephemeral key container.
+$certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+	$selfSigned.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+$name = [System.Security.Cryptography.X509Certificates.StoreName]::Root
+$location = [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine
+$store = [System.Security.Cryptography.X509Certificates.X509Store]::new($name, $location)
+$store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+try {
+	$store.Add($certificate)
+} finally {
+	$store.Close()
+}
 Add-DnsClientNrptRule -Namespace ('.' + $Tld) -NameServers '127.0.0.1' | Out-Null
 Write-Host "Installed fixture root $($certificate.Thumbprint) and NRPT rule for .$Tld"
