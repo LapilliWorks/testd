@@ -498,7 +498,7 @@ The formula ships the CLI and daemon; the cask ships the tray app.
 
 ### Tap layout
 
-Homebrew wants a repository named `homebrew-<tap>`. For `brew tap testd/testd`:
+Homebrew wants a repository named `homebrew-<tap>`. For `brew tap LapilliWorks/testd`:
 
 ```
 homebrew-testd/

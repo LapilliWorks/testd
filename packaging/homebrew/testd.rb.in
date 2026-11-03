@@ -2,12 +2,12 @@ require 'json'
 
 class Testd < Formula
   desc "Local dev domain manager: stable HTTPS names from any dev environment"
-  homepage "https://github.com/testd/testd"
+  homepage "https://github.com/LapilliWorks/testd"
   version '@VERSION@'
-  url 'https://github.com/testd/testd/archive/refs/tags/v@VERSION@.tar.gz'
+  url 'https://github.com/LapilliWorks/testd/archive/refs/tags/v@VERSION@.tar.gz'
   sha256 '@SOURCE_SHA256@'
   license "ISC"
-  head "https://github.com/testd/testd.git", branch: "master"
+  head "https://github.com/LapilliWorks/testd.git", branch: "master"
 
   depends_on "rust" => :build
 

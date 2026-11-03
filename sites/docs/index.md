@@ -50,4 +50,4 @@ The host is the authority. It runs DNS for `.test`, terminates TLS with a local 
 
 ## Source and releases
 
-The source, changelog, and release archives live at <https://github.com/testd/testd>. The product site is at <https://testd.dev>. testd is ISC licensed and has no account, telemetry, public DNS, or ACME dependency.
+The source, changelog, and release archives live at <https://github.com/LapilliWorks/testd>. The product site is at <https://testd.dev>. testd is ISC licensed and has no account, telemetry, public DNS, or ACME dependency.

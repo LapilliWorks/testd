@@ -13,7 +13,7 @@ import urllib.request
 import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-REPOSITORY = 'https://github.com/testd/testd'
+REPOSITORY = 'https://github.com/LapilliWorks/testd'
 TARGETS = {
 	'aarch64-apple-darwin': ('macos', 'aarch64'),
 	'x86_64-apple-darwin': ('macos', 'x64'),
