@@ -38,7 +38,7 @@ bun run dev
 
 The script runs the official Bun image (`oven/bun:1.4.4`) with `docs/`, `sites/`, and `scripts/` mounted, installs dependencies into the `testd-site-node-modules` volume, and runs the stock `vitepress` and `vite` CLI entrypoints with Bun. It prefers Podman and falls back to Docker; set `TESTD_SITE_RUNTIME` to pin one. The product server is the public origin and proxies `/docs/` to VitePress on loopback.
 
-Set `TESTD_SITE_PORT` to publish a different host port, `TESTD_SITE_PREVIEW_PORT` for preview, and `TESTD_SITE_IMAGE` or `TESTD_SITE_VOLUME` to override the image or dependency volume. `--host 0.0.0.0` (or `TESTD_SITE_HOST`) serves the site to the network. Remove the volumes with `./sites/bin/site.sh clean`.
+`--host 0.0.0.0` (or `TESTD_SITE_HOST`) serves the site to the network. `--port <port>` overrides the published port for `dev` or `preview`; `TESTD_SITE_PORT` and `TESTD_SITE_PREVIEW_PORT` set the defaults, and `TESTD_SITE_IMAGE` or `TESTD_SITE_VOLUME` overrides the image or dependency volume. Remove the volumes with `./sites/bin/site.sh clean`.
 
 The build and check scripts remain the local path used by CI; they need `bun install` first and run outside the container:
 
