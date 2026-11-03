@@ -52,6 +52,8 @@ bun run check:links
 
 `bun run build` writes the product site first and the docs second; deploy `dist/` as one static tree. `bun run preview -- --host 0.0.0.0` exposes the built tree on every interface.
 
+`master` publishes `dist/` to <https://testd.dev> through the Cloudflare Pages Git integration. The project settings and the Workers alternative are in [sites/README.md](sites/README.md#publish).
+
 ## Test
 
 ```sh
