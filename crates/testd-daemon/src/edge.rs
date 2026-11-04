@@ -355,6 +355,9 @@ async fn handle(handler: Handler, request: Request<Incoming>) -> Response<Body> 
 		};
 	}
 
+	if is_connection_option(request.headers(), &HOST) {
+		return text(StatusCode::BAD_REQUEST, "Host cannot be connection-specific");
+	}
 	let host = match host_of(&request) {
 		Some(host) => host,
 		None => return text(StatusCode::BAD_REQUEST, "missing Host header"),
@@ -560,9 +563,8 @@ fn host_of<B>(request: &Request<B>) -> Option<String> {
 }
 
 fn is_upgrade<B>(request: &Request<B>) -> bool {
-	let connection = request.headers().get(CONNECTION).and_then(|v| v.to_str().ok()).unwrap_or("");
 	let upgrade = request.headers().get(UPGRADE).and_then(|v| v.to_str().ok()).unwrap_or("");
-	connection.split(',').any(|token| token.trim().eq_ignore_ascii_case("upgrade")) && !upgrade.is_empty()
+	is_connection_option(request.headers(), &UPGRADE) && !upgrade.is_empty()
 }
 
 fn is_hop_by_hop(name: &HeaderName) -> bool {
@@ -578,10 +580,19 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
 	)
 }
 
+fn is_connection_option(headers: &HeaderMap, name: &HeaderName) -> bool {
+	headers.get_all(CONNECTION).iter().any(|value| {
+		value
+			.as_bytes()
+			.split(|byte| *byte == b',')
+			.any(|token| token.trim_ascii().eq_ignore_ascii_case(name.as_str().as_bytes()))
+	})
+}
+
 fn filter_request_headers(headers: &HeaderMap, upgrade: bool) -> HeaderMap {
 	let mut filtered = HeaderMap::new();
 	for (name, value) in headers {
-		if is_hop_by_hop(name) {
+		if is_hop_by_hop(name) || is_connection_option(headers, name) {
 			continue;
 		}
 		if !upgrade && name == UPGRADE {
@@ -601,7 +612,7 @@ fn filter_request_headers(headers: &HeaderMap, upgrade: bool) -> HeaderMap {
 fn filter_response_headers(headers: &HeaderMap) -> HeaderMap {
 	let mut filtered = HeaderMap::new();
 	for (name, value) in headers {
-		if is_hop_by_hop(name) || name == UPGRADE || name == CONNECTION {
+		if is_hop_by_hop(name) || is_connection_option(headers, name) || name == UPGRADE || name == CONNECTION {
 			continue;
 		}
 		filtered.append(name.clone(), value.clone());
@@ -689,6 +700,16 @@ mod tests {
 		let second = store.mint("app.test").unwrap();
 		assert_eq!(first.cert[0].as_ref(), second.cert[0].as_ref());
 		std::fs::remove_dir_all(&dir).ok();
+	}
+
+	#[test]
+	fn connection_options_are_found_even_when_another_token_is_not_ascii() {
+		let mut headers = HeaderMap::new();
+		headers.append(CONNECTION, HeaderValue::from_bytes(b"other\xff, X-Remove").unwrap());
+		headers.append(CONNECTION, HeaderValue::from_static("upgrade"));
+		assert!(is_connection_option(&headers, &HeaderName::from_static("x-remove")));
+		assert!(is_connection_option(&headers, &UPGRADE));
+		assert!(!is_connection_option(&headers, &HOST));
 	}
 
 	#[test]

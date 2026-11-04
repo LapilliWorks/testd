@@ -154,9 +154,31 @@ async fn upstream_service(request: Request<Incoming>, dropped: Arc<Notify>) -> R
 				.body(empty())
 				.unwrap())
 		},
+		"/hop-headers" => {
+			let header = |name| request.headers().get(name).and_then(|v| v.to_str().ok()).unwrap_or("");
+			let summary = format!(
+				"first={} second={} third={} keep={}",
+				header("x-request-hop"),
+				header("x-second-hop"),
+				header("x-third-hop"),
+				header("x-request-keep")
+			);
+			Ok(Response::builder()
+				.header(CONNECTION, "close, X-Response-Hop")
+				.header("x-response-hop", "discard")
+				.header("x-response-keep", "kept")
+				.body(Full::new(Bytes::from(summary)).boxed())
+				.unwrap())
+		},
 		"/ws" => {
 			let mut request = request;
 			let host = request.headers().get("host").unwrap().clone();
+			let hop = request
+				.headers()
+				.get("x-upgrade-hop")
+				.and_then(|v| v.to_str().ok())
+				.unwrap_or("absent");
+			let hop = hop.to_owned();
 			let upgrade = hyper::upgrade::on(&mut request);
 			tokio::spawn(async move {
 				if let Ok(upgraded) = upgrade.await {
@@ -176,9 +198,11 @@ async fn upstream_service(request: Request<Incoming>, dropped: Arc<Notify>) -> R
 			});
 			Ok(Response::builder()
 				.status(StatusCode::SWITCHING_PROTOCOLS)
-				.header(CONNECTION, "upgrade")
+				.header(CONNECTION, "upgrade, X-Response-Hop")
 				.header(UPGRADE, "websocket")
+				.header("x-response-hop", "discard")
 				.header("x-seen-host", host)
+				.header("x-seen-hop", hop)
 				.body(empty())
 				.unwrap())
 		},
@@ -291,6 +315,28 @@ async fn untrusted_forwarded_address_and_scheme_are_replaced() {
 }
 
 #[tokio::test]
+async fn connection_nominated_headers_do_not_cross_the_proxy() {
+	let harness = start().await;
+	let request = "GET /hop-headers HTTP/1.1\r\nHost: app.test\r\n\
+		Connection: close, X-Request-Hop, x-second-hop\r\nConnection: X-Third-Hop\r\n\
+		X-Request-Hop: discard\r\nX-Second-Hop: discard\r\nX-Third-Hop: discard\r\n\
+		X-Request-Keep: kept\r\n\r\n";
+	let response = raw_request(harness.edge.http_addr, request).await;
+	assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+	assert!(response.contains("first= second= third= keep=kept"), "{response}");
+	assert!(!response.contains("x-response-hop:"), "{response}");
+	assert!(response.contains("x-response-keep: kept"), "{response}");
+}
+
+#[tokio::test]
+async fn the_connection_header_cannot_nominate_the_routing_host() {
+	let harness = start().await;
+	let request = "GET /echo HTTP/1.1\r\nHost: app.test\r\nConnection: close, Host\r\n\r\n";
+	let response = raw_request(harness.edge.http_addr, request).await;
+	assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+}
+
+#[tokio::test]
 async fn streams_request_bodies_both_ways() {
 	let harness = start().await;
 	let request = "POST /echo HTTP/1.1\r\nHost: app.test\r\nContent-Length: 11\r\nConnection: close\r\n\r\nhello world";
@@ -380,7 +426,8 @@ async fn absolute_form_targets_are_rewritten_to_origin_form() {
 async fn websocket_upgrade_is_spliced() {
 	let harness = start().await;
 	let mut stream = TcpStream::connect(harness.edge.http_addr).await.unwrap();
-	let request = "GET /ws HTTP/1.1\r\nHost: app.test:8443\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n";
+	let request = "GET /ws HTTP/1.1\r\nHost: app.test:8443\r\nConnection: x-upgrade-hop\r\n\
+		Connection: Upgrade\r\nUpgrade: websocket\r\nX-Upgrade-Hop: discard\r\n\r\n";
 	stream.write_all(request.as_bytes()).await.unwrap();
 
 	let mut head = Vec::new();
@@ -396,6 +443,8 @@ async fn websocket_upgrade_is_spliced() {
 	let head = String::from_utf8_lossy(&head);
 	assert!(head.starts_with("HTTP/1.1 101"), "{head}");
 	assert!(head.contains("x-seen-host: app.test:8443"), "{head}");
+	assert!(head.contains("x-seen-hop: absent"), "{head}");
+	assert!(!head.contains("x-response-hop:"), "{head}");
 
 	stream.write_all(b"ping").await.unwrap();
 	let mut echo = [0u8; 4];
