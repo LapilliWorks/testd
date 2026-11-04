@@ -1,6 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod init;
 mod tray;
 
 use std::sync::Arc;
@@ -10,6 +9,7 @@ use tauri::webview::WebviewWindowBuilder;
 use tauri_plugin_deep_link::DeepLinkExt;
 
 use testd_core::config::{config_dir, has_pending_config};
+use testd_daemon::daemon::Daemon;
 
 fn config_exists() -> bool {
 	config_dir().join("config.toml").exists()
@@ -39,16 +39,6 @@ fn main() {
 			builder.build()
 		})
 		.manage(rt_clone)
-		.invoke_handler(tauri::generate_handler![
-			init::check_resolver,
-			init::setup_resolver,
-			init::certificate_status,
-			init::install_certificate,
-			init::operator_secret,
-			init::read_pending,
-			init::save_pending,
-			init::finish_init,
-		])
 		.setup(move |app| {
 			let handle = app.handle().clone();
 			app.deep_link().on_open_url(move |event| {
@@ -67,21 +57,15 @@ fn main() {
 				eprintln!("[warn]   URL scheme registration failed: {e}");
 			}
 
-			if !needs_init() {
+			if needs_init() {
+				start_setup(app.handle().clone(), Arc::clone(&rt))?;
+			} else {
 				// Tray-only mode: hide from dock.
 				#[cfg(target_os = "macos")]
 				app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
 				tray::start_daemon(&app.handle().clone(), Arc::clone(&rt)).expect("failed to start daemon");
 				tray::handle_current_url(&app.handle().clone());
-			} else {
-				// Show the init wizard (fresh or resuming from pending).
-				WebviewWindowBuilder::new(app, "init", tauri::WebviewUrl::App("index.html".into()))
-					.title("Testd Setup")
-					.inner_size(640.0, 520.0)
-					.resizable(false)
-					.center()
-					.build()?;
 			}
 
 			Ok(())
@@ -89,16 +73,16 @@ fn main() {
 		.build(tauri::generate_context!())
 		.expect("error building testd host")
 		.run(|app, event| match event {
-			// Prevent exit when the init window closes: the app continues as a tray icon.
-			// Allow programmatic exits (code is Some) from e.g. the tray Quit button.
+			// The dashboard window is optional; the tray keeps the app alive. A
+			// setup window is the whole app, so closing it may exit.
 			tauri::RunEvent::ExitRequested { code, api, .. } => {
 				tray::trace(&format!("exit requested: code={code:?}"));
-				if code.is_none() {
+				if code.is_none() && app.try_state::<Arc<Daemon>>().is_some() {
 					api.prevent_exit();
 				}
 			},
 			tauri::RunEvent::Exit => {
-				if let Some(daemon) = app.try_state::<Arc<testd_daemon::daemon::Daemon>>() {
+				if let Some(daemon) = app.try_state::<Arc<Daemon>>() {
 					let rt = app.state::<Arc<tokio::runtime::Runtime>>();
 					rt.block_on(daemon.shutdown());
 				}
@@ -106,4 +90,49 @@ fn main() {
 			},
 			_ => {},
 		});
+}
+
+/// Serve the first-run setup on an ephemeral loopback port and open it.
+///
+/// The settings page runs in a webview but talks HTTP to the daemon crate, not
+/// IPC: the same page works for `testd host` later, and there is no second UI
+/// stack to keep in step.
+fn start_setup(app: tauri::AppHandle, rt: Arc<tokio::runtime::Runtime>) -> Result<(), Box<dyn std::error::Error>> {
+	let mut setup = testd_daemon::setup::start(rt.handle())?;
+	WebviewWindowBuilder::new(&app, "setup", tauri::WebviewUrl::External(setup.url.parse()?))
+		.title("Testd Setup")
+		.inner_size(760.0, 820.0)
+		.center()
+		.build()?;
+
+	std::thread::spawn(move || {
+		// Blocks until the page asks to finish; the receiver is not used inside
+		// the runtime, so a dedicated thread keeps the main loop free.
+		let Some(reply) = setup.wait() else { return };
+
+		let main_app = app.clone();
+		let main_rt = Arc::clone(&rt);
+		let (done_tx, done_rx) = std::sync::mpsc::channel();
+		if let Err(e) = app.run_on_main_thread(move || {
+			let result = tray::start_daemon(&main_app, main_rt)
+				.map(|()| main_app.state::<Arc<Daemon>>().engine.local_dashboard_url());
+			if result.is_ok() {
+				if let Some(window) = main_app.get_webview_window("setup") {
+					let _ = window.close();
+				}
+			}
+			let _ = done_tx.send(result);
+		}) {
+			let _ = reply.send(Err(format!("cannot reach the main thread: {e}")));
+			return;
+		}
+
+		let result = match done_rx.recv() {
+			Ok(result) => result,
+			Err(_) => Err("the daemon did not start".to_owned()),
+		};
+		let _ = reply.send(result);
+	});
+
+	Ok(())
 }

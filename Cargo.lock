@@ -4302,7 +4302,6 @@ name = "testd-gui"
 version = "0.1.0-alpha"
 dependencies = [
  "open",
- "serde",
  "serde_json",
  "tauri",
  "tauri-build",
@@ -4312,7 +4311,6 @@ dependencies = [
  "testd-client",
  "testd-core",
  "testd-daemon",
- "testd-setup",
  "tokio",
 ]
 

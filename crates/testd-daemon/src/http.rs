@@ -18,9 +18,6 @@ use crate::engine::{Connections, OperatorAction, OperatorRequest};
 use crate::launch::LaunchBook;
 use crate::registry::Claim;
 
-#[cfg(debug_assertions)]
-const DASHBOARD_TEMPLATE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/dashboard.html");
-
 /// State shared by every dashboard request.
 pub struct HttpContext {
 	pub tld: String,
@@ -114,6 +111,10 @@ where
 
 	match (method.as_str(), path.as_str()) {
 		("GET", "/") => serve_dashboard(&mut writer, ctx).await,
+		("GET", "/dashboard.css") => {
+			let css = crate::assets::load(crate::assets::DASHBOARD_CSS);
+			respond(&mut writer, "200 OK", "text/css; charset=utf-8", css.as_bytes()).await
+		},
 		("GET", "/api/status") => serve_status(&mut writer, ctx).await,
 		("GET", "/api/local/state") => serve_state(&mut writer, ctx).await,
 		("GET", "/api/local/events") => serve_events(&mut writer, ctx).await,
@@ -142,7 +143,7 @@ where
 	}
 }
 
-async fn read_http_line<R: tokio::io::AsyncBufRead + Unpin>(
+pub(crate) async fn read_http_line<R: tokio::io::AsyncBufRead + Unpin>(
 	reader: &mut R,
 	limit: usize,
 	deadline: tokio::time::Instant,
@@ -163,7 +164,7 @@ fn is_loopback_host(host: Option<&str>, tld: &str) -> bool {
 	name.eq_ignore_ascii_case(&format!("testd.{tld}")) || matches!(name, "localhost" | "127.0.0.1" | "::1")
 }
 
-fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+pub(crate) fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
 	headers.iter().find(|(key, _)| key == name).map(|(_, value)| value.as_str())
 }
 
@@ -368,7 +369,7 @@ fn render_dashboard(
 		html
 	};
 
-	load_dashboard_template()
+	crate::assets::load(crate::assets::DASHBOARD_HTML)
 		.replace("{tld}", &escape(&ctx.tld))
 		.replace("{domains}", &render_domains(claims, granted))
 		.replace("{domain_count}", &regs.len().to_string())
@@ -415,7 +416,7 @@ impl AsyncWrite for PeekedStream {
 	}
 }
 
-async fn read_body<R>(reader: &mut BufReader<R>, headers: &[(String, String)]) -> io::Result<Vec<u8>>
+pub(crate) async fn read_body<R>(reader: &mut BufReader<R>, headers: &[(String, String)]) -> io::Result<Vec<u8>>
 where
 	R: AsyncRead + Unpin,
 {
@@ -433,7 +434,7 @@ where
 	Ok(body)
 }
 
-async fn respond<W: AsyncWriteExt + Unpin>(
+pub(crate) async fn respond<W: AsyncWriteExt + Unpin>(
 	writer: &mut W,
 	status: &str,
 	content_type: &str,
@@ -474,18 +475,6 @@ fn advisory(regs: &[Registration]) -> Vec<String> {
 		advice.push(format!("{} names on one host. A second host spreads the load.", regs.len()));
 	}
 	advice
-}
-
-fn load_dashboard_template() -> String {
-	#[cfg(debug_assertions)]
-	{
-		std::fs::read_to_string(DASHBOARD_TEMPLATE_PATH)
-			.unwrap_or_else(|e| format!("failed to load dashboard.html: {e}"))
-	}
-	#[cfg(not(debug_assertions))]
-	{
-		include_str!("../dashboard.html").to_owned()
-	}
 }
 
 const TRASH_ICON: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>"#;
@@ -807,7 +796,7 @@ where
 	}
 }
 
-async fn respond_json<W>(writer: &mut W, status: &str, value: &impl serde::Serialize) -> io::Result<()>
+pub(crate) async fn respond_json<W>(writer: &mut W, status: &str, value: &impl serde::Serialize) -> io::Result<()>
 where
 	W: AsyncWriteExt + Unpin,
 {

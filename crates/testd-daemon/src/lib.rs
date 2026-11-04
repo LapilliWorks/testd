@@ -1,4 +1,5 @@
 pub mod access;
+pub mod assets;
 pub mod caddy;
 pub mod certificate;
 pub mod control;
@@ -10,4 +11,5 @@ pub mod http;
 pub mod launch;
 pub mod registry;
 pub mod resolver;
+pub mod setup;
 pub mod share;

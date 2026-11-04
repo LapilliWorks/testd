@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>testd · Setup</title>
+<script>
+	// Resolve the saved theme before first paint so the page never flashes.
+	(function () {
+		var stored = 'system';
+		try { stored = localStorage.getItem('testd.theme') || 'system'; } catch (e) {}
+		var dark = stored === 'dark'
+			|| (stored !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+		document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+	})();
+</script>
+<link rel="stylesheet" href="/dashboard.css">
+</head>
+<body>
+
+<header class="topbar">
+	<div class="topbar-inner">
+		<span class="brand">
+			<svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+				<rect width="32" height="32" rx="8" fill="currentColor"/>
+				<circle class="brand-ink" cx="10.5" cy="20.5" r="2.4"/>
+				<path class="brand-stroke" d="M17 7.5v13.1c0 2.7 1.5 4.1 4.1 4.1h.9"/>
+			</svg>
+			<span class="brand-name">testd</span>
+			<span class="badge-free" title="Free, self-hosted version">Setup</span>
+		</span>
+		<div class="theme-switch" role="group" aria-label="Color theme">
+			<button type="button" data-theme-choice="system" aria-label="System theme" title="System theme"
+				aria-pressed="true">
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+					stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<rect x="3" y="4" width="18" height="12" rx="2"/>
+					<path d="M8 20h8M12 16v4"/>
+				</svg>
+				<span>Auto</span>
+			</button>
+			<button type="button" data-theme-choice="light" aria-label="Light theme" title="Light theme"
+				aria-pressed="false">
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+					stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<circle cx="12" cy="12" r="4"/>
+					<path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4
+						M17.7 6.3l1.4-1.4"/>
+				</svg>
+				<span>Light</span>
+			</button>
+			<button type="button" data-theme-choice="dark" aria-label="Dark theme" title="Dark theme"
+				aria-pressed="false">
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+					stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<path d="M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5 8.5 8.5 0 1 0 20.5 14.2Z"/>
+				</svg>
+				<span>Dark</span>
+			</button>
+		</div>
+	</div>
+</header>
+
+<main class="page">
+	<header class="page-head">
+		<div>
+			<h1>Set up testd</h1>
+			<p class="page-subtitle">One local host: a DNS zone, a trusted certificate, and the operator secret.</p>
+		</div>
+		<p class="page-meta"><span class="live-dot is-connecting" id="setup-dot" aria-hidden="true"></span>
+			<span id="setup-state">Checking...</span></p>
+	</header>
+
+	<div id="notice" class="notice" role="status" aria-live="polite"></div>
+
+	<div class="layout layout-single">
+		<div class="column">
+			<section class="card" id="resolver">
+				<div class="card-head">
+					<div>
+						<div class="card-title-row">
+							<h2>DNS resolver</h2>
+							<span class="pill" id="resolver-pill">Checking</span>
+						</div>
+						<p class="card-desc">testd answers <code>.test</code> names from a local DNS server. Setting
+							the OS resolver needs administrator privileges.</p>
+					</div>
+				</div>
+				<div class="card-body">
+					<p class="card-desc" id="resolver-detail">Not configured yet.</p>
+					<div class="form-actions">
+						<button class="btn btn-primary" id="resolver-action" type="button"
+							onclick="setupResolver()">Set up resolver</button>
+					</div>
+				</div>
+			</section>
+
+			<section class="card" id="certificate">
+				<div class="card-head">
+					<div>
+						<div class="card-title-row">
+							<h2>Certificate authority</h2>
+							<span class="pill" id="certificate-pill">Checking</span>
+						</div>
+						<p class="card-desc">testd signs every name with a local root. Browsers reject the edge until
+							the root is trusted; installing it needs administrator privileges.</p>
+					</div>
+				</div>
+				<div class="card-body">
+					<p class="card-desc" id="certificate-detail">Not trusted yet.</p>
+					<div class="form-actions">
+						<button class="btn btn-primary" id="certificate-action" type="button"
+							onclick="setupCertificate()">Install certificate</button>
+					</div>
+				</div>
+			</section>
+
+			<section class="card" id="secret">
+				<div class="card-head">
+					<div>
+						<div class="card-title-row">
+							<h2>Operator secret</h2>
+							<span class="pill" id="secret-pill">Checking</span>
+						</div>
+						<p class="card-desc">Leaf environments authenticate with this secret, or with a token issued
+							in the dashboard. This machine uses it automatically.</p>
+					</div>
+				</div>
+				<div class="card-body">
+					<form class="form-grid" onsubmit="return false" autocomplete="off">
+						<div class="field field-wide">
+							<label for="secret-input">Secret</label>
+							<input class="input" id="secret-input" type="text" spellcheck="false" autocomplete="off">
+						</div>
+					</form>
+					<p class="card-desc" style="margin-top: 10px">Edit it to match a secret your unattended clients
+						already use.</p>
+					<div class="form-actions">
+						<button class="btn" id="secret-copy" type="button" onclick="copySecret()">Copy</button>
+						<button class="btn" id="secret-generate" type="button" onclick="regenerateSecret()">Generate</button>
+					</div>
+				</div>
+			</section>
+
+			<section class="card" id="finish">
+				<div class="card-head">
+					<div>
+						<div class="card-title-row">
+							<h2>Finish</h2>
+							<span class="pill pill-muted" id="finish-pill">Waiting</span>
+						</div>
+						<p class="card-desc">Writing the config starts the daemon and opens the dashboard. You can
+							change these later from the dashboard's certificate and access sections.</p>
+					</div>
+				</div>
+				<div class="card-body">
+					<div class="form-actions">
+						<button class="btn btn-primary" id="finish-action" type="button" onclick="finishSetup()"
+							disabled>Finish setup</button>
+					</div>
+				</div>
+			</section>
+		</div>
+	</div>
+</main>
+
+<footer class="footer">
+	<div class="footer-inner">
+		<span class="footer-note">Loopback setup. Nothing here is reachable from the network.</span>
+	</div>
+</footer>
+
+<script>
+	const THEME_KEY = 'testd.theme';
+	const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+
+	function storedTheme() {
+		try {
+			const value = localStorage.getItem(THEME_KEY);
+			if (value === 'light' || value === 'dark') return value;
+		} catch (e) {}
+		return 'system';
+	}
+
+	function resolveTheme(theme) {
+		return theme === 'dark' || (theme === 'system' && darkQuery.matches) ? 'dark' : 'light';
+	}
+
+	function applyTheme(theme) {
+		document.documentElement.dataset.theme = resolveTheme(theme);
+		document.querySelectorAll('[data-theme-choice]').forEach((button) => {
+			button.setAttribute('aria-pressed', String(button.dataset.themeChoice === theme));
+		});
+	}
+
+	function chooseTheme(theme) {
+		try { localStorage.setItem(THEME_KEY, theme); } catch (e) {}
+		applyTheme(theme);
+	}
+
+	document.querySelectorAll('[data-theme-choice]').forEach((button) => {
+		button.addEventListener('click', () => chooseTheme(button.dataset.themeChoice));
+	});
+	applyTheme(storedTheme());
+
+	let resolverReady = false;
+	let certificateReady = false;
+
+	async function request(path, body) {
+		const response = await fetch(path, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'X-Testd-Request': '1' },
+			body: JSON.stringify(body || {}),
+		});
+		let data = {};
+		try { data = await response.json(); } catch (e) {}
+		if (!response.ok) throw new Error(data.error || response.statusText);
+		return data;
+	}
+
+	async function getJson(path) {
+		const response = await fetch(path, { cache: 'no-store' });
+		let data = {};
+		try { data = await response.json(); } catch (e) {}
+		if (!response.ok) throw new Error(data.error || response.statusText);
+		return data;
+	}
+
+	function notice(message, isError = true) {
+		const box = document.getElementById('notice');
+		box.className = 'notice ' + (isError ? 'notice-error' : 'notice-ok');
+		box.textContent = message;
+	}
+
+	function hideNotice() {
+		document.getElementById('notice').className = 'notice';
+	}
+
+	function setPill(id, text, tone) {
+		const pill = document.getElementById(id);
+		pill.textContent = text;
+		pill.className = 'pill' + (tone ? ' pill-' + tone : '');
+	}
+
+	function setReady(id, ready) {
+		const button = document.getElementById(id);
+		button.disabled = ready;
+		button.textContent = ready ? 'Done' : button.textContent.replace('Done', '').trim();
+	}
+
+	function updateConnection() {
+		const dot = document.getElementById('setup-dot');
+		const label = document.getElementById('setup-state');
+		if (resolverReady && certificateReady) {
+			dot.className = 'live-dot';
+			label.textContent = 'Ready';
+		} else {
+			dot.className = 'live-dot is-connecting';
+			label.textContent = 'Setup required';
+		}
+	}
+
+	function updateFinish() {
+		const secret = document.getElementById('secret-input').value.trim();
+		const ready = resolverReady && certificateReady && secret.length >= 16;
+		document.getElementById('finish-action').disabled = !ready;
+		setPill('finish-pill', ready ? 'Ready' : 'Waiting', ready ? 'ok' : 'muted');
+	}
+
+	async function refresh() {
+		try {
+			const state = await getJson('/api/setup/state');
+			resolverReady = state.resolver;
+			setPill('resolver-pill', resolverReady ? 'Configured' : 'Required', resolverReady ? 'ok' : 'warn');
+			document.getElementById('resolver-detail').textContent =
+				resolverReady ? 'Names under .test resolve on this machine.' : 'Not configured yet.';
+			setReady('resolver-action', resolverReady);
+
+			certificateReady = Boolean(state.certificate && state.certificate.trusted);
+			setPill('certificate-pill', certificateReady ? 'Trusted' : 'Required', certificateReady ? 'ok' : 'warn');
+			document.getElementById('certificate-detail').textContent =
+				state.certificate ? state.certificate.summary : 'The local root has not been created yet.';
+			setReady('certificate-action', certificateReady);
+		} catch (e) {
+			notice('Cannot read setup state: ' + e.message);
+		}
+		updateConnection();
+		updateFinish();
+	}
+
+	async function setupResolver() {
+		const button = document.getElementById('resolver-action');
+		button.disabled = true;
+		button.textContent = 'Setting up...';
+		try {
+			await request('/api/setup/resolver');
+			await refresh();
+			notice('Resolver configured.', false);
+		} catch (e) {
+			notice('Resolver setup failed: ' + e.message);
+		} finally {
+			button.disabled = false;
+			button.textContent = resolverReady ? 'Done' : 'Set up resolver';
+		}
+	}
+
+	async function setupCertificate() {
+		const button = document.getElementById('certificate-action');
+		button.disabled = true;
+		button.textContent = 'Installing...';
+		try {
+			await request('/api/setup/certificate');
+			await refresh();
+			notice('Certificate installed.', false);
+		} catch (e) {
+			notice('Certificate install failed: ' + e.message);
+		} finally {
+			button.disabled = false;
+			button.textContent = certificateReady ? 'Done' : 'Install certificate';
+		}
+	}
+
+	async function loadSecret() {
+		try {
+			const data = await request('/api/setup/secret');
+			document.getElementById('secret-input').value = data.secret;
+			setPill('secret-pill', 'Ready', 'ok');
+		} catch (e) {
+			setPill('secret-pill', 'Error', 'danger');
+			notice('Cannot prepare the operator secret: ' + e.message);
+		}
+		updateFinish();
+	}
+
+	async function regenerateSecret() {
+		try {
+			const data = await request('/api/setup/secret', { regenerate: true });
+			document.getElementById('secret-input').value = data.secret;
+			setPill('secret-pill', 'Ready', 'ok');
+			notice('New secret generated.', false);
+		} catch (e) {
+			notice('Cannot generate a secret: ' + e.message);
+		}
+		updateFinish();
+	}
+
+	function copySecret() {
+		const input = document.getElementById('secret-input');
+		navigator.clipboard.writeText(input.value.trim());
+	}
+
+	async function finishSetup() {
+		const button = document.getElementById('finish-action');
+		const secret = document.getElementById('secret-input').value.trim();
+		button.disabled = true;
+		button.textContent = 'Starting testd...';
+		hideNotice();
+		try {
+			const response = await fetch('/api/setup/finish', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json', 'X-Testd-Request': '1' },
+				body: JSON.stringify({ secret }),
+			});
+			const data = await response.json().catch(() => ({}));
+			if (!response.ok) throw new Error(data.error || response.statusText);
+			setPill('finish-pill', 'Started', 'ok');
+			notice('Setup complete. Opening the dashboard...', false);
+		} catch (e) {
+			button.disabled = false;
+			button.textContent = 'Finish setup';
+			setPill('finish-pill', 'Error', 'danger');
+			notice('Setup could not finish: ' + e.message);
+		}
+	}
+
+	document.getElementById('secret-input').addEventListener('input', updateFinish);
+
+	loadSecret();
+	refresh();
+	// The system resolver can change outside this page; keep the two steps fresh.
+	setInterval(refresh, 5000);
+</script>
+</body>
+</html>

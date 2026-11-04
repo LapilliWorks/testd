@@ -11,12 +11,10 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 open = "5"
-serde = { workspace = true }
 serde_json = { workspace = true }
 testd-client = { workspace = true }
 testd-core = { workspace = true }
 testd-daemon = { workspace = true }
-testd-setup = { workspace = true }
 # 2.12 ships tray-icon 0.25, which pops the tray menu on mouse-up. Older
 # tray-icon opened it on mouse-down, so the matching mouse-up dismissed the menu
 # immediately on Windows.
