@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -34,6 +35,8 @@ pub const DEFAULT_PROVIDER: &str = "cloudflared";
 const URL_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the startup sweep waits for `tailscale serve status`.
 const SWEEP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Detect a spawned provider's exit without holding the share lock while waiting.
+const PROVIDER_EXIT_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Where a share is reachable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -172,7 +175,7 @@ pub struct Shares {
 	binary: Option<PathBuf>,
 	/// The local edge, for providers that cannot reach the target themselves.
 	front: Option<Front>,
-	active: Mutex<BTreeMap<String, Active>>,
+	active: Arc<Mutex<BTreeMap<String, Active>>>,
 	/// Serializes the startup sweep against a tailscale share starting.
 	reclaim: Mutex<()>,
 	/// Any change to the active set, for live frontends.
@@ -180,6 +183,8 @@ pub struct Shares {
 }
 
 struct Active {
+	/// Distinguishes a stopped share from a replacement with the same name.
+	identity: Arc<()>,
 	provider: Provider,
 	target: String,
 	url: String,
@@ -201,14 +206,7 @@ impl Shares {
 		let binary = std::env::var_os("TESTD_TUNNEL")
 			.filter(|value| !value.is_empty())
 			.map(PathBuf::from);
-		Self {
-			default,
-			binary,
-			front,
-			active: Mutex::new(BTreeMap::new()),
-			reclaim: Mutex::new(()),
-			revision: watch::channel(0).0,
-		}
+		Self::new(default, binary, front)
 	}
 
 	pub fn new(default: Provider, binary: Option<PathBuf>, front: Option<Front>) -> Self {
@@ -216,7 +214,7 @@ impl Shares {
 			default,
 			binary,
 			front,
-			active: Mutex::new(BTreeMap::new()),
+			active: Arc::new(Mutex::new(BTreeMap::new())),
 			reclaim: Mutex::new(()),
 			revision: watch::channel(0).0,
 		}
@@ -251,7 +249,12 @@ impl Shares {
 
 		// Spawn outside the lock: a slow provider must not block `list` or `stop`.
 		let binary = self.binary_for(provider);
-		let share = self.spawn(provider, &binary, name, target).await?;
+		let mut share = self.spawn(provider, &binary, name, target).await?;
+		if let Some(child) = share.child.as_mut()
+			&& let Some(status) = child.try_wait().context("check the provider after startup")?
+		{
+			bail!("{} exited during startup with {status}", provider.name());
+		}
 
 		let mut active = self.active.lock().await;
 		if let Some(existing) = active.get(name) {
@@ -261,10 +264,50 @@ impl Shares {
 			bail!("{name} is already shared at {url}");
 		}
 		let url = share.url.clone();
+		let identity = share.child.as_ref().map(|_| Arc::clone(&share.identity));
 		active.insert(name.to_owned(), share);
 		drop(active);
 		self.bump();
+		if let Some(identity) = identity {
+			self.watch_provider(name.to_owned(), identity);
+		}
 		Ok(url)
+	}
+
+	/// Remove an exited child without confusing it with a replacement share.
+	fn watch_provider(&self, name: String, identity: Arc<()>) {
+		let active = Arc::downgrade(&self.active);
+		let revision = self.revision.clone();
+		tokio::spawn(async move {
+			let mut reported_failure = false;
+			loop {
+				tokio::time::sleep(PROVIDER_EXIT_CHECK_INTERVAL).await;
+				let Some(active) = active.upgrade() else { return };
+				let mut shares = active.lock().await;
+				let Some(share) = shares.get_mut(&name) else { return };
+				if !Arc::ptr_eq(&share.identity, &identity) {
+					return;
+				}
+				let Some(child) = share.child.as_mut() else { return };
+				match child.try_wait() {
+					Ok(None) => reported_failure = false,
+					Ok(Some(status)) => {
+						let provider = share.provider.name();
+						shares.remove(&name);
+						drop(shares);
+						eprintln!("[share]  {name} closed: {provider} exited with {status}");
+						revision.send_modify(|value| *value = value.wrapping_add(1));
+						return;
+					},
+					Err(error) => {
+						if !reported_failure {
+							eprintln!("[warn]   could not check the provider for {name}: {error}");
+							reported_failure = true;
+						}
+					},
+				}
+			}
+		});
 	}
 
 	/// Stop sharing `name`. Returns whether it was shared.
@@ -371,7 +414,15 @@ impl Shares {
 			.await
 			.with_context(|| format!("start {} (install it, or set TESTD_TUNNEL to its path)", binary.display()))?;
 		let url = self.read_url(&mut child, provider, binary).await?;
-		Ok(Active { provider, target: target.to_owned(), url, child: Some(child), stop_args: None, alias: None })
+		Ok(Active {
+			identity: Arc::new(()),
+			provider,
+			target: target.to_owned(),
+			url,
+			child: Some(child),
+			stop_args: None,
+			alias: None,
+		})
 	}
 
 	/// Point a provider at the local edge and teach the edge the name it serves.
@@ -422,6 +473,7 @@ impl Shares {
 		}
 
 		Ok(Active {
+			identity: Arc::new(()),
 			provider: Provider::Tailscale,
 			target: target.to_owned(),
 			url: format!("https://{host}"),

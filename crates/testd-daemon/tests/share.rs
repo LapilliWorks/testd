@@ -52,6 +52,88 @@ async fn a_cloudflared_share_reports_its_url_and_is_killed_on_stop() {
 }
 
 #[tokio::test]
+async fn a_provider_that_exits_before_its_url_is_read_does_not_start_a_share() {
+	let dir = tempfile::tempdir().unwrap();
+	let provider = script(
+		dir.path(),
+		"cloudflared",
+		"#!/bin/sh\n( sleep 0.2; echo 'INF https://fixture.trycloudflare.com' >&2 ) &\nexit 23\n",
+	);
+	let shares = Shares::new(Provider::Cloudflared, Some(provider), None);
+	let error = tokio::time::timeout(std::time::Duration::from_secs(5), shares.start("app", "127.0.0.1:3000", None))
+		.await
+		.expect("provider startup timed out")
+		.unwrap_err();
+	assert!(error.to_string().contains("exited during startup"), "{error}");
+	assert!(shares.list().await.is_empty());
+}
+
+fn provider_waiting_to_exit(dir: &Path) -> (PathBuf, PathBuf) {
+	let exit = dir.join("exit-provider");
+	let body = format!(
+		"#!/bin/sh\necho 'INF https://fixture.trycloudflare.com' >&2\n\
+		 echo 'INF https://fixture.ngrok-free.app' >&2\n\
+		 case \"$*\" in *:3000*|*:3002*) while [ ! -f '{}' ]; do sleep 0.05; done; exit 23 ;; \
+		 *) exec sleep 30 ;; esac\n",
+		exit.display()
+	);
+	(script(dir, "tunnel", &body), exit)
+}
+
+#[tokio::test]
+async fn a_provider_exit_removes_only_its_share_and_notifies_observers() {
+	let dir = tempfile::tempdir().unwrap();
+	let (provider, exit) = provider_waiting_to_exit(dir.path());
+	let shares = Shares::new(Provider::Cloudflared, Some(provider), None);
+	shares.start("first.example", "127.0.0.1:3000", None).await.unwrap();
+	shares.start("second.example", "127.0.0.1:3001", None).await.unwrap();
+	shares
+		.start("third.example", "127.0.0.1:3002", Some(Provider::Ngrok))
+		.await
+		.unwrap();
+	let mut changes = shares.state_changes();
+
+	std::fs::write(&exit, "exit").unwrap();
+	tokio::time::timeout(std::time::Duration::from_secs(5), async {
+		loop {
+			changes.changed().await.unwrap();
+			let active = shares.list().await;
+			if active.len() == 1 {
+				assert_eq!(active[0].name, "second.example");
+				break;
+			}
+		}
+	})
+	.await
+	.expect("provider exit should update the share list");
+	assert!(shares.stop("second.example").await);
+}
+
+#[tokio::test]
+async fn stopping_an_exiting_provider_does_not_remove_a_replacement_share() {
+	let dir = tempfile::tempdir().unwrap();
+	let (provider, exit) = provider_waiting_to_exit(dir.path());
+	let shares = Arc::new(Shares::new(Provider::Cloudflared, Some(provider), None));
+	shares.start("app.example", "127.0.0.1:3000", None).await.unwrap();
+
+	let stopping = {
+		let shares = Arc::clone(&shares);
+		tokio::spawn(async move { shares.stop("app.example").await })
+	};
+	std::fs::write(&exit, "exit").unwrap();
+	tokio::time::timeout(std::time::Duration::from_secs(5), stopping)
+		.await
+		.expect("stop did not finish")
+		.unwrap();
+	shares.start("app.example", "127.0.0.1:3001", None).await.unwrap();
+	tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+	let active = shares.list().await;
+	assert_eq!(active.len(), 1);
+	assert_eq!(active[0].target, "127.0.0.1:3001");
+	assert!(shares.stop("app.example").await);
+}
+
+#[tokio::test]
 async fn an_ngrok_share_reports_its_url_from_a_log_record() {
 	let dir = tempfile::tempdir().unwrap();
 	let provider = script(
