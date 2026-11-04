@@ -24,7 +24,7 @@ use testd_core::validate;
 use crate::access::{Access, Decision, IssuedToken};
 use crate::http::{self, HttpContext, PeekedStream};
 use crate::launch::LaunchBook;
-use crate::registry::{DeregisterError, RegisterError, Registry};
+use crate::registry::{Claim, DeregisterError, RegisterError, Registry};
 use crate::resolver::Resolver;
 
 /// Replies buffered for one connection before its writer task stalls the caller.
@@ -307,10 +307,11 @@ async fn delete_grant(shared: &Shared, fqdn: &str) -> Result<(), String> {
 		.remove_name(&grant, fqdn, &live)
 		.map_err(|e| format!("could not delete the grant: {e}"))?;
 	// Unpublish only this name; the connection and its other names stay.
-	let removed = shared.registrations.lock().await.deregister_any(fqdn);
-	if removed.is_some()
-		&& let Some(out) = shared.connections.outbox(claim.connection)
-	{
+	let removed = {
+		let mut registrations = shared.registrations.lock().await;
+		withdraw_granted_claim(&mut registrations, &claim)
+	};
+	if removed && let Some(out) = shared.connections.outbox(claim.connection) {
 		let notice = Response::NameRevoked { domain: fqdn.to_owned() };
 		if out.try_send(notice).is_err() {
 			/* A stalled leaf cannot hold up deletion; its other grants remain valid on reconnect. */
@@ -324,6 +325,10 @@ async fn delete_grant(shared: &Shared, fqdn: &str) -> Result<(), String> {
 		.map_err(|e| format!("{fqdn} was deleted, but the edge could not be updated: {e}"))?;
 	eprintln!("[grant]  {fqdn} deleted (dashboard)");
 	Ok(())
+}
+
+fn withdraw_granted_claim(registrations: &mut Registry, claim: &Claim) -> bool {
+	registrations.deregister(claim.connection, &claim.registration.domain).is_ok()
 }
 
 /// Close every connection admitted with `grant` and release its names.
@@ -1111,6 +1116,27 @@ mod tests {
 		assert!(target_is_client("192.168.1.9:3000", client));
 		assert!(!target_is_client("127.0.0.1:3000", client));
 		assert!(!target_is_client("localhost:3000", client));
+	}
+
+	#[test]
+	fn deleting_a_grant_cannot_withdraw_a_new_owners_claim() {
+		let mut registrations = Registry::default();
+		let first = registrations.connection_id();
+		let second = registrations.connection_id();
+		let registration = |target: &str| Registration { domain: "app.test".into(), target: target.into() };
+		registrations
+			.register(first, registration("127.0.0.1:3000"), false, &[])
+			.unwrap();
+		let previous = registrations.claim("app.test").unwrap().clone();
+		registrations
+			.register(second, registration("127.0.0.1:4000"), true, &[])
+			.unwrap();
+
+		assert!(!withdraw_granted_claim(&mut registrations, &previous));
+		assert_eq!(registrations.claim("app.test").unwrap().connection, second);
+		let current = registrations.claim("app.test").unwrap().clone();
+		assert!(withdraw_granted_claim(&mut registrations, &current));
+		assert!(registrations.claim("app.test").is_none());
 	}
 
 	#[tokio::test]
