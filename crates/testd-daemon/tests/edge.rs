@@ -145,8 +145,18 @@ async fn upstream_service(request: Request<Incoming>, dropped: Arc<Notify>) -> R
 			]);
 			Ok(Response::new(StreamBody::new(frames).boxed()))
 		},
+		"/redirect" => {
+			let host = request.headers().get("host").unwrap().to_str().unwrap();
+			let scheme = request.headers().get("x-forwarded-proto").unwrap().to_str().unwrap();
+			Ok(Response::builder()
+				.status(StatusCode::FOUND)
+				.header("location", format!("{scheme}://{host}/return"))
+				.body(empty())
+				.unwrap())
+		},
 		"/ws" => {
 			let mut request = request;
+			let host = request.headers().get("host").unwrap().clone();
 			let upgrade = hyper::upgrade::on(&mut request);
 			tokio::spawn(async move {
 				if let Ok(upgraded) = upgrade.await {
@@ -168,6 +178,7 @@ async fn upstream_service(request: Request<Incoming>, dropped: Arc<Notify>) -> R
 				.status(StatusCode::SWITCHING_PROTOCOLS)
 				.header(CONNECTION, "upgrade")
 				.header(UPGRADE, "websocket")
+				.header("x-seen-host", host)
 				.body(empty())
 				.unwrap())
 		},
@@ -184,15 +195,20 @@ async fn upstream_service(request: Request<Incoming>, dropped: Arc<Notify>) -> R
 				.path_and_query()
 				.map(|p| p.as_str().to_owned())
 				.unwrap_or_default();
-			let forwarded = request
-				.headers()
-				.get("x-forwarded-proto")
-				.and_then(|v| v.to_str().ok())
-				.unwrap_or("")
-				.to_owned();
+			let header = |name| {
+				request
+					.headers()
+					.get(name)
+					.and_then(|v| v.to_str().ok())
+					.unwrap_or("")
+					.to_owned()
+			};
+			let scheme = header("x-forwarded-proto");
+			let client = header("x-forwarded-for");
+			let forwarded = header("forwarded");
 			let body = request.into_body().collect().await.map(|c| c.to_bytes()).unwrap_or_default();
 			let summary = format!(
-				"method={method} host={host} path={path} proto={forwarded} body={}",
+				"method={method} host={host} path={path} proto={scheme} client={client} forwarded={forwarded} body={}",
 				String::from_utf8_lossy(&body)
 			);
 			Ok(text(StatusCode::OK, &summary))
@@ -212,11 +228,15 @@ fn text(status: StatusCode, body: &str) -> Response<Body> {
 }
 
 async fn raw_request(addr: SocketAddr, request: &str) -> String {
-	let mut stream = TcpStream::connect(addr).await.unwrap();
-	stream.write_all(request.as_bytes()).await.unwrap();
-	let mut response = Vec::new();
-	stream.read_to_end(&mut response).await.unwrap();
-	String::from_utf8_lossy(&response).into_owned()
+	tokio::time::timeout(Duration::from_secs(10), async {
+		let mut stream = TcpStream::connect(addr).await.unwrap();
+		stream.write_all(request.as_bytes()).await.unwrap();
+		let mut response = Vec::new();
+		stream.read_to_end(&mut response).await.unwrap();
+		String::from_utf8_lossy(&response).into_owned()
+	})
+	.await
+	.expect("edge response timed out")
 }
 
 fn get(host: &str, path: &str) -> String {
@@ -239,6 +259,35 @@ async fn routes_by_host_and_preserves_the_original_host() {
 	assert!(response.contains("host=app.test"), "{response}");
 	assert!(response.contains("proto=http"), "{response}");
 	assert!(response.contains("path=/echo"), "{response}");
+}
+
+#[tokio::test]
+async fn routing_normalizes_the_host_but_preserves_its_original_authority() {
+	let harness = start().await;
+	let response = raw_request(harness.edge.http_addr, &get("App.Test.:8443", "/echo")).await;
+	assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+	assert!(response.contains("host=App.Test.:8443 "), "{response}");
+}
+
+#[tokio::test]
+async fn upstream_redirects_use_the_original_host_and_listener_scheme() {
+	let harness = start().await;
+	let request =
+		"GET /redirect HTTP/1.1\r\nHost: app.test:8443\r\nX-Forwarded-Proto: https\r\nConnection: close\r\n\r\n";
+	let response = raw_request(harness.edge.http_addr, request).await;
+	assert!(response.starts_with("HTTP/1.1 302"), "{response}");
+	assert!(response.contains("location: http://app.test:8443/return"), "{response}");
+}
+
+#[tokio::test]
+async fn untrusted_forwarded_address_and_scheme_are_replaced() {
+	let harness = start().await;
+	let request = "GET /echo HTTP/1.1\r\nHost: app.test:8443\r\nX-Forwarded-Proto: https\r\n\
+		X-Forwarded-For: 203.0.113.8\r\nForwarded: for=203.0.113.8;proto=https\r\nConnection: close\r\n\r\n";
+	let response = raw_request(harness.edge.http_addr, request).await;
+	assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+	assert!(response.contains("host=app.test:8443"), "{response}");
+	assert!(response.contains("proto=http client=127.0.0.1 forwarded= "), "{response}");
 }
 
 #[tokio::test]
@@ -331,21 +380,29 @@ async fn absolute_form_targets_are_rewritten_to_origin_form() {
 async fn websocket_upgrade_is_spliced() {
 	let harness = start().await;
 	let mut stream = TcpStream::connect(harness.edge.http_addr).await.unwrap();
-	let request = "GET /ws HTTP/1.1\r\nHost: app.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n";
+	let request = "GET /ws HTTP/1.1\r\nHost: app.test:8443\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n";
 	stream.write_all(request.as_bytes()).await.unwrap();
 
 	let mut head = Vec::new();
-	let mut byte = [0u8; 1];
-	while !head.ends_with(b"\r\n\r\n") {
-		stream.read_exact(&mut byte).await.unwrap();
-		head.push(byte[0]);
-	}
+	tokio::time::timeout(Duration::from_secs(5), async {
+		let mut byte = [0u8; 1];
+		while !head.ends_with(b"\r\n\r\n") {
+			stream.read_exact(&mut byte).await.unwrap();
+			head.push(byte[0]);
+		}
+	})
+	.await
+	.expect("WebSocket upgrade timed out");
 	let head = String::from_utf8_lossy(&head);
 	assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+	assert!(head.contains("x-seen-host: app.test:8443"), "{head}");
 
 	stream.write_all(b"ping").await.unwrap();
 	let mut echo = [0u8; 4];
-	stream.read_exact(&mut echo).await.unwrap();
+	tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut echo))
+		.await
+		.expect("WebSocket echo timed out")
+		.unwrap();
 	assert_eq!(&echo, b"ping");
 }
 
@@ -364,12 +421,28 @@ async fn tls_serves_a_minted_leaf_from_the_local_root() {
 	let name = ServerName::try_from("app.test".to_string()).unwrap();
 	let mut tls = connector.connect(name, tcp).await.expect("TLS handshake with the minted leaf");
 
-	tls.write_all(get("app.test", "/echo").as_bytes()).await.unwrap();
+	let host = format!("App.Test.:{}", harness.edge.tls_addr.port());
+	tls.write_all(get(&host, "/echo").as_bytes()).await.unwrap();
 	let mut response = Vec::new();
 	tls.read_to_end(&mut response).await.unwrap();
 	let response = String::from_utf8_lossy(&response);
 	assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+	assert!(response.contains(&format!("host={host} ")), "{response}");
 	assert!(response.contains("proto=https"), "{response}");
+
+	let tcp = TcpStream::connect(harness.edge.tls_addr).await.unwrap();
+	let name = ServerName::try_from("app.test".to_owned()).unwrap();
+	let mut tls = connector.connect(name, tcp).await.unwrap();
+	let request =
+		format!("GET /redirect HTTP/1.1\r\nHost: {host}\r\nX-Forwarded-Proto: http\r\nConnection: close\r\n\r\n");
+	tls.write_all(request.as_bytes()).await.unwrap();
+	let mut response = Vec::new();
+	tokio::time::timeout(Duration::from_secs(5), tls.read_to_end(&mut response))
+		.await
+		.expect("TLS redirect timed out")
+		.unwrap();
+	let response = String::from_utf8_lossy(&response);
+	assert!(response.contains(&format!("location: https://{host}/return")), "{response}");
 }
 
 #[tokio::test]

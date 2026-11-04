@@ -370,7 +370,7 @@ async fn handle(handler: Handler, request: Request<Incoming>) -> Response<Body> 
 			return text(StatusCode::NOT_FOUND, "The dashboard is loopback-only.");
 		}
 		let target = addr.to_string();
-		return proxy(handler, request, &host, &target).await;
+		return proxy(handler, request, &target).await;
 	}
 
 	let target = match handler.ctx.registrations.lock().await.get(&host) {
@@ -378,7 +378,7 @@ async fn handle(handler: Handler, request: Request<Incoming>) -> Response<Body> 
 		None => return text(StatusCode::NOT_FOUND, &format!("No live registration for {host}.")),
 	};
 
-	proxy(handler, request, &host, &target).await
+	proxy(handler, request, &target).await
 }
 
 /// On-demand TLS permission endpoint for an external front such as Caddy.
@@ -415,7 +415,7 @@ fn dashboard_client_is_local(handler: &Handler, headers: &HeaderMap) -> bool {
 	}
 }
 
-async fn proxy(handler: Handler, request: Request<Incoming>, host: &str, target: &str) -> Response<Body> {
+async fn proxy(handler: Handler, request: Request<Incoming>, target: &str) -> Response<Body> {
 	let mut request = request;
 	let client_upgrade = if is_upgrade(&request) { Some(hyper::upgrade::on(&mut request)) } else { None };
 
@@ -442,8 +442,9 @@ async fn proxy(handler: Handler, request: Request<Incoming>, host: &str, target:
 	if let Ok(value) = HeaderValue::from_str(handler.scheme) {
 		headers.insert("x-forwarded-proto", value);
 	}
-	if let Ok(value) = HeaderValue::from_str(host) {
-		headers.insert(HOST, value);
+	// Routing uses a normalized name, but applications need the original authority.
+	if let Some(value) = parts.headers.get(HOST) {
+		headers.insert(HOST, value.clone());
 	}
 
 	let mut upstream = Request::new(body);
