@@ -482,20 +482,43 @@ def fresh_install(run, cli, index, expected_version):
 	initial = run.args.previous_bin.resolve() if run.args.previous_bin else cli
 	run.command('upgrade-base-init' if run.args.previous_bin else 'fresh-init',
 		[str(initial), 'init', '--caddyfile', ''], env=env)
-	root_before = file_digest(self_config / 'pki/root.crt')
+	pki = self_config / 'pki'
+	root_before = {name: file_digest(pki / name) for name in ('root.crt', 'root.key')}
 	before = tomllib.loads((self_config / 'config.toml').read_text(encoding=ENCODING))
+	backup_fresh_state(run, self_config, index, 'upgrade')
 	run.command('re-init', [str(cli), 'init', '--caddyfile', ''], env=env)
 	after = tomllib.loads((self_config / 'config.toml').read_text(encoding=ENCODING))
 	assert_preserved_config(before, after)
-	if file_digest(self_config / 'pki/root.crt') != root_before:
-		raise RuntimeError('re-init or upgrade changed root trust')
-	with tarfile.open(run.output / f'fresh-state-before-purge-{index}.tar.gz', 'w:gz') as backup:
-		backup.add(self_config, arcname='testd')
+	assert_root_unchanged(pki, root_before, 'upgrade')
+	if run.args.previous_bin:
+		backup_fresh_state(run, self_config, index, 'rollback')
+		run.command('rollback-init', [str(initial), 'init', '--caddyfile', ''], env=env)
+		rolled_back = tomllib.loads((self_config / 'config.toml').read_text(encoding=ENCODING))
+		try:
+			assert_preserved_config(after, rolled_back)
+		except RuntimeError as error:
+			raise RuntimeError(f'rollback changed configuration: {error}') from error
+		assert_root_unchanged(pki, root_before, 'rollback')
+		run.record('rollback', 'pass', 'configuration and root material preserved')
+	backup_fresh_state(run, self_config, index, 'purge')
 	run.command('uninstall-local-state',
 		[str(cli), 'uninstall', '--purge', '--keep-resolver', '--keep-certificate'], env=env)
 	if self_config.exists():
 		raise RuntimeError('purge left the local config directory')
 	run.record('fresh-install-and-uninstall', 'pass', version)
+
+
+def backup_fresh_state(run, directory, index, step):
+	path = run.output / f'fresh-state-before-{step}-{index}.tar.gz'
+	with tarfile.open(path, 'x:gz') as backup:
+		backup.add(directory, arcname='testd')
+
+
+def assert_root_unchanged(pki, expected, phase):
+	for name, digest in expected.items():
+		path = pki / name
+		if not path.is_file() or file_digest(path) != digest:
+			raise RuntimeError(f'{phase} changed {name}')
 
 
 def assert_preserved_config(before, after, section=''):

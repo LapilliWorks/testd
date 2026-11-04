@@ -12,6 +12,7 @@ import tempfile
 import unittest
 import subprocess
 import sys
+import tarfile
 import threading
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import Mock, patch
@@ -155,6 +156,95 @@ class ReleaseTests(unittest.TestCase):
 	def test_manual_checks_are_not_invented_from_headings(self):
 		items = runner.checklist_items('# Build\n- [ ] First check\n      continued\n\n- [ ] Second check\n')
 		self.assertEqual(items, ['First check continued', 'Second check'])
+
+
+class ArtifactInstallFixture:
+	version = '0.1.0-alpha'
+
+	def __init__(self, directory, rollback_change=None):
+		root = pathlib.Path(directory)
+		self.output = root / 'report'
+		self.output.mkdir()
+		self.cli = root / 'candidate'
+		self.cli.write_bytes(b'candidate')
+		previous = root / 'previous'
+		previous.write_bytes(b'previous')
+		self.args = SimpleNamespace(previous_bin=previous)
+		self.metadata = {}
+		self.steps = []
+		self.records = []
+		self.rollback_change = rollback_change
+
+	def command(self, name, command, env=None):
+		self.steps.append(name)
+		if name == 'archive-version':
+			return f'testd {self.version}\n'
+		home = pathlib.Path(env['HOME'])
+		config = home / ('AppData/Roaming/testd' if runner.SYSTEM == 'Windows' else '.config/testd')
+		if name in ('upgrade-base-init', 'fresh-init'):
+			(config / 'pki').mkdir(parents=True)
+			(config / 'pki/root.crt').write_bytes(b'root certificate')
+			(config / 'pki/root.key').write_bytes(b'root key')
+			(config / 'config.toml').write_text('[host]\nsecret = "original"\n')
+		elif name == 're-init':
+			if not (self.output / 'fresh-state-before-upgrade-0.tar.gz').exists():
+				raise AssertionError('upgrade ran without a persisted backup')
+			(config / 'config.toml').write_text('[host]\nsecret = "original"\nnew_value = "kept"\n')
+		elif name == 'rollback-init':
+			if not (self.output / 'fresh-state-before-rollback-0.tar.gz').exists():
+				raise AssertionError('rollback ran without a persisted backup')
+			if self.rollback_change == 'config':
+				(config / 'config.toml').write_text('[host]\nsecret = "original"\n')
+			elif self.rollback_change == 'certificate':
+				(config / 'pki/root.crt').write_bytes(b'changed certificate')
+			elif self.rollback_change == 'key':
+				(config / 'pki/root.key').write_bytes(b'changed key')
+		elif name == 'uninstall-local-state':
+			if not (self.output / 'fresh-state-before-purge-0.tar.gz').exists():
+				raise AssertionError('purge ran without a persisted backup')
+			shutil.rmtree(config)
+		else:
+			raise AssertionError(f'unexpected command {name}')
+		return ''
+
+	def record(self, name, status, detail=''):
+		self.records.append((name, status, detail))
+
+
+class ArtifactInstallTests(unittest.TestCase):
+	def test_upgrade_and_rollback_preserve_state_with_backups(self):
+		with tempfile.TemporaryDirectory() as directory:
+			fixture = ArtifactInstallFixture(directory)
+			runner.fresh_install(fixture, fixture.cli, 0, fixture.version)
+			self.assertEqual(fixture.steps, [
+				'archive-version', 'upgrade-base-init', 're-init', 'rollback-init', 'uninstall-local-state',
+			])
+			for step in ('upgrade', 'rollback', 'purge'):
+				with tarfile.open(fixture.output / f'fresh-state-before-{step}-0.tar.gz') as backup:
+					config = backup.extractfile('testd/config.toml').read()
+					self.assertIn(b'secret = "original"', config)
+					if step != 'upgrade':
+						self.assertIn(b'new_value = "kept"', config)
+			self.assertTrue(any(name == 'rollback' and status == 'pass' for name, status, _ in fixture.records))
+
+	def test_fresh_install_without_a_previous_binary_skips_rollback(self):
+		with tempfile.TemporaryDirectory() as directory:
+			fixture = ArtifactInstallFixture(directory)
+			fixture.args.previous_bin = None
+			runner.fresh_install(fixture, fixture.cli, 0, fixture.version)
+			self.assertIn('fresh-init', fixture.steps)
+			self.assertNotIn('rollback-init', fixture.steps)
+			self.assertTrue((fixture.output / 'fresh-state-before-upgrade-0.tar.gz').is_file())
+			self.assertTrue((fixture.output / 'fresh-state-before-purge-0.tar.gz').is_file())
+
+	def test_rollback_rejects_lost_configuration_or_root_material(self):
+		for change in ('config', 'certificate', 'key'):
+			with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+				fixture = ArtifactInstallFixture(directory, rollback_change=change)
+				with self.assertRaisesRegex(RuntimeError, 'rollback'):
+					runner.fresh_install(fixture, fixture.cli, 0, fixture.version)
+				self.assertTrue((fixture.output / 'fresh-state-before-rollback-0.tar.gz').is_file())
+				self.assertNotIn('uninstall-local-state', fixture.steps)
 
 
 class ConsoleOutputTests(unittest.TestCase):
