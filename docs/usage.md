@@ -44,7 +44,7 @@ The app must listen on an address the host can reach. A dev server bound only to
 
 Names are `<service>.<project>`, without the TLD. The host appends `.test`. The daemon stores and shows the bare name, for example `app.example`; browsers use `app.example.test`.
 
-Use two labels or more. `app.example.test` and `api.example.test` share a registrable domain, so cookies behave like they do on `app.example.com` and `api.example.com`. A single-label `app.test` is cross-site with every other project, and `testd` prints a warning when you use one. The name `testd.test` is reserved for the dashboard.
+Use two labels or more. `app.example.test` and `api.example.test` share a registrable domain, so cookies behave like they do on `app.example.com` and `api.example.com`. A single-label `app.test` is cross-site with every other project, and `testd` prints a warning when you use one. The name `testd.test` is reserved for the dashboard, which the edge serves to this machine only.
 
 Labels may contain ASCII letters, digits, and hyphens, and may not start or end with a hyphen. Each label is at most 63 bytes, and the full name at most 253 bytes. Targets are a bare port, `host:port`, `ip:port`, or `[ipv6]:port`; port 0 and malformed names are rejected.
 
@@ -86,7 +86,7 @@ Use it only when you intend to take over the name. Without it, a duplicate name 
 testd dashboard
 ```
 
-The command prints `http://127.0.0.1:7737/#token=...`. The token is in the fragment, so it does not travel in the HTTP request; the page sends it in the `X-Testd-Token` header for actions. A bare `http://127.0.0.1:7737/` renders the page read-only and cannot change state. There is no user login; the per-run token is the only authority.
+The command prints `http://127.0.0.1:7737/`. The same page is at `https://testd.test/`. There is no user login and no URL token: the loopback listener, and the edge's rule that forwards the dashboard name only for clients on this machine, are the authority. Every mutation also needs the `X-Testd-Request: 1` header, which a cross-site page cannot send.
 
 The dashboard shows:
 

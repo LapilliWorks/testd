@@ -72,7 +72,7 @@ testd host            # run the daemon
 testd run :3000       # register the current directory, forever
 ```
 
-`testd dashboard` prints the authenticated local dashboard URL.
+`testd dashboard` prints the local dashboard URL.
 
 `testd run` also wraps a process:
 
@@ -114,7 +114,7 @@ That secret admits registrations directly. Issued tokens are the per-leaf path t
 
 ## Dashboard
 
-The daemon serves its dashboard on the loopback listener, at `http://127.0.0.1:7737/`, with no TLS. The tray's **Open dashboard** item and `testd dashboard` include a per-run token in the URL fragment; the token is required for dashboard actions and the `/api/local/*` endpoints. A bare URL shows the read-only page but cannot mutate state. The dashboard is not proxied by the edge.
+The daemon serves its dashboard on the loopback listener, at `http://127.0.0.1:7737/`, and at `https://testd.test/` through the edge. Both are local surfaces: the edge forwards the dashboard name only for clients on this machine, and the listener refuses every non-loopback peer. There is no login and no URL token; the loopback peer is the authority. Every `POST` carries `X-Testd-Request: 1`, so a cross-site page cannot mutate state.
 
 It lists live names with two actions, active shares with a stop button, access requests with approve and deny buttons, issued tokens with a revoke button, the **Quick launches** table, and the certificate actions. The page keeps a token-authenticated event stream open, so name, share, launch, access, and token changes appear without a reload. On a name, **stop** ends the leaf but keeps its grants, so the next run publishes the names again; **delete** (after a confirmation) deletes the grant for that one name, so the leaf stops publishing it and must ask for a grant next time. A name published with the operator secret or by a local quick launch has no issued grant to delete, so it offers only **stop**; a quick launch is deleted from its own card. `/api/status` is the machine-readable form of the names and shares:
 
@@ -122,13 +122,13 @@ It lists live names with two actions, active shares with a stop button, access r
 curl http://127.0.0.1:7737/api/status
 ```
 
-The edge does not serve the dashboard or the root certificate. Fetch the root from the local dashboard instead:
+Fetch the root from either dashboard URL:
 
 ```sh
 curl http://127.0.0.1:7737/ca.crt
 ```
 
-The tray enables launch at login once, on its first start, and has a **Launch at login** checkbox from then on. Unticking it is final until you tick it again, even if the login item is removed outside the tray. The first start opens a setup wizard for the DNS resolver, the root certificate, and the operator secret; the wizard generates a pronounceable secret into an editable field, where an existing one can replace it.
+The tray enables launch at login once, on its first start, and has a **Launch at login** checkbox from then on. Unticking it is final until you tick it again, even if the login item is removed outside the tray. The first start opens a setup dialog served on an ephemeral loopback port, covering the DNS resolver, the root certificate, and the operator secret; it generates a pronounceable secret into an editable field, where an existing one can replace it. The dialog talks to the daemon over HTTP rather than IPC, and closes into the dashboard once the daemon starts.
 
 ## Sharing a name
 
@@ -176,7 +176,7 @@ The daemon re-checks the resolver route every 10 seconds and root trust every 60
 
 ## Certificates
 
-The local dashboard's **Certificate** section shows the root certificate's trust state, SHA-256 fingerprint, and expiry, and installs or removes system trust. The local page is the only place that can change trust; the edge exposes no certificate download.
+The local dashboard's **Certificate** section shows the root certificate's trust state, SHA-256 fingerprint, and expiry, and installs or removes system trust. Trust can only be changed from the local page; `testd.test/ca.crt` serves the same root the loopback page does.
 
 The local intermediate renews near expiry on startup or certificate minting without changing root trust. The previous intermediate certificate and key are retained under `pki/backups/`. If `root.key` was moved offline, restore it before the intermediate expires; `testd doctor` reports expiry and `testd doctor --fix` repairs it when the key is available.
 
@@ -215,7 +215,7 @@ Useful `[host]` keys:
 | `listen_addr` | `0.0.0.0:7737` | Dev-environment intake |
 | `edge_addr` | `0.0.0.0:443` | HTTPS edge; use a high port if the binary lacks `CAP_NET_BIND_SERVICE` |
 | `allow_remote_targets` | `false` | Permit a remote leaf to name a target other than its own address |
-| `trust_forwarded_for` | `false` | Trust `X-Forwarded-For` from a configured front proxy |
+| `trust_forwarded_for` | `false` | Trust `X-Forwarded-For` from a configured front proxy; the dashboard name needs it on the plain listener |
 
 Client state lives in `~/.config/testd/leaf.toml`. It contains node profiles, never credentials:
 

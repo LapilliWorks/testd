@@ -23,7 +23,8 @@ cargo tauri build
 
 The tray must bind port 443. Grant `CAP_NET_BIND_SERVICE` to the actual tray
 binary or set `[host] edge_addr` to a high port before the daemon starts;
-otherwise the tray exits after setup with a bind permission error.
+otherwise **Finish** reports the bind error, setup stays open, and the config is
+moved aside so a restart resumes setup.
 
 Windows (elevated shell not required for the app itself):
 
@@ -40,20 +41,24 @@ run at a time; the instance lock must reject a second tray or headless host.
 
 ## Setup
 
-- [ ] First launch opens the setup wizard, not the tray: resolver, certificate,
-      then operator secret.
-- [ ] The resolver step reports either an existing route or configures it, and
-      Continue is available only after it is ready.
-- [ ] The certificate step shows the root summary, installs it, and Continue is
-      available only after trust is installed.
-- [ ] The secret step shows a generated secret, and **Generate** replaces it;
+- [ ] First launch opens one setup dialog, not the tray. Its URL is an
+      ephemeral `127.0.0.1` port, not `7737` and not `testd.test`.
+- [ ] The resolver card reports either an existing route or configures it, and
+      **Finish setup** stays disabled until it is configured.
+- [ ] The certificate card shows the root summary, installs trust, and marks
+      itself done; **Finish setup** stays disabled until trust is installed.
+- [ ] The secret card shows a generated secret, and **Generate** replaces it;
       **Copy** copies the current value.
-- [ ] Editing the secret to a value shorter than 16 characters is refused, and
-      the wizard stays on the secret step.
-- [ ] Finish writes `~/.config/testd/config.toml` (`%APPDATA%\testd\config.toml`
-      on Windows), starts the daemon, and closes the wizard.
-- [ ] Resuming an interrupted wizard keeps the pending operator secret unless
+- [ ] Editing the secret to a value shorter than 16 characters keeps **Finish
+      setup** disabled.
+- [ ] **Finish** writes `~/.config/testd/config.toml`
+      (`%APPDATA%\testd\config.toml` on Windows), starts the daemon, closes
+      the setup dialog, and opens the dashboard window.
+- [ ] Resuming an interrupted setup keeps the pending operator secret unless
       **Generate** is pressed.
+- [ ] The dashboard window is served at `http://127.0.0.1:7737/`, and typing
+      `https://testd.test/` in a browser on the same machine reaches the same
+      page.
 - [ ] First launch after setup shows exactly one tray/menu-bar icon.
 
 ## Core
@@ -72,7 +77,8 @@ run at a time; the instance lock must reject a second tray or headless host.
 - [ ] Click the domain's open action: the default browser opens
       `https://app.example.test` and the dev server responds.
 - [ ] Stop `testd run`; the domain disappears from the tray.
-- [ ] "Open dashboard" opens the authenticated dashboard URL in the browser.
+- [ ] The last row of the name list is `testd.test → dashboard`; it opens the
+      dashboard window, and clicking it again focuses the same window.
 - [ ] Dashboard shows the same domains, shares, and quick launches as the CLI.
 - [ ] Quit from the tray exits the process, removes `control.json`, releases the instance lock, and stops the DNS and HTTPS listeners. The lock file may remain; another instance can acquire it.
 - [ ] Launch a second instance while the first runs: the second must not start a
@@ -81,12 +87,12 @@ run at a time; the instance lock must reject a second tray or headless host.
 
 ## Operator secret
 
-- [ ] The setup wizard shows an editable operator secret and a Generate button.
-- [ ] Saving a secret shorter than 16 characters is refused and the wizard stays put.
+- [ ] Setup shows an editable operator secret and a Generate button.
+- [ ] A secret shorter than 16 characters keeps **Finish setup** disabled.
 
 ## Certificate commands
 
-- [ ] The setup wizard can install trust through its certificate command; removal is available in the dashboard's Certificate section.
+- [ ] Setup installs trust through its certificate card; removal is available in the dashboard's Certificate section.
 
 ## Notifications
 
@@ -114,7 +120,7 @@ run at a time; the instance lock must reject a second tray or headless host.
 - [ ] **Certificate** shows the root summary and fingerprint; **Install** and
       **Remove** update the OS trust store and the page state. The tray menu has no certificate entry.
 - [ ] After **Remove**, restarting the tray does not reinstall trust; **Install**
-      or the setup wizard is needed to trust it again.
+      or setup is needed to trust it again.
 - [ ] A mutation from a cross-site page is refused: the dashboard requires the
       custom request header, and a non-loopback `Host` header gets 403.
 

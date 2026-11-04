@@ -4,6 +4,12 @@ Format: Keep a Changelog. Versions follow SemVer. The CLI, daemon, and tray ship
 
 ## [Unreleased]
 
+### Changed
+
+- The dashboard is served at `https://testd.test/` as well as `http://127.0.0.1:7737/`; the edge forwards the dashboard name only for loopback clients, and the loopback peer replaces the per-run URL token as the authority
+- The tray app opens the dashboard in a window instead of the browser, and lists `testd.test → dashboard` as the last row of the name list
+- First-run setup is a local page served by the daemon on an ephemeral loopback port and shown in a dialog; it shares the dashboard stylesheet and talks HTTP instead of Tauri commands
+
 ## [0.1.0-alpha] - 2026-11-03
 
 First public release. The CLI, daemon, and tray ship as one version; desktop bundles are unsigned and installed by hand.

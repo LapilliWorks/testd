@@ -16,7 +16,8 @@ This page covers the operational security model. Vulnerability reporting is in [
 | Browser to host edge | TLS, rustls with the ring provider | Browser trusts the testd root or a sharing provider |
 | Leaf to host intake | Plain TCP, NDJSON | Bearer credential in the clear; network must be trusted or separately encrypted |
 | Host to app target | Plain HTTP/1.1 | The app should not assume the upstream hop is encrypted |
-| Dashboard and control channel | Loopback TCP, no TLS | Same-user local access plus a per-run token |
+| Dashboard | Loopback TCP, no TLS | Any local user; the loopback peer is the authority |
+| Control channel | Loopback TCP, no TLS | Same-user local access plus a per-run token |
 
 The root CA and intermediate are created by the host. The root key stays on the host and is never copied to a dev environment. Leaf certificates are minted on demand for live names and live 24 hours.
 
@@ -62,13 +63,17 @@ Enable it only for leaves you would already trust with that reach. Once enabled,
 
 ## The local dashboard
 
-The dashboard is served on loopback and checks that the `Host` header is `localhost`, `127.0.0.1`, or `[::1]`. That check blocks DNS-rebinding pages from becoming local admin clients.
+The dashboard is served on loopback and checks that the `Host` header is `localhost`, `127.0.0.1`, `[::1]`, or `testd.<tld>`. That check blocks DNS-rebinding pages from becoming local admin clients.
 
-A bare URL is read-only. Mutations and every `/api/local/*` path need the per-run token from `control.json`; a `POST` also needs `X-Testd-Request: 1`, which a cross-site form cannot set. The token is delivered in the URL fragment, so it is not sent in the HTTP request. It remains in browser history while the page is open; do not paste the authenticated URL into screenshots, issue trackers, or chat.
+There is no login and no URL token. The loopback peer is the authority: any local user who can connect to `127.0.0.1:7737` can read and mutate the dashboard. On a shared machine, that is a real widening compared with a same-user token; the product assumes a single-user dev host.
 
-The page keeps a token-authenticated event stream open for live updates. The stream is loopback-only like the rest of the dashboard, and the browser sends the token in a request header rather than a URL.
+A `POST` also needs `X-Testd-Request: 1`, which a cross-site form cannot set and a cross-origin fetch cannot pass without a preflight this server does not grant. That header is the CSRF boundary.
 
-The dashboard has no TLS and no user login. It refuses non-loopback peers and enforces a loopback `Host` header. Do not port-forward it or put it behind a reverse proxy. The edge does not proxy it.
+The page keeps an event stream open for live updates. The stream is loopback-only like the rest of the dashboard.
+
+`https://testd.test/` reaches the same listener through the edge. The edge forwards the dashboard name only when the client is on this machine: the immediate peer must be loopback, and with a configured front proxy the first `X-Forwarded-For` hop must be loopback too. On the plain listener, which only a front reaches, the dashboard name requires `trust_forwarded_for = true`; without it the edge cannot tell the real client and returns 404. Every other client gets a 404.
+
+Do not port-forward the loopback listener. The only network path to it is the edge, which forwards `testd.<tld>` for loopback clients only; the control channel still uses its per-run token from `control.json`.
 
 ## Certificates and trust
 

@@ -207,7 +207,7 @@ impl Daemon {
 		&self.tld
 	}
 
-	/// Authenticated dashboard URL, including the per-run control token.
+	/// Loopback dashboard URL from the control file.
 	pub fn dashboard_url(&self) -> Result<String, String> {
 		crate::control::dashboard_url()
 			.map_err(|e| e.to_string())?

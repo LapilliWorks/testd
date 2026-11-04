@@ -15,6 +15,7 @@
 		document.documentElement.dataset.theme = dark ? 'dark' : 'light';
 	})();
 </script>
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="/dashboard.css">
 </head>
 <body>
@@ -370,7 +371,7 @@
 			button.disabled = false;
 			button.textContent = 'Finish setup';
 			setPill('finish-pill', 'Error', 'danger');
-			notice('Setup could not finish: ' + e.message);
+			notice('Setup could not finish: ' + e.message + ' Fix the problem and restart testd; setup resumes.');
 		}
 	}
 

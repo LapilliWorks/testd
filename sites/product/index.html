@@ -353,7 +353,7 @@
 					<div class="security-heading reveal"><p class="section-index">05 / CLEAR BOUNDARIES</p><h2>Local means local.</h2><p>No account system. No central service. No telemetry, usage reporting, or name reporting.</p></div>
 					<div class="security-grid reveal">
 						<div><span class="security-number">01</span><h3>Root key stays home</h3><p>Your CA private key remains on the host, never in a dev environment.</p></div>
-						<div><span class="security-number">02</span><h3>Dashboard on loopback</h3><p>Administrative actions need a per-run token. The edge never proxies the dashboard.</p></div>
+						<div><span class="security-number">02</span><h3>Dashboard on loopback</h3><p>The dashboard answers only on loopback. <code>testd.test</code> reaches it through the edge for clients on the host, and nowhere else.</p></div>
 						<div><span class="security-number">03</span><h3>Remote targets constrained</h3><p>Remote leaves can target only their own address unless you explicitly opt in.</p></div>
 						<div><span class="security-number">04</span><h3>Plainly documented</h3><p>Registration uses plain TCP. Use a trusted network or encrypted transport; never expose :7737 publicly.</p></div>
 					</div>

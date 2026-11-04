@@ -104,7 +104,7 @@ Runs the daemon in the foreground. A second instance fails on the instance lock.
 testd dashboard
 ```
 
-Prints the loopback dashboard URL including the per-run token fragment. Requires a running daemon.
+Prints the loopback dashboard URL. Requires a running daemon.
 
 ### url
 
@@ -221,7 +221,7 @@ Path: `~/.config/testd/config.toml`; on Windows, `%APPDATA%\testd\config.toml`. 
 | `http_addr` | `127.0.0.1:7740` | Plain HTTP routing for an external front; always on |
 | `answer_addr` | `127.0.0.1` | A-record address returned for registered names |
 | `allow_remote_targets` | `false` | Permit a remote leaf to name a target other than its own address |
-| `trust_forwarded_for` | `false` | Trust inbound `X-Forwarded-For` from a configured front |
+| `trust_forwarded_for` | `false` | Trust inbound `X-Forwarded-For` from a configured front; needed for the dashboard name on the plain listener |
 | `secret` | generated | Operator secret; bootstrap credential |
 | `pki_dir` | `~/.config/testd/pki` | Root CA, intermediate, and backups |
 | `caddyfile_path` | `~/.config/testd/Caddyfile` | Managed Caddyfile |
@@ -290,7 +290,7 @@ The host's token store is the source of truth. A leaf's credential file is a cop
 | DNS | `127.0.0.1:7753` | fixed | Linux and macOS |
 | DNS | `127.0.0.1:53` | fixed | Windows |
 
-The control channel uses the dashboard address with a per-run token from `control.json`.
+The control channel uses the dashboard address with a per-run token from `control.json`; the dashboard HTTP surface itself is authorized by the loopback peer.
 
 ## Names, targets, and limits
 
@@ -298,7 +298,7 @@ The control channel uses the dashboard address with a per-run token from `contro
 - Names are `<service>.<project>`, stored and displayed without the TLD.
 - Labels allow ASCII letters, digits, and hyphens; they may not start or end with a hyphen.
 - Maximum label: 63 bytes. Maximum full name: 253 bytes.
-- `testd.test` is reserved for the dashboard.
+- `testd.test` is reserved for the dashboard. The edge serves it to clients on this machine only.
 - Targets: bare port, `host:port`, `ip:port`, or `[ipv6]:port`. Maximum 512 bytes. Port 0 is invalid. The `run` entry syntax splits `host:name:port` on colons, so an IPv6 host cannot be used in a `run` entry; use a host name. Quick launches accept a full IPv6 target.
 - A bare port is completed with the leaf's connection address.
 
@@ -326,51 +326,44 @@ There is no telemetry, usage reporting, or name reporting.
 
 ## Dashboard and HTTP API
 
-Base URL: `http://127.0.0.1:7737/`. The `Host` header must be `localhost`, `127.0.0.1`, or `[::1]`. Only `GET` and `POST` are accepted.
+Base URLs: `http://127.0.0.1:7737/` and `https://testd.test/`. Both reach the same loopback listener; the edge forwards the dashboard name only when the client is on this machine. The `Host` header must be `localhost`, `127.0.0.1`, `[::1]`, or `testd.<tld>`. Only `GET` and `POST` are accepted.
 
-A bare URL is read-only. Mutations and `/api/local/*` need the per-run token from `control.json`, sent as:
-
-```text
-X-Testd-Token: <token>
-```
-
-Every `POST` also needs:
+Authorization is the loopback peer. There is no login and no token. Every `POST` needs:
 
 ```text
 X-Testd-Request: 1
 ```
 
-The token is normally supplied by the dashboard URL fragment (`#token=...`), which the page reads and sends as a header. The fragment is not sent in the HTTP request.
+A cross-site form cannot set that header, and a cross-origin fetch cannot pass the preflight, so the rule doubles as CSRF protection.
 
-| Method | Path | Auth | Purpose |
-|---|---|---|---|
-| `GET` | `/` | None | Dashboard, read-only without a token |
-| `GET` | `/api/status` | None | Names, targets, projects, advisories, shares |
-| `GET` | `/ca.crt` | None | Root certificate PEM |
-| `GET` | `/ok.svg` | None | Trivial liveness image |
-| `GET` | `/api/local/state` | Token | Live dashboard snapshot: names, shares, launches, requests, tokens |
-| `GET` | `/api/local/events` | Token | Server-sent snapshot stream for live dashboard updates |
-| `GET` | `/api/local/launches` | Token | Quick launch definitions and running state |
-| `POST` | `/api/local/launches/save` | Token | Create or update a definition |
-| `POST` | `/api/local/launches/delete` | Token | Delete a definition |
-| `POST` | `/api/local/launches/start` | Token | Start a definition |
-| `POST` | `/api/local/launches/stop` | Token | Stop a running definition |
-| `POST` | `/api/local/launches/rebind` | Token | Change one running entry's target |
-| `GET` | `/api/local/requests` | Token | Pending access requests |
-| `POST` | `/api/local/requests/approve` | Token | Approve a request |
-| `POST` | `/api/local/requests/deny` | Token | Deny a request |
-| `GET` | `/api/local/tokens` | Token | Issued tokens |
-| `POST` | `/api/local/tokens/revoke` | Token | Revoke a token |
-| `GET` | `/api/local/certificate` | Token | Trust state, fingerprint, expiry |
-| `POST` | `/api/local/certificate/install` | Token | Install system trust |
-| `POST` | `/api/local/certificate/remove` | Token | Remove system trust |
-| `POST` | `/stop/<name>` | Token | Stop a name's leaf; keep its grant |
-| `POST` | `/delete/<name>` | Token | Delete one name's grant and stop it |
-| `POST` | `/unshare/<name>` | Token | Stop a name's tunnel |
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/` | Dashboard |
+| `GET` | `/dashboard.css` | Shared stylesheet |
+| `GET` | `/api/status` | Names, targets, projects, advisories, shares |
+| `GET` | `/ca.crt` | Root certificate PEM |
+| `GET` | `/ok.svg` | Trivial liveness image |
+| `GET` | `/api/local/state` | Live dashboard snapshot: names, shares, launches, requests, tokens |
+| `GET` | `/api/local/events` | Server-sent snapshot stream for live dashboard updates |
+| `GET` | `/api/local/launches` | Quick launch definitions and running state |
+| `POST` | `/api/local/launches/save` | Create or update a definition |
+| `POST` | `/api/local/launches/delete` | Delete a definition |
+| `POST` | `/api/local/launches/start` | Start a definition |
+| `POST` | `/api/local/launches/stop` | Stop a running definition |
+| `POST` | `/api/local/launches/rebind` | Change one running entry's target |
+| `GET` | `/api/local/requests` | Pending access requests |
+| `POST` | `/api/local/requests/approve` | Approve a request |
+| `POST` | `/api/local/requests/deny` | Deny a request |
+| `GET` | `/api/local/tokens` | Issued tokens |
+| `POST` | `/api/local/tokens/revoke` | Revoke a token |
+| `GET` | `/api/local/certificate` | Trust state, fingerprint, expiry |
+| `POST` | `/api/local/certificate/install` | Install system trust |
+| `POST` | `/api/local/certificate/remove` | Remove system trust |
+| `POST` | `/stop/<name>` | Stop a name's leaf; keep its grant |
+| `POST` | `/delete/<name>` | Delete one name's grant and stop it |
+| `POST` | `/unshare/<name>` | Stop a name's tunnel |
 
-All `/api/local/*` paths require the token even for `GET`. The dashboard and API are not served by the edge.
-
-The dashboard keeps one `/api/local/events` request open and replaces its cards whenever a snapshot arrives. A snapshot is sent on connect, then whenever names, shares, launches, access requests, or tokens change; a comment frame is sent every 15 seconds to detect a dead connection. The browser reads the stream with `fetch`, so the token stays in the `X-Testd-Token` header instead of a URL.
+The dashboard keeps one `/api/local/events` request open and replaces its cards whenever a snapshot arrives. A snapshot is sent on connect, then whenever names, shares, launches, access requests, or tokens change; a comment frame is sent every 15 seconds to detect a dead connection.
 
 ## Tunnels
 

@@ -133,7 +133,7 @@ Run them on real machines, not inside the dev container. A macOS, Linux, and Win
 | `tests/host/linux.sh` | resolver route, CA trust, edge TLS, loopback dashboard, DNS A records, token requests, issued tokens, local registration, sharing, quick launches, URL actions, doctor state checks, launch-at-login entry, hosts helper, systemd unit |
 | `tests/host/macos.sh` | resolver file, CA trust, edge, loopback dashboard, DNS, token requests, issued tokens, local registration, sharing, quick launches, URL actions, doctor state checks, launch-at-login entry, launchd plist |
 | `tests/host/windows.ps1` | edge and proxy without system trust, loopback dashboard, NRPT and root trust when elevated, DNS on port 53, token requests, issued tokens, local registration, sharing, quick launches, URL actions, launch-at-login entry |
-| `tests/host/gui-checklist.md` | setup wizard, tray, dashboard, click-to-open, single instance, quick launches, certificate controls, URL actions, packaging/signing |
+| `tests/host/gui-checklist.md` | setup dialog, tray, dashboard window, click-to-open, single instance, quick launches, certificate controls, URL actions, packaging/signing |
 
 The Linux and macOS scripts share their core checks in `tests/host/common.sh` and their helpers in `tests/host/lib.sh`; the platform scripts add the resolver, trust, and init-system sections.
 
@@ -419,7 +419,7 @@ Run each in every browser you support: Chrome, Firefox, Safari, Edge.
 
 1. `https://app.example.test` loads with no certificate interstitial or bypass. The leaf is issued by `testd intermediate`, chains to `testd root`, carries `app.example.test` in its SAN, and expires within 24 hours.
 2. Wait for the leaf to be re-minted, or restart the daemon: a reload still shows a valid certificate with a newer validity window. When the browser suite started the host, use the page's restart button.
-3. The tray opens the authenticated dashboard URL, or `testd dashboard` prints it. The page lists the live name. `testd.test` is not a special name on the edge.
+3. The tray's `testd.test → dashboard` row opens the dashboard window, or `testd dashboard` prints the URL. The page lists the live name. `testd.test` is served by the edge for loopback clients only.
 4. WebSocket: a dev server using HMR websockets connects over `wss` and survives 60 seconds idle.
 5. SSE and a 100 MB upload complete without a truncated response.
 6. Cookies: two names in one project (`app.example.test`, `api.example.test`) share a cookie set on `.example.test`, exactly as `app.example.com` and `api.example.com` would.

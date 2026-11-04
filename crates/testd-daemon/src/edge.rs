@@ -369,7 +369,8 @@ async fn handle(handler: Handler, request: Request<Incoming>) -> Response<Body> 
 		if !dashboard_client_is_local(&handler, request.headers()) {
 			return text(StatusCode::NOT_FOUND, "The dashboard is loopback-only.");
 		}
-		return proxy(handler, request, &host, &addr.to_string()).await;
+		let target = addr.to_string();
+		return proxy(handler, request, &host, &target).await;
 	}
 
 	let target = match handler.ctx.registrations.lock().await.get(&host) {
@@ -399,7 +400,10 @@ fn dashboard_client_is_local(handler: &Handler, headers: &HeaderMap) -> bool {
 		return false;
 	}
 	if !handler.ctx.trust_forwarded_for {
-		return true;
+		// The TLS listener terminates the connection itself, so the peer is the
+		// client. The plain listener is only fed by a front, where the peer is
+		// always loopback and proves nothing.
+		return !handler.plain;
 	}
 	match headers.get("x-forwarded-for").and_then(|value| value.to_str().ok()) {
 		Some(value) => value
@@ -727,6 +731,12 @@ mod tests {
 		assert!(dashboard_client_is_local(&handler("127.0.0.1:5000"), &HeaderMap::new()));
 		assert!(!dashboard_client_is_local(&handler("192.168.1.5:5000"), &HeaderMap::new()));
 
+		// A plain listener is behind a front; without forwarded-header trust
+		// there is no way to tell who the real client is, so fail closed.
+		let mut plain = handler("127.0.0.1:5000");
+		plain.plain = true;
+		assert!(!dashboard_client_is_local(&plain, &HeaderMap::new()));
+
 		let mut fronted = EdgeContext::new("test", Registrations::default());
 		fronted.trust_forwarded_for = true;
 		let fronted = Arc::new(fronted);
@@ -763,22 +773,30 @@ mod tests {
 
 		let mut context = EdgeContext::new("test", Registrations::default());
 		context.dashboard_addr = Some(dashboard_addr);
+		// The plain listener stands in for an external front here.
+		context.trust_forwarded_for = true;
 		let dir = temp_dir();
 		let edge = start(Arc::new(context), None, "127.0.0.1:0".parse().unwrap(), &dir).unwrap();
 
-		let named = plain_request(edge.http_addr, "testd.test").await;
+		let named = plain_request(edge.http_addr, "testd.test", "127.0.0.1").await;
 		assert!(named.starts_with("HTTP/1.1 200"), "{named}");
 		assert!(named.ends_with("dashboard"), "{named}");
 
-		let unknown = plain_request(edge.http_addr, "nope.test").await;
+		// A LAN client behind the same front is not local, even though the
+		// front's connection arrives from loopback.
+		let remote = plain_request(edge.http_addr, "testd.test", "192.168.1.5").await;
+		assert!(remote.starts_with("HTTP/1.1 404"), "{remote}");
+
+		let unknown = plain_request(edge.http_addr, "nope.test", "127.0.0.1").await;
 		assert!(unknown.starts_with("HTTP/1.1 404"), "{unknown}");
 		std::fs::remove_dir_all(&dir).ok();
 	}
 
-	async fn plain_request(addr: SocketAddr, host: &str) -> String {
+	async fn plain_request(addr: SocketAddr, host: &str, client: &str) -> String {
 		use tokio::io::{AsyncReadExt, AsyncWriteExt};
 		let mut stream = TcpStream::connect(addr).await.unwrap();
-		let request = format!("GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+		let request =
+			format!("GET / HTTP/1.1\r\nHost: {host}\r\nX-Forwarded-For: {client}\r\nConnection: close\r\n\r\n");
 		stream.write_all(request.as_bytes()).await.unwrap();
 		let mut out = Vec::new();
 		stream.read_to_end(&mut out).await.unwrap();

@@ -66,7 +66,7 @@ The daemon owns the listeners:
 | UDP | `127.0.0.1:7753` | DNS for `.test` on Linux and macOS |
 | UDP | `127.0.0.1:53` | DNS for `.test` on Windows |
 
-A second daemon fails fast on the instance lock. `testd dashboard` prints the authenticated dashboard URL.
+A second daemon fails fast on the instance lock. `testd dashboard` prints the dashboard URL.
 
 On Linux, binding port 443 needs `CAP_NET_BIND_SERVICE`. Use the root-managed `packaging/systemd/testd@.service`, grant the capability to the executable yourself, or set a high edge port and include it in browser URLs. See [Advanced usage](advanced.md#privileged-ports).
 

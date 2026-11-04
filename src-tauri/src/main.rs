@@ -95,8 +95,7 @@ fn main() {
 /// Serve the first-run setup on an ephemeral loopback port and open it.
 ///
 /// The settings page runs in a webview but talks HTTP to the daemon crate, not
-/// IPC: the same page works for `testd host` later, and there is no second UI
-/// stack to keep in step.
+/// IPC: one page, one stylesheet, and no second UI stack to keep in step.
 fn start_setup(app: tauri::AppHandle, rt: Arc<tokio::runtime::Runtime>) -> Result<(), Box<dyn std::error::Error>> {
 	let mut setup = testd_daemon::setup::start(rt.handle())?;
 	WebviewWindowBuilder::new(&app, "setup", tauri::WebviewUrl::External(setup.url.parse()?))
@@ -116,9 +115,15 @@ fn start_setup(app: tauri::AppHandle, rt: Arc<tokio::runtime::Runtime>) -> Resul
 		if let Err(e) = app.run_on_main_thread(move || {
 			let result = tray::start_daemon(&main_app, main_rt)
 				.map(|()| main_app.state::<Arc<Daemon>>().engine.local_dashboard_url());
-			if result.is_ok() {
+			if let Ok(url) = &result {
+				tray::handle_current_url(&main_app);
 				if let Some(window) = main_app.get_webview_window("setup") {
 					let _ = window.close();
+				}
+				#[cfg(target_os = "macos")]
+				let _ = main_app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+				if let Err(e) = tray::open_dashboard(&main_app, url) {
+					tray::trace(&format!("dashboard window failed: {e}"));
 				}
 			}
 			let _ = done_tx.send(result);

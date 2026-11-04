@@ -163,7 +163,7 @@ The plain listener always runs. `edge_enabled` controls only the built-in TLS li
 
 `testd init` detects a Caddy install and offers to add an import to the global Caddyfile. `testd export-caddyfile` writes the managed Caddyfile and prints the import line. `testd doctor` checks the import and reloads Caddy when a global config is configured; `--fix` adds a missing import.
 
-The generated Caddyfile terminates TLS with Caddy's internal CA and proxies to `http_addr`. Browsers trust that CA, not the testd root. With `edge_enabled = false`, `doctor` skips the testd PKI and root checks and requires the external front's certificate to be trusted by the system. `trust_forwarded_for` must stay off unless a front you control sets the header; otherwise a client can spoof its source address.
+The generated Caddyfile terminates TLS with Caddy's internal CA and proxies to `http_addr`. Browsers trust that CA, not the testd root. With `edge_enabled = false`, `doctor` skips the testd PKI and root checks and requires the external front's certificate to be trusted by the system. `trust_forwarded_for` must stay off unless a front you control sets the header; otherwise a client can spoof its source address. On the plain listener the dashboard name is served only with this on and a loopback first hop.
 
 ## Hosts resolver
 
@@ -198,11 +198,11 @@ macOS uses the launchd template in `packaging/launchd/`. Windows needs no capabi
 
 ## Desktop app and OS integration
 
-The tray app is a separate Tauri build. On first start it opens a setup wizard for the resolver, root certificate, and operator secret. The wizard generates a pronounceable secret into an editable field, so an existing secret can replace it.
+The tray app is a separate Tauri build. On first start it opens a setup dialog served by the daemon on an ephemeral loopback port: resolver, root certificate, and operator secret. The dialog generates a pronounceable secret into an editable field, so an existing secret can replace it. Setup talks HTTP, not IPC, and shares the dashboard's stylesheet.
 
 The tray:
 
-- Runs the daemon and opens the authenticated dashboard
+- Runs the daemon and opens the dashboard in a window
 - Enables launch at login once, on first start, with a **Launch at login** checkbox afterwards
 - Shows pending access requests as notifications and changes its icon while one waits
 - Lists saved quick launches with start and stop actions
@@ -228,7 +228,7 @@ testd://fix/certificate
 
 `testd doctor` reports expiry. `testd doctor --fix` repairs the PKI when the root key is available. If `root.key` was moved offline, restore it before the intermediate expires.
 
-The dashboard's Certificate card shows trust state, SHA-256 fingerprint, and expiry, and installs or removes system trust. The edge exposes no certificate download. Fetch the root from loopback:
+The dashboard's Certificate card shows trust state, SHA-256 fingerprint, and expiry, and installs or removes system trust. Fetch the root from either dashboard URL:
 
 ```sh
 curl http://127.0.0.1:7737/ca.crt -o testd-root.crt

@@ -548,7 +548,7 @@ pub struct PendingConfig {
 	pub step: u8,
 	/// Path to the global Caddyfile.
 	pub caddy_config_path: String,
-	/// Operator secret chosen by the setup wizard.
+	/// Operator secret chosen during setup.
 	#[serde(default)]
 	pub secret: String,
 }

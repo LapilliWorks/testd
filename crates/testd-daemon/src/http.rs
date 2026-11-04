@@ -257,8 +257,8 @@ async fn serve_state<W: AsyncWriteExt + Unpin>(writer: &mut W, ctx: &HttpContext
 	respond_json(writer, "200 OK", &dashboard_state(ctx).await).await
 }
 
-/// Server-sent snapshots. The browser reads the stream with `fetch`, so the
-/// per-run token stays in a request header instead of the URL.
+/// Server-sent snapshots. The browser reads the stream with `fetch` so a
+/// reconnect can be aborted and restarted.
 async fn serve_events<W: AsyncWriteExt + Unpin>(writer: &mut W, ctx: &HttpContext) -> io::Result<()> {
 	// Subscribe before the first snapshot so a change during the snapshot still
 	// wakes the stream; duplicate snapshots are suppressed below.

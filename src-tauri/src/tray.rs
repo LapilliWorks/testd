@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::webview::WebviewWindowBuilder;
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -71,6 +72,7 @@ struct MenuState<'a> {
 	autostart: bool,
 	shares: &'a [ShareView],
 	launches: &'a [LaunchRow],
+	tld: &'a str,
 }
 
 /// The part of a launch the menu renders. Kept separate from [`LaunchView`] so
@@ -84,7 +86,7 @@ struct LaunchRow {
 
 /// Build a complete tray menu from the current registrations and health.
 fn build_menu(app: &AppHandle, state: &MenuState<'_>, handles: &SharedHandles) -> tauri::Result<Menu<tauri::Wry>> {
-	let MenuState { regs, health, autostart, shares, launches } = *state;
+	let MenuState { regs, health, autostart, shares, launches, tld } = *state;
 	let mut items: Vec<Box<dyn tauri::menu::IsMenuItem<tauri::Wry>>> = Vec::new();
 	// A missing prerequisite is the first thing to act on, and the red icon
 	// points here.
@@ -105,6 +107,15 @@ fn build_menu(app: &AppHandle, state: &MenuState<'_>, handles: &SharedHandles) -
 			items.push(Box::new(domain_item(app, r)?));
 		}
 	}
+	// The dashboard is a local name like any other, and the last row is where a
+	// user looks for it after scanning the live names.
+	items.push(Box::new(MenuItem::with_id(
+		app,
+		"dashboard-open",
+		format!("testd.{tld} → dashboard"),
+		true,
+		None::<&str>,
+	)?));
 
 	items.push(Box::new(PredefinedMenuItem::separator(app)?));
 
@@ -145,7 +156,6 @@ fn build_menu(app: &AppHandle, state: &MenuState<'_>, handles: &SharedHandles) -
 		items.push(Box::new(PredefinedMenuItem::separator(app)?));
 	}
 
-	items.push(Box::new(MenuItem::with_id(app, "dashboard", "Open dashboard", true, None::<&str>)?));
 	let autostart_item = CheckMenuItem::with_id(app, "autostart", "Launch at login", true, autostart, None::<&str>)?;
 	items.push(Box::new(autostart_item.clone()));
 	items.push(Box::new(MenuItem::with_id(app, "quit", "Exit", true, None::<&str>)?));
@@ -327,7 +337,7 @@ pub fn handle_url(app: &AppHandle, url: &str) {
 
 /// Consume the URL that launched this process, if any.
 ///
-/// Used after the daemon starts, including after the setup wizard writes the
+/// Used after the daemon starts, including after the setup page writes the
 /// first config, because the URL may have arrived while there was no daemon.
 pub fn handle_current_url(app: &AppHandle) {
 	let Ok(Some(urls)) = app.deep_link().get_current() else {
@@ -336,6 +346,26 @@ pub fn handle_current_url(app: &AppHandle) {
 	for url in urls {
 		handle_url(app, url.as_str());
 	}
+}
+
+/// Open the dashboard in a webview window, or focus the existing one.
+///
+/// The page is the daemon's loopback dashboard, the same bytes a browser gets,
+/// so this is a window around the site, not a second UI.
+pub fn open_dashboard(app: &AppHandle, url: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+	if let Some(window) = app.get_webview_window("dashboard") {
+		window.show()?;
+		window.set_focus()?;
+		return Ok(());
+	}
+	let window = WebviewWindowBuilder::new(app, "dashboard", tauri::WebviewUrl::External(url.parse()?))
+		.title("testd")
+		.inner_size(1040.0, 800.0)
+		.min_inner_size(720.0, 520.0)
+		.center()
+		.build()?;
+	window.set_focus()?;
+	Ok(())
 }
 
 /// Initialize the daemon, build the system tray, and spawn the engine.
@@ -356,13 +386,8 @@ pub fn start_daemon(
 	let daemon = Arc::new(rt.block_on(async { Daemon::new_gui().await })?);
 	enable_autostart_once(app);
 	let health = daemon.health();
-	let dashboard_url = match daemon.dashboard_url() {
-		Ok(url) => url,
-		Err(e) => {
-			trace(&format!("dashboard token unavailable: {e}"));
-			daemon.engine.local_dashboard_url()
-		},
-	};
+	let dashboard_url = daemon.engine.local_dashboard_url();
+	let tld = daemon.tld().to_owned();
 	// A menu event runs on the app's main thread. Anything that calls back into
 	// the menu or the OS from there freezes the whole window, so clicks only post
 	// a message and the async loop does the work.
@@ -372,8 +397,11 @@ pub fn start_daemon(
 	let shares = rt.block_on(async { daemon.shares().list().await });
 	let launches = summarize_launches(&daemon.launches().list());
 	let handles: SharedHandles = std::sync::Arc::new(std::sync::Mutex::new(None));
-	let menu =
-		build_menu(app, &MenuState { regs: &[], health, autostart, shares: &shares, launches: &launches }, &handles)?;
+	let menu = build_menu(
+		app,
+		&MenuState { regs: &[], health, autostart, shares: &shares, launches: &launches, tld: &tld },
+		&handles,
+	)?;
 
 	// Subscribe before reading the current value, so a request made while the
 	// tray is being built is not missed.
@@ -403,8 +431,10 @@ pub fn start_daemon(
 			} else if id == "autostart" {
 				// Read and write the login item off the main thread.
 				let _ = action_menu.send(MenuAction::ToggleAutostart);
-			} else if id == "dashboard" {
-				let _ = open::that(&click_dashboard);
+			} else if id == "dashboard-open" {
+				if let Err(e) = open_dashboard(app, &click_dashboard) {
+					trace(&format!("dashboard window failed: {e}"));
+				}
 			} else if let Some(domain) = id.strip_prefix("domain-open:") {
 				let url = format!("https://{domain}");
 				let _ = open::that(&url);
@@ -429,13 +459,15 @@ pub fn start_daemon(
 		.build(app)?;
 	trace("tray built");
 
-	// Start the engine in the background.
+	// Bind before returning so a caller can open the dashboard immediately. The
+	// accept loop still runs in the background.
+	let listener = rt.block_on(async { daemon.engine.bind().await })?;
 	let mut events = daemon.engine.subscribe();
 	let engine = daemon.engine.clone();
 	let engine_app = app.clone();
 
 	tokio::spawn(async move {
-		if let Err(e) = engine.run().await {
+		if let Err(e) = engine.serve(listener).await {
 			// eprintln! goes nowhere in a GUI build without a console.
 			trace(&format!("engine error: {e}"));
 			eprintln!("engine error: {e}");
@@ -466,6 +498,7 @@ pub fn start_daemon(
 	let node_daemon = Arc::clone(&daemon);
 	let mut action_rx = action_rx;
 	let menu_handles = std::sync::Arc::clone(&handles);
+	let menu_tld = tld.clone();
 	tokio::spawn(async move {
 		// Replacing a menu that is on screen destroys its popup handle, which
 		// closes it. Only rebuild when something really differs.
@@ -619,7 +652,8 @@ pub fn start_daemon(
 				// Swapping the menu while its popup is still closing is the failure
 				// mode; give it a moment.
 				tokio::time::sleep(Duration::from_millis(150)).await;
-				let state = MenuState { regs: &regs, health, autostart, shares: &shares, launches: &launches };
+				let state =
+					MenuState { regs: &regs, health, autostart, shares: &shares, launches: &launches, tld: &menu_tld };
 				match build_menu(&menu_app, &state, &menu_handles) {
 					Ok(menu) => match tray.set_menu(Some(menu)) {
 						Ok(()) => trace("menu replaced"),

@@ -133,10 +133,16 @@ impl HostEngine {
 		response.await.map_err(|_| "the engine is not serving".to_owned())?
 	}
 
-	/// Run the TCP server. Blocks until the listener fails.
-	pub async fn run(&self) -> io::Result<()> {
+	/// Bind the intake listener.
+	pub async fn bind(&self) -> io::Result<TcpListener> {
 		let listener = TcpListener::bind(self.config.listen_addr).await?;
 		eprintln!("[listen] {}", self.config.listen_addr);
+		Ok(listener)
+	}
+
+	/// Run the TCP server. Blocks until the listener fails.
+	pub async fn run(&self) -> io::Result<()> {
+		let listener = self.bind().await?;
 		self.serve(listener).await
 	}
 

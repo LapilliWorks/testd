@@ -268,7 +268,7 @@ async fn handle_finish(writer: &mut (impl AsyncWriteExt + Unpin), state: &State,
 	let mut pending = pending_or_default();
 	pending.step = 3;
 	pending.caddy_config_path = configure_external_front();
-	pending.secret = secret;
+	pending.secret = secret.clone();
 	if let Err(e) = finish_pending_config(&pending) {
 		return respond_json(writer, "500 Internal Server Error", &serde_json::json!({ "error": e.to_string() })).await;
 	}
@@ -289,11 +289,31 @@ async fn handle_finish(writer: &mut (impl AsyncWriteExt + Unpin), state: &State,
 			let _ = state.stop.send(true);
 			Ok(())
 		},
-		Ok(Err(e)) => respond_json(writer, "500 Internal Server Error", &serde_json::json!({ "error": e })).await,
+		Ok(Err(e)) => {
+			rollback_config(&secret);
+			respond_json(writer, "500 Internal Server Error", &serde_json::json!({ "error": e })).await
+		},
 		Err(_) => {
 			respond_json(writer, "503 Service Unavailable", &serde_json::json!({ "error": "the setup dialog is gone" }))
 				.await
 		},
+	}
+}
+
+/// A config that the daemon cannot start with would strand the next launch in a
+/// failed start. Move it aside and keep the setup state, so a restart resumes.
+fn rollback_config(secret: &str) {
+	let config = testd_core::config::config_path();
+	if config.exists() {
+		let backup = config.with_file_name("config.toml.failed");
+		let _ = std::fs::remove_file(&backup);
+		if let Err(e) = std::fs::rename(&config, &backup) {
+			eprintln!("[warn]   could not move {} aside: {e}", config.display());
+		}
+	}
+	let pending = PendingConfig { step: 2, caddy_config_path: String::new(), secret: secret.to_owned() };
+	if let Err(e) = write_pending_config(&pending) {
+		eprintln!("[warn]   could not restore the pending setup: {e}");
 	}
 }
 
