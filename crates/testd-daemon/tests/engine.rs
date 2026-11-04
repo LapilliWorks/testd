@@ -54,16 +54,9 @@ async fn start() -> Harness {
 	start_with_dashboard(None).await
 }
 
-/// Reserve a loopback port by binding and releasing it. The engine binds it again.
-async fn free_addr() -> SocketAddr {
-	let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-	let addr = probe.local_addr().unwrap();
-	drop(probe);
-	addr
-}
-
 async fn start_with_dashboard(_dashboard_addr: Option<SocketAddr>) -> Harness {
-	let addr = free_addr().await;
+	let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let addr = listener.local_addr().unwrap();
 
 	let dir = std::env::temp_dir().join(format!("testd-engine-{}-{}", std::process::id(), addr.port()));
 	std::fs::create_dir_all(&dir).unwrap();
@@ -91,7 +84,6 @@ async fn start_with_dashboard(_dashboard_addr: Option<SocketAddr>) -> Harness {
 	engine.set_local_token(LOCAL_TOKEN.into());
 	let engine = Arc::new(engine);
 	let registrations = engine.registrations();
-	let listener = TcpListener::bind(addr).await.unwrap();
 	let (stop, mut stopped) = oneshot::channel::<()>();
 	let serving = Arc::clone(&engine);
 	tokio::spawn(async move {
