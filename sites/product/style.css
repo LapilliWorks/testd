@@ -2274,6 +2274,7 @@ p {
 .footer-brand .brand-icon {
 	width: 32px;
 	height: 32px;
+	filter: invert(1);
 }
 
 .footer-brand p {

@@ -115,6 +115,10 @@ body {
 	width: 24px;
 }
 
+.dark .VPNavBarTitle .logo {
+	filter: invert(1);
+}
+
 .VPNavBarMenuLink {
 	font-weight: 500;
 }
