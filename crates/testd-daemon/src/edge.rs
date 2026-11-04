@@ -50,6 +50,9 @@ pub fn leaf_renewal_after() -> Duration {
 pub struct EdgeContext {
 	pub tld: String,
 	pub registrations: Registrations,
+	/// Loopback dashboard listener. The dashboard name is proxied here for
+	/// loopback clients only; `None` leaves the name unrouted.
+	pub dashboard_addr: Option<SocketAddr>,
 	/// Connection and response-header timeout for an upstream.
 	pub upstream_timeout: Duration,
 	/// Trust an inbound X-Forwarded-For from a configured front proxy.
@@ -58,7 +61,13 @@ pub struct EdgeContext {
 
 impl EdgeContext {
 	pub fn new(tld: impl Into<String>, registrations: Registrations) -> Self {
-		Self { tld: tld.into(), registrations, upstream_timeout: Duration::from_secs(30), trust_forwarded_for: false }
+		Self {
+			tld: tld.into(),
+			registrations,
+			dashboard_addr: None,
+			upstream_timeout: Duration::from_secs(30),
+			trust_forwarded_for: false,
+		}
 	}
 }
 
@@ -351,6 +360,18 @@ async fn handle(handler: Handler, request: Request<Incoming>) -> Response<Body> 
 		None => return text(StatusCode::BAD_REQUEST, "missing Host header"),
 	};
 
+	// The dashboard name is a fixed local surface, not a registration. It is
+	// forwarded only when the request really came from this machine: the peer
+	// must be loopback, and a front proxy must say the original client was too.
+	if host == format!("testd.{}", handler.ctx.tld)
+		&& let Some(addr) = handler.ctx.dashboard_addr
+	{
+		if !dashboard_client_is_local(&handler, request.headers()) {
+			return text(StatusCode::NOT_FOUND, "The dashboard is loopback-only.");
+		}
+		return proxy(handler, request, &host, &addr.to_string()).await;
+	}
+
 	let target = match handler.ctx.registrations.lock().await.get(&host) {
 		Some(registration) => registration.target,
 		None => return text(StatusCode::NOT_FOUND, &format!("No live registration for {host}.")),
@@ -366,6 +387,28 @@ fn ask(ctx: &EdgeContext, host: &str) -> Response<Body> {
 		registry.as_ref().is_ok_and(|registry| registry.contains(host))
 	};
 	if known { text(StatusCode::OK, "ok") } else { text(StatusCode::NOT_FOUND, "unknown name") }
+}
+
+/// Whether a dashboard request came from this machine.
+///
+/// The immediate peer must be loopback. With a front proxy in front, the first
+/// `X-Forwarded-For` hop must also be loopback, so a LAN client routed through a
+/// local front is refused and a remote front fails the peer check entirely.
+fn dashboard_client_is_local(handler: &Handler, headers: &HeaderMap) -> bool {
+	if !handler.peer.ip().is_loopback() {
+		return false;
+	}
+	if !handler.ctx.trust_forwarded_for {
+		return true;
+	}
+	match headers.get("x-forwarded-for").and_then(|value| value.to_str().ok()) {
+		Some(value) => value
+			.split(',')
+			.next()
+			.and_then(|first| first.trim().parse::<IpAddr>().ok())
+			.is_some_and(|ip| ip.is_loopback()),
+		None => true,
+	}
 }
 
 async fn proxy(handler: Handler, request: Request<Incoming>, host: &str, target: &str) -> Response<Body> {
@@ -669,6 +712,77 @@ mod tests {
 		let second = store.mint("app.test").unwrap();
 		assert_ne!(first.cert[0].as_ref(), second.cert[0].as_ref());
 		std::fs::remove_dir_all(&dir).ok();
+	}
+
+	#[test]
+	fn dashboard_requests_are_local_only() {
+		let context = Arc::new(EdgeContext::new("test", Registrations::default()));
+		let handler = |peer: &str| Handler {
+			ctx: Arc::clone(&context),
+			scheme: "https",
+			plain: false,
+			peer: peer.parse().unwrap(),
+		};
+
+		assert!(dashboard_client_is_local(&handler("127.0.0.1:5000"), &HeaderMap::new()));
+		assert!(!dashboard_client_is_local(&handler("192.168.1.5:5000"), &HeaderMap::new()));
+
+		let mut fronted = EdgeContext::new("test", Registrations::default());
+		fronted.trust_forwarded_for = true;
+		let fronted = Arc::new(fronted);
+		let mut headers = HeaderMap::new();
+		headers.insert("x-forwarded-for", HeaderValue::from_static("192.168.1.5"));
+		let backend = Handler {
+			ctx: Arc::clone(&fronted),
+			scheme: "https",
+			plain: false,
+			peer: "127.0.0.1:5000".parse().unwrap(),
+		};
+		assert!(!dashboard_client_is_local(&backend, &headers));
+
+		headers.insert("x-forwarded-for", HeaderValue::from_static("127.0.0.1"));
+		assert!(dashboard_client_is_local(&backend, &headers));
+	}
+
+	#[tokio::test]
+	async fn the_dashboard_name_routes_to_the_loopback_dashboard() {
+		let dashboard = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let dashboard_addr = dashboard.local_addr().unwrap();
+		tokio::spawn(async move {
+			while let Ok((mut stream, _)) = dashboard.accept().await {
+				tokio::spawn(async move {
+					use tokio::io::{AsyncReadExt, AsyncWriteExt};
+					let mut buffer = [0u8; 1024];
+					let _ = stream.read(&mut buffer).await;
+					let _ = stream
+						.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\ndashboard")
+						.await;
+				});
+			}
+		});
+
+		let mut context = EdgeContext::new("test", Registrations::default());
+		context.dashboard_addr = Some(dashboard_addr);
+		let dir = temp_dir();
+		let edge = start(Arc::new(context), None, "127.0.0.1:0".parse().unwrap(), &dir).unwrap();
+
+		let named = plain_request(edge.http_addr, "testd.test").await;
+		assert!(named.starts_with("HTTP/1.1 200"), "{named}");
+		assert!(named.ends_with("dashboard"), "{named}");
+
+		let unknown = plain_request(edge.http_addr, "nope.test").await;
+		assert!(unknown.starts_with("HTTP/1.1 404"), "{unknown}");
+		std::fs::remove_dir_all(&dir).ok();
+	}
+
+	async fn plain_request(addr: SocketAddr, host: &str) -> String {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+		let mut stream = TcpStream::connect(addr).await.unwrap();
+		let request = format!("GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+		stream.write_all(request.as_bytes()).await.unwrap();
+		let mut out = Vec::new();
+		stream.read_to_end(&mut out).await.unwrap();
+		String::from_utf8_lossy(&out).into_owned()
 	}
 
 	#[test]

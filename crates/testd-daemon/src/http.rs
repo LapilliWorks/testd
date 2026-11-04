@@ -25,8 +25,6 @@ const DASHBOARD_TEMPLATE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/dash
 pub struct HttpContext {
 	pub tld: String,
 	pub pki_dir: PathBuf,
-	/// Per-run token for the dashboard. Mutations and API reads require it.
-	pub local_token: Option<String>,
 	pub registrations: crate::engine::Registrations,
 	/// Live connections, to tell a name's grant from a bare registration.
 	pub connections: Arc<Connections>,
@@ -50,7 +48,6 @@ const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// A custom header cannot be sent by a cross-site form and forces a CORS
 /// preflight, which this server does not grant.
 const REQUEST_HEADER: &str = "x-testd-request";
-const TOKEN_HEADER: &str = "x-testd-token";
 
 pub async fn handle(stream: PeekedStream, ctx: &HttpContext, peer: SocketAddr) -> io::Result<()> {
 	if !peer.ip().is_loopback() {
@@ -89,8 +86,9 @@ where
 		}
 	}
 
-	// A DNS rebinding page must not become a local admin client.
-	if !is_loopback_host(header_value(&headers, "host")) {
+	// A DNS rebinding page must not become a local admin client. The dashboard
+	// name is accepted because the edge forwards it only for loopback clients.
+	if !is_loopback_host(header_value(&headers, "host"), &ctx.tld) {
 		return respond(&mut writer, "403 Forbidden", "text/plain", b"Loopback Host required.").await;
 	}
 
@@ -104,10 +102,6 @@ where
 	// cross-origin fetch cannot pass the preflight.
 	if method == "POST" && header_value(&headers, REQUEST_HEADER) != Some("1") {
 		return respond(&mut writer, "403 Forbidden", "text/plain", b"A dashboard request header is required.").await;
-	}
-
-	if requires_dashboard_auth(&method, &path) && !authorized(&headers, ctx.local_token.as_deref()) {
-		return respond(&mut writer, "401 Unauthorized", "text/plain", b"A dashboard token is required.").await;
 	}
 
 	let body = if method == "POST" {
@@ -160,30 +154,13 @@ async fn read_http_line<R: tokio::io::AsyncBufRead + Unpin>(
 		.transpose()
 }
 
-fn requires_dashboard_auth(method: &str, path: &str) -> bool {
-	method == "POST" || path.starts_with("/api/local/")
-}
-
-fn authorized(headers: &[(String, String)], expected: Option<&str>) -> bool {
-	let Some(expected) = expected.filter(|token| !token.is_empty()) else { return false };
-	let Some(actual) = header_value(headers, TOKEN_HEADER) else { return false };
-	constant_time_eq(expected.as_bytes(), actual.as_bytes())
-}
-
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-	if left.len() != right.len() {
-		return false;
-	}
-	left.iter().zip(right).fold(0u8, |difference, (a, b)| difference | (a ^ b)) == 0
-}
-
-fn is_loopback_host(host: Option<&str>) -> bool {
+fn is_loopback_host(host: Option<&str>, tld: &str) -> bool {
 	let Some(host) = host else { return false };
 	let name = match host.strip_prefix('[') {
 		Some(rest) => rest.split(']').next().unwrap_or(""),
 		None => host.split(':').next().unwrap_or(""),
 	};
-	matches!(name, "localhost" | "127.0.0.1" | "::1")
+	name.eq_ignore_ascii_case(&format!("testd.{tld}")) || matches!(name, "localhost" | "127.0.0.1" | "::1")
 }
 
 fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {

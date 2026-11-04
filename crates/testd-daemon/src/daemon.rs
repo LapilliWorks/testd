@@ -148,6 +148,7 @@ impl Daemon {
 		// The plain listener is always needed: an external front owns TLS when the
 		// built-in edge is disabled. Only the TLS listener follows `edge_enabled`.
 		let mut context = EdgeContext::new(tld.clone(), engine.registrations());
+		context.dashboard_addr = Some(config.local_client_addr());
 		context.trust_forwarded_for = config.trust_forwarded_for;
 		let tls_addr = config.edge_enabled.then_some(config.edge_addr);
 		let edge = edge::start(Arc::new(context), tls_addr, config.http_addr, &config.pki_dir)?;

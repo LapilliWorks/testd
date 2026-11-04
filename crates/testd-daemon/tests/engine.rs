@@ -354,9 +354,9 @@ where
 }
 
 /// One dashboard mutation from loopback, with the header that proves intent.
-fn post(token: &str, path: &str, body: &str) -> String {
+fn post(path: &str, body: &str) -> String {
 	format!(
-		"POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nx-testd-request: 1\r\nx-testd-token: {token}\r\n\
+		"POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nx-testd-request: 1\r\n\
 		 Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
 		body.len()
 	)
@@ -394,7 +394,7 @@ async fn stopping_a_name_keeps_the_grant() {
 	}
 	assert!(matches!(waiting.request(register("app", "3000", false)).await, Response::Ok));
 
-	let page = http(harness.addr, &post(LOCAL_TOKEN, "/stop/app.test", "")).await;
+	let page = http(harness.addr, &post("/stop/app.test", "")).await;
 	assert!(page.starts_with("HTTP/1.1 200"), "{page}");
 
 	let stopped = tokio::time::timeout(std::time::Duration::from_secs(5), recv::<_, Response>(&mut waiting.reader))
@@ -423,7 +423,7 @@ async fn deleting_one_name_keeps_the_rest() {
 	assert!(matches!(waiting.request(register("app", "3000", false)).await, Response::Ok));
 	assert!(matches!(waiting.request(register("api", "4000", false)).await, Response::Ok));
 
-	let page = http(harness.addr, &post(LOCAL_TOKEN, "/delete/api.test", "")).await;
+	let page = http(harness.addr, &post("/delete/api.test", "")).await;
 	assert!(page.starts_with("HTTP/1.1 200"), "{page}");
 
 	// Only the deleted name is withdrawn, and the connection stays open.
@@ -510,7 +510,7 @@ async fn a_name_without_an_issued_grant_cannot_be_deleted() {
 	let mut alice = Client::connect(harness.addr, &harness.token).await;
 	assert!(matches!(alice.request(register("app", "3000", false)).await, Response::Ok));
 
-	let page = http(harness.addr, &post(LOCAL_TOKEN, "/delete/app.test", "")).await;
+	let page = http(harness.addr, &post("/delete/app.test", "")).await;
 	assert!(page.starts_with("HTTP/1.1 400"), "{page}");
 	assert!(page.contains("no issued grant"), "the refusal names the reason: {page}");
 	assert_eq!(harness.registrations.lock().await.snapshot().len(), 1, "a refused delete keeps the name");
@@ -528,7 +528,7 @@ async fn revoking_a_token_closes_the_connections_that_use_it() {
 	assert!(matches!(waiting.request(register("app", "3000", false)).await, Response::Ok));
 
 	let body = format!("{{\"id\":\"{}\"}}", issued.id);
-	let page = http(harness.addr, &post(LOCAL_TOKEN, "/api/local/tokens/revoke", &body)).await;
+	let page = http(harness.addr, &post("/api/local/tokens/revoke", &body)).await;
 	assert!(page.starts_with("HTTP/1.1 200"), "{page}");
 
 	let notice = tokio::time::timeout(std::time::Duration::from_secs(5), recv::<_, Response>(&mut waiting.reader))
@@ -577,8 +577,7 @@ async fn the_dashboard_offers_stop_and_grant_delete() {
 async fn the_loopback_dashboard_is_local_and_exposes_local_actions() {
 	let harness = start_with_dashboard(None).await;
 
-	let local_get =
-		|path: &str| get(path, &[("x-testd-token", LOCAL_TOKEN)]).replace("Host: testd.test", "Host: 127.0.0.1");
+	let local_get = |path: &str| get(path, &[]);
 	let page = http(harness.addr, &local_get("/")).await;
 	assert!(page.starts_with("HTTP/1.1 200"), "{page}");
 	assert!(page.contains("Quick launches"), "the local dashboard shows local actions: {page}");
@@ -593,11 +592,7 @@ async fn the_loopback_dashboard_is_local_and_exposes_local_actions() {
 	let launches = http(harness.addr, &local_get("/api/local/launches")).await;
 	assert!(!launches.starts_with("HTTP/1.1 404"), "local routes are served locally: {launches}");
 
-	let unauthorized =
-		http(harness.addr, &get("/api/local/launches", &[]).replace("Host: testd.test", "Host: 127.0.0.1")).await;
-	assert!(unauthorized.starts_with("HTTP/1.1 401"), "API reads require the dashboard token: {unauthorized}");
-
-	let rebinding = http(harness.addr, &get("/", &[])).await;
+	let rebinding = http(harness.addr, &local_get("/").replace("Host: testd.test", "Host: evil.test")).await;
 	assert!(rebinding.starts_with("HTTP/1.1 403"), "a foreign Host is refused: {rebinding}");
 }
 
@@ -607,8 +602,7 @@ async fn dashboard_events_follow_registrations_and_access() {
 
 	let harness = start().await;
 	let mut stream = TcpStream::connect(harness.addr).await.unwrap();
-	let request =
-		get("/api/local/events", &[("x-testd-token", LOCAL_TOKEN)]).replace("Host: testd.test", "Host: 127.0.0.1");
+	let request = get("/api/local/events", &[]);
 	stream.write_all(request.as_bytes()).await.unwrap();
 	let mut reader = BufReader::new(stream);
 

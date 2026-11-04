@@ -769,9 +769,6 @@
 
 <script>
 	const THEME_KEY = 'testd.theme';
-	const dashboardToken = (() => {
-		try { return new URLSearchParams(location.hash.slice(1)).get('token') || ''; } catch (e) { return ''; }
-	})();
 	const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
 
 	function storedTheme() {
@@ -809,10 +806,9 @@
 	applyTheme(storedTheme());
 
 	async function post(path, body) {
-		if (!dashboardToken) throw new Error('Open the dashboard from the tray or run `testd dashboard`.');
 		const response = await fetch(path, {
 			method: 'POST',
-			headers: { 'Content-Type': 'application/json', 'X-Testd-Request': '1', 'X-Testd-Token': dashboardToken },
+			headers: { 'Content-Type': 'application/json', 'X-Testd-Request': '1' },
 			body: JSON.stringify(body || {}),
 		});
 		let data = {};
@@ -822,8 +818,7 @@
 	}
 
 	async function getJson(path) {
-		if (!dashboardToken) throw new Error('Open the dashboard from the tray or run `testd dashboard`.');
-		const response = await fetch(path, { headers: { 'X-Testd-Token': dashboardToken } });
+		const response = await fetch(path);
 		if (!response.ok) throw new Error(response.statusText);
 		return response.json();
 	}
@@ -865,9 +860,6 @@
 		} else if (state === 'connecting') {
 			label.textContent = 'Connecting...';
 			dot.classList.add('is-connecting');
-		} else if (state === 'missing') {
-			label.textContent = 'No dashboard token';
-			dot.classList.add('is-offline');
 		} else {
 			label.textContent = 'Reconnecting...';
 			dot.classList.add('is-offline');
@@ -1421,8 +1413,7 @@
 		renderState(state);
 	}
 
-	// Read the event stream with fetch, not EventSource, so the per-run token
-	// stays in a request header instead of the URL.
+	// Read the event stream with fetch so a reconnect can be aborted and restarted.
 	async function connectEvents() {
 		clearTimeout(reconnectTimer);
 		if (streamController) streamController.abort();
@@ -1431,7 +1422,6 @@
 		setConnection('connecting');
 		try {
 			const response = await fetch('/api/local/events', {
-				headers: { 'X-Testd-Token': dashboardToken },
 				cache: 'no-store',
 				signal: controller.signal,
 			});
@@ -1476,13 +1466,8 @@
 		document.getElementById('launches')?.scrollIntoView();
 	}
 
-	if (dashboardToken) {
-		certificateState();
-		connectEvents();
-	} else {
-		setConnection('missing');
-		notice('Dashboard token missing. Open the URL from the tray or run `testd dashboard`.');
-	}
+	certificateState();
+	connectEvents();
 </script>
 </body>
 </html>

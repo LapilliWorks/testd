@@ -156,7 +156,6 @@ impl HostEngine {
 		let http_ctx = Arc::new(HttpContext {
 			tld: self.tld.clone(),
 			pki_dir: self.config.pki_dir.clone(),
-			local_token: self.local_token.clone(),
 			registrations: self.registrations.clone(),
 			connections: Arc::clone(&connections),
 			operator_tx: self.operator_tx.clone(),

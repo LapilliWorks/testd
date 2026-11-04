@@ -166,9 +166,8 @@ pub fn control_path() -> PathBuf {
 	config_dir().join(CONTROL_FILE)
 }
 
-/// Authenticated URL for the local dashboard, or `None` when no daemon wrote a
-/// control file. The token is a fragment: it is not sent in the HTTP request
-/// line or Referer header, and the dashboard reads it in the browser.
+/// Loopback URL for the local dashboard, or `None` when no daemon wrote a
+/// control file. Access is bounded by the loopback listener, not by a token.
 pub fn dashboard_url() -> io::Result<Option<String>> {
 	dashboard_url_at(&control_path())
 }
@@ -183,7 +182,7 @@ fn dashboard_url_at(path: &Path) -> io::Result<Option<String>> {
 	let client = control
 		.client_addr
 		.ok_or_else(|| invalid_data("control file has no client address"))?;
-	Ok(Some(format!("http://{client}/#token={}", control.token)))
+	Ok(Some(format!("http://{client}/")))
 }
 
 /// Local client credentials for GUI-supervised launches.
@@ -768,8 +767,7 @@ mod tests {
 		assert_eq!(config.hosts, vec!["127.0.0.1:17737"]);
 		assert_eq!(config.token, server.token());
 		let url = dashboard_url_at(&path).unwrap().unwrap();
-		assert!(url.starts_with("http://127.0.0.1:17737/#token="), "{url}");
-		assert!(url.ends_with(server.token()), "{url}");
+		assert_eq!(url, "http://127.0.0.1:17737/");
 	}
 
 	#[tokio::test]
