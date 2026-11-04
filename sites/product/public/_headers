@@ -17,5 +17,5 @@
 /og.png
 	Cache-Control: public, max-age=86400
 
-/docs/logo.svg
+/docs/testd-slim.svg
 	Cache-Control: public, max-age=86400

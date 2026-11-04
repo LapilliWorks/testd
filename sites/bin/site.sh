@@ -138,6 +138,7 @@ run() {
 	set -- run --rm
 	if [ -t 0 ] && [ -t 1 ]; then set -- "$@" -it; fi
 	set -- "$@" \
+		--volume "$root/assets:/src/assets:ro$dir_label" \
 		--volume "$root/docs:/src/docs:ro$dir_label" \
 		--volume "$root/sites:/src/sites$dir_label" \
 		--volume "$root/scripts:/src/scripts$dir_label" \

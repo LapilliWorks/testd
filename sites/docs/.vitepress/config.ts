@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitepress';
 
 const REPO = 'https://github.com/LapilliWorks/testd';
@@ -5,6 +6,7 @@ const SITE = 'https://testd.dev';
 const outDir = process.env.TESTD_SITE_OUT_DIR
 	? `${process.env.TESTD_SITE_OUT_DIR}/docs`
 	: '../../dist/docs';
+const publicDir = fileURLToPath(new URL('../../../assets/brand', import.meta.url));
 
 export default defineConfig({
 	lang: 'en-US',
@@ -19,13 +21,13 @@ export default defineConfig({
 	lastUpdated: false,
 	titleTemplate: ':title | testd docs',
 	head: [
-		['link', { rel: 'icon', type: 'image/svg+xml', href: '/docs/logo.svg' }],
+		['link', { rel: 'icon', type: 'image/svg+xml', href: '/docs/testd-slim.svg' }],
 		['meta', { name: 'theme-color', content: '#f2eee4' }],
 		['meta', { property: 'og:type', content: 'website' }],
 		['meta', { property: 'og:site_name', content: 'testd docs' }],
 	],
 	themeConfig: {
-		logo: { src: '/logo.svg', alt: 'testd', width: 24, height: 24 },
+		logo: { src: '/testd-slim.svg', alt: 'testd', width: 24, height: 24 },
 		siteTitle: 'testd docs',
 		nav: [
 			{ text: 'Product', link: SITE },
@@ -96,6 +98,7 @@ export default defineConfig({
 		},
 	},
 	vite: {
+		publicDir,
 		server: {
 			host: '127.0.0.1',
 			port: Number(process.env.TESTD_DOCS_PORT ?? 5174),

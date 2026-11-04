@@ -59,17 +59,22 @@ CI builds and link-checks `dist/` on every run and does not deploy it; publicati
 
 ## Layout
 
-- `sites/product/`: product landing page, styles, static files, and its Vite config
-- `docs/`: documentation Markdown and its static files
-- `sites/docs/`: VitePress configuration and theme; reads the pages from `docs/`
+- `assets/`: canonical brand and social images
+- `sites/product/`: product landing page, styles, deploy files, and its Vite config
+- `docs/`: documentation Markdown
+- `sites/docs/`: VitePress configuration and theme; reads the pages from `docs/` and serves `assets/brand/` as its public directory
 - `sites/bin/site.sh`: entry point; picks the runtime and runs one action in a container
 - `sites/bin/entrypoint.sh`: installs dependencies in the container, then runs the action
 - `sites/bin/dev-servers.sh`: runs stock `vitepress dev` and `vite` inside the container
+- `src-tauri/icons/`: generated bundle and tray icons
+- `scripts/build-icons.py`: regenerates `src-tauri/icons/` from `assets/brand/`
 - `scripts/check-links.ts`: link checker for the built tree
 - `dist/`: combined build output, served at the origin root
 
 ## Brand assets
 
-`sites/product/src/assets/testd-icon.svg` is the slim brand icon used across the sites; `testd-mark.svg` is its bare `t.` glyph. `src-tauri/icons/icon.png` is the fat app icon that the GUI and tray bundle use. The sites keep static copies of the slim icon at `sites/product/public/favicon.svg` and `docs/public/logo.svg`; the docs use `logo.svg` for both the header logo and the favicon.
+`assets/brand/testd-slim.svg` is the slim brand icon used across the sites; `testd-mark.svg` is its bare `t.` glyph. The product site imports the brand files through Vite, and the docs serve `assets/brand/` as their public directory, using `testd-slim.svg` for both the header logo and the favicon.
+
+`assets/brand/testd-app.png` is the 1024px fat app icon, and `testd-tray-mask.png` and `testd-tray-plate-mask.png` are the alpha masks for the tray variants. `scripts/build-icons.py` regenerates `src-tauri/icons/` from those sources; the generated files stay in the directory Tauri expects. `assets/social/og.png` is the social card, emitted at `/og.png` by the product Vite config.
 
 The palette follows the Lapilli studio sheet: basalt `#141414`, paper `#F2EEE4`, lapilli `#E4542B`, ash `#8C8A83`. The footer uses the Direction 01 shard wordmark: the reversed file on the dark ground and the standard file on the light 404 page. Fonts are self-hosted through Fontsource: Archivo for text and JetBrains Mono for code.

@@ -20,6 +20,16 @@ cargo tauri build                # tray app
 
 The workspace includes `testd-gui`. On a machine without GTK/WebKit, add `--exclude testd-gui` to workspace test and clippy commands. CI installs the Tauri system prerequisites and checks the full workspace.
 
+## Icons
+
+`src-tauri/icons/` is generated; its sources live in `assets/brand/`. Regenerate the bundle and tray icons with:
+
+```sh
+python3 scripts/build-icons.py
+```
+
+The script uses only the Python standard library. `testd-app.png` supplies the app icon at every size, and the two 32px masks supply the tray variants.
+
 ## Website
 
 The product site lives under `sites/`; the documentation Markdown lives under `docs/` at the repository root. The site runs in a container, so no local `bun install` is needed to develop, build, or check it.
