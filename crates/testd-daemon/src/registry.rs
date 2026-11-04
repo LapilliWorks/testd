@@ -42,9 +42,10 @@ pub enum DeregisterError {
 	NotOwner { owner: u64 },
 }
 
-/// Result of a successful registration: the claim it displaced, if any.
+/// Result of a successful registration: the previous claim, if any.
 #[derive(Debug, Default)]
 pub struct Registered {
+	/// Includes an earlier target from the same connection, not only takeovers.
 	pub displaced: Option<Claim>,
 }
 
@@ -104,8 +105,7 @@ impl Registry {
 			Some(existing) if existing.connection != connection && !force => {
 				return Err(RegisterError::Duplicate { owner: existing.connection });
 			},
-			Some(existing) if existing.connection != connection => Some(existing.clone()),
-			_ => None,
+			previous => previous.cloned(),
 		};
 
 		self.claims
@@ -129,8 +129,11 @@ impl Registry {
 		self.claims.remove(domain)
 	}
 
-	/// Roll back a registration that could not be published.
+	/// Roll back only while the failed registration still owns the name.
 	pub fn restore(&mut self, connection: u64, domain: &str, previous: Option<Claim>) {
+		if !self.claims.get(domain).is_some_and(|claim| claim.connection == connection) {
+			return;
+		}
 		match previous {
 			Some(claim) => {
 				self.claims.insert(domain.to_owned(), claim);
@@ -241,6 +244,42 @@ mod tests {
 			.unwrap();
 		assert_eq!(taken.displaced.unwrap().connection, first);
 		assert_eq!(registry.get("app.test").unwrap().target, "127.0.0.1:4000");
+	}
+
+	#[test]
+	fn rolling_back_an_owned_update_restores_its_previous_target() {
+		let mut registry = Registry::default();
+		let connection = registry.connection_id();
+		registry
+			.register(connection, registration("app.test", "127.0.0.1:3000"), false, &[])
+			.unwrap();
+		let updated = registry
+			.register(connection, registration("app.test", "127.0.0.1:4000"), false, &[])
+			.unwrap();
+
+		registry.restore(connection, "app.test", updated.displaced);
+		assert_eq!(registry.get("app.test").unwrap().target, "127.0.0.1:3000");
+	}
+
+	#[test]
+	fn rolling_back_a_takeover_does_not_overwrite_a_later_owner() {
+		let mut registry = Registry::default();
+		let first = registry.connection_id();
+		let second = registry.connection_id();
+		let third = registry.connection_id();
+		registry
+			.register(first, registration("app.test", "127.0.0.1:3000"), false, &[])
+			.unwrap();
+		let takeover = registry
+			.register(second, registration("app.test", "127.0.0.1:4000"), true, &[])
+			.unwrap();
+		registry
+			.register(third, registration("app.test", "127.0.0.1:5000"), true, &[])
+			.unwrap();
+
+		registry.restore(second, "app.test", takeover.displaced);
+		assert_eq!(registry.claim("app.test").unwrap().connection, third);
+		assert_eq!(registry.get("app.test").unwrap().target, "127.0.0.1:5000");
 	}
 
 	#[test]

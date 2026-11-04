@@ -176,6 +176,7 @@ impl HostEngine {
 			tld: self.tld.clone(),
 			registrations: self.registrations.clone(),
 			resolver: self.resolver.clone(),
+			apply_lock: Mutex::new(()),
 			access: Arc::clone(&self.access),
 			event_tx: self.event_tx.clone(),
 			resolver_checked: AtomicBool::new(false),
@@ -249,20 +250,21 @@ pub enum OperatorAction {
 
 /// Stop the leaf that publishes `fqdn` and unpublish the names it holds.
 async fn stop_leaf(shared: &Shared, fqdn: &str) -> Result<(), String> {
-	let (connection, evicted) = {
+	let (closing, evicted) = {
 		let mut registrations = shared.registrations.lock().await;
 		let connection = registrations
 			.claim(fqdn)
 			.map(|claim| claim.connection)
 			.ok_or_else(|| format!("{fqdn} is not registered"))?;
-		(connection, registrations.release(connection))
+		let evicted = registrations.release(connection);
+		(shared.connections.take(connection), evicted)
 	};
 	for registration in &evicted {
 		eprintln!("[evict]  {} (leaf stopped)", registration.domain);
 	}
 	// Tell the owner so it stops instead of reconnecting. The credential is
 	// untouched, so a later run publishes the names again.
-	if let Some(connection) = shared.connections.take(connection) {
+	if let Some(connection) = closing {
 		connection.close(Some(Response::Stopped { domain: fqdn.to_owned() }));
 	}
 	apply(shared)
@@ -354,6 +356,8 @@ struct Shared {
 	tld: String,
 	registrations: Registrations,
 	resolver: Arc<dyn Resolver>,
+	/// Resolver snapshots must be applied in the order they are taken.
+	apply_lock: Mutex<()>,
 	access: Arc<Access>,
 	event_tx: broadcast::Sender<EngineEvent>,
 	resolver_checked: AtomicBool,
@@ -450,6 +454,10 @@ impl Connections {
 
 	fn take(&self, id: u64) -> Option<Connection> {
 		self.inner.lock().expect("connection map poisoned").remove(&id)
+	}
+
+	fn contains(&self, id: u64) -> bool {
+		self.inner.lock().expect("connection map poisoned").contains_key(&id)
 	}
 
 	fn grants(&self) -> HashSet<String> {
@@ -681,11 +689,14 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 							ensure_resolver_for(&shared, addr).await;
 							if let Err(e) = apply(&shared).await {
 								let mut regs = shared.registrations.lock().await;
-								regs.restore(connection, &fqdn, registered.displaced);
+								let previous = registered
+									.displaced
+									.filter(|claim| shared.connections.contains(claim.connection));
+								regs.restore(connection, &fqdn, previous);
 								drop(regs);
-								let _ = apply(&shared).await;
-								eprintln!("[error]  {fqdn} apply failed: {e}");
-								if reply(&out, Response::error(format!("{e}"))).await.is_err() {
+								let message = rollback_error(&shared, e).await;
+								eprintln!("[error]  {fqdn} apply failed: {message}");
+								if reply(&out, Response::error(message)).await.is_err() {
 									break;
 								}
 							} else {
@@ -724,11 +735,13 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 							Err(e) => {
 								// Restore the entry if it could not be unpublished.
 								let mut regs = shared.registrations.lock().await;
-								regs.register(connection, registration.clone(), true, &[]).ok();
+								if shared.connections.contains(connection) {
+									let _ = regs.register(connection, registration.clone(), false, &[]);
+								}
 								drop(regs);
-								let _ = apply(&shared).await;
-								eprintln!("[error]  {fqdn} apply failed: {e}");
-								format!("{e}")
+								let message = rollback_error(&shared, e).await;
+								eprintln!("[error]  {fqdn} apply failed: {message}");
+								message
 							},
 						},
 						Err(DeregisterError::NotFound) => format!("{fqdn} is not registered."),
@@ -749,8 +762,12 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 		result = processing => result,
 	};
 
-	// Connection closed: evict only the claims this connection owns.
-	let evicted = shared.registrations.lock().await.release(connection);
+	// Removing the connection and its claims is atomic with a failed takeover's rollback.
+	let evicted = {
+		let mut registrations = shared.registrations.lock().await;
+		drop(guard);
+		registrations.release(connection)
+	};
 	if !evicted.is_empty() {
 		for registration in &evicted {
 			eprintln!("[evict]  {}", registration.domain);
@@ -760,7 +777,6 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 		}
 	}
 
-	drop(guard);
 	drop(out);
 	let _ = writer.await;
 	result
@@ -1064,8 +1080,16 @@ impl Drop for PendingGuard {
 	}
 }
 
+async fn rollback_error(shared: &Shared, error: io::Error) -> String {
+	match apply(shared).await {
+		Ok(()) => error.to_string(),
+		Err(rollback) => format!("{error}; rollback could not update the resolver: {rollback}"),
+	}
+}
+
 /// Apply the current registration set to the resolver and tell subscribers.
 async fn apply(shared: &Shared) -> io::Result<()> {
+	let _apply = shared.apply_lock.lock().await;
 	let regs = shared.registrations.lock().await.snapshot();
 	let names: Vec<crate::resolver::ResolvedName> = regs
 		.iter()

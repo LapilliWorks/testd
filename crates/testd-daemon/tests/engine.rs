@@ -21,10 +21,35 @@ use testd_daemon::resolver::{ResolvedName, Resolver};
 struct RecordingResolver {
 	applied: Mutex<Vec<ResolvedName>>,
 	fail_next: AtomicBool,
+	gate: Mutex<Option<ResolverGate>>,
+}
+
+struct ResolverGate {
+	started: oneshot::Sender<()>,
+	resume: std::sync::mpsc::Receiver<()>,
+	outcome: Result<(), &'static str>,
+}
+
+impl RecordingResolver {
+	fn gate_next(&self, outcome: Result<(), &'static str>) -> (oneshot::Receiver<()>, std::sync::mpsc::Sender<()>) {
+		let (started, waiting) = oneshot::channel();
+		let (resume, resumed) = std::sync::mpsc::channel();
+		let gate = ResolverGate { started, resume: resumed, outcome };
+		assert!(self.gate.lock().unwrap().replace(gate).is_none());
+		(waiting, resume)
+	}
 }
 
 impl Resolver for RecordingResolver {
 	fn apply(&self, names: &[ResolvedName]) -> io::Result<()> {
+		let gate = self.gate.lock().unwrap().take();
+		if let Some(gate) = gate {
+			let _ = gate.started.send(());
+			gate.resume
+				.recv_timeout(std::time::Duration::from_secs(5))
+				.map_err(io::Error::other)?;
+			gate.outcome.map_err(io::Error::other)?;
+		}
 		if self.fail_next.swap(false, Ordering::SeqCst) {
 			return Err(io::Error::other("temporary resolver failure"));
 		}
@@ -61,7 +86,11 @@ async fn start_with_dashboard(_dashboard_addr: Option<SocketAddr>) -> Harness {
 	let dir = std::env::temp_dir().join(format!("testd-engine-{}-{}", std::process::id(), addr.port()));
 	std::fs::create_dir_all(&dir).unwrap();
 
-	let resolver = Arc::new(RecordingResolver { applied: Mutex::new(Vec::new()), fail_next: AtomicBool::new(false) });
+	let resolver = Arc::new(RecordingResolver {
+		applied: Mutex::new(Vec::new()),
+		fail_next: AtomicBool::new(false),
+		gate: Mutex::new(None),
+	});
 	let config = HostConfig {
 		resolver: ResolverBackend::Dns,
 		listen_addr: "127.0.0.1:0".parse().unwrap(),
@@ -144,6 +173,20 @@ fn register(domain: &str, target: &str, force: bool) -> Request {
 	Request::Register { domain: domain.into(), target: target.into(), force }
 }
 
+async fn wait_for_target(harness: &Harness, domain: &str, target: Option<&str>) {
+	tokio::time::timeout(std::time::Duration::from_secs(5), async {
+		loop {
+			let registration = harness.registrations.lock().await.claim(domain).cloned();
+			if registration.as_ref().map(|claim| claim.registration.target.as_str()) == target {
+				break;
+			}
+			tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("claim did not reach the expected target");
+}
+
 #[tokio::test]
 async fn duplicate_claim_is_rejected_and_names_the_owner() {
 	let harness = start().await;
@@ -180,6 +223,204 @@ async fn invalid_registrations_are_terminal_but_resolver_failures_remain_retryab
 	);
 	assert!(harness.registrations.lock().await.claim("app.test").is_none());
 	assert!(matches!(client.request(register("app", "3000", false)).await, Response::Ok));
+}
+
+#[tokio::test]
+async fn a_failed_rebind_keeps_the_existing_target() {
+	let harness = start().await;
+	let mut client = Client::connect(harness.addr, &harness.token).await;
+	assert!(matches!(client.request(register("app", "3000", false)).await, Response::Ok));
+	harness.resolver.fail_next.store(true, Ordering::SeqCst);
+	assert!(matches!(client.request(register("app", "4000", false)).await, Response::Error { .. }));
+	assert_eq!(harness.registrations.lock().await.get("app.test").unwrap().target, "127.0.0.1:3000");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_rollback_is_reported_with_the_original_resolver_error() {
+	let harness = start().await;
+	let mut client = Client::connect(harness.addr, &harness.token).await;
+	assert!(matches!(client.request(register("app", "3000", false)).await, Response::Ok));
+	let (started, resume) = harness.resolver.gate_next(Err("fixture failure"));
+	harness.resolver.fail_next.store(true, Ordering::SeqCst);
+	let request = tokio::spawn(async move {
+		let result = client.request(register("app", "4000", false)).await;
+		(client, result)
+	});
+	tokio::time::timeout(std::time::Duration::from_secs(5), started)
+		.await
+		.unwrap()
+		.unwrap();
+	resume.send(()).unwrap();
+	let (_client, response) = tokio::time::timeout(std::time::Duration::from_secs(5), request)
+		.await
+		.unwrap()
+		.unwrap();
+	match response {
+		Response::Error { message, .. } => {
+			assert!(message.contains("fixture failure"), "{message}");
+			assert!(message.contains("rollback") && message.contains("temporary resolver failure"), "{message}");
+		},
+		other => panic!("expected a resolver error, got {other:?}"),
+	}
+	assert_eq!(harness.registrations.lock().await.get("app.test").unwrap().target, "127.0.0.1:3000");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_takeover_does_not_restore_over_a_newer_owner() {
+	let harness = start().await;
+	let mut first = Client::connect(harness.addr, &harness.token).await;
+	let mut second = Client::connect(harness.addr, &harness.token).await;
+	let mut third = Client::connect(harness.addr, &harness.token).await;
+	assert!(matches!(first.request(register("app", "3000", false)).await, Response::Ok));
+
+	let (started, resume) = harness.resolver.gate_next(Err("fixture failure"));
+	let failed = tokio::spawn(async move {
+		let result = second.request(register("app", "4000", true)).await;
+		(second, result)
+	});
+	tokio::time::timeout(std::time::Duration::from_secs(5), started)
+		.await
+		.unwrap()
+		.unwrap();
+	let newer = tokio::spawn(async move {
+		let result = third.request(register("app", "5000", true)).await;
+		(third, result)
+	});
+	wait_for_target(&harness, "app.test", Some("127.0.0.1:5000")).await;
+	resume.send(()).unwrap();
+	let (_second, rejected) = tokio::time::timeout(std::time::Duration::from_secs(5), failed)
+		.await
+		.unwrap()
+		.unwrap();
+	let (_third, accepted) = tokio::time::timeout(std::time::Duration::from_secs(5), newer)
+		.await
+		.unwrap()
+		.unwrap();
+	assert!(matches!(rejected, Response::Error { .. }), "{rejected:?}");
+	assert!(matches!(accepted, Response::Ok), "{accepted:?}");
+	assert_eq!(harness.registrations.lock().await.get("app.test").unwrap().target, "127.0.0.1:5000");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_deregistration_does_not_reclaim_another_owners_name() {
+	let harness = start().await;
+	let mut first = Client::connect(harness.addr, &harness.token).await;
+	let mut second = Client::connect(harness.addr, &harness.token).await;
+	assert!(matches!(first.request(register("app", "3000", false)).await, Response::Ok));
+
+	let (started, resume) = harness.resolver.gate_next(Err("fixture failure"));
+	let failed = tokio::spawn(async move {
+		let result = first.request(Request::Deregister { domain: "app".into() }).await;
+		(first, result)
+	});
+	tokio::time::timeout(std::time::Duration::from_secs(5), started)
+		.await
+		.unwrap()
+		.unwrap();
+	let newer = tokio::spawn(async move {
+		let result = second.request(register("app", "4000", false)).await;
+		(second, result)
+	});
+	wait_for_target(&harness, "app.test", Some("127.0.0.1:4000")).await;
+	resume.send(()).unwrap();
+	let (_first, rejected) = tokio::time::timeout(std::time::Duration::from_secs(5), failed)
+		.await
+		.unwrap()
+		.unwrap();
+	let (_second, accepted) = tokio::time::timeout(std::time::Duration::from_secs(5), newer)
+		.await
+		.unwrap()
+		.unwrap();
+	assert!(matches!(rejected, Response::Error { .. }), "{rejected:?}");
+	assert!(matches!(accepted, Response::Ok), "{accepted:?}");
+	assert_eq!(harness.registrations.lock().await.get("app.test").unwrap().target, "127.0.0.1:4000");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_takeover_does_not_resurrect_a_stopped_owner() {
+	let harness = start().await;
+	let mut first = Client::connect(harness.addr, &harness.token).await;
+	let mut second = Client::connect(harness.addr, &harness.token).await;
+	assert!(matches!(first.request(register("app", "3000", false)).await, Response::Ok));
+	assert!(matches!(first.request(register("other", "3001", false)).await, Response::Ok));
+
+	let (started, resume) = harness.resolver.gate_next(Err("fixture failure"));
+	let failed = tokio::spawn(async move {
+		let result = second.request(register("app", "4000", true)).await;
+		(second, result)
+	});
+	tokio::time::timeout(std::time::Duration::from_secs(5), started)
+		.await
+		.unwrap()
+		.unwrap();
+	let engine = Arc::clone(&harness.engine);
+	let stopping =
+		tokio::spawn(async move { engine.operator(OperatorAction::Stop { domain: "other.test".into() }).await });
+	let notice = tokio::time::timeout(std::time::Duration::from_secs(5), recv::<_, Response>(&mut first.reader))
+		.await
+		.unwrap()
+		.unwrap();
+	assert!(matches!(notice, Some(Response::Stopped { .. })), "{notice:?}");
+	assert!(harness.registrations.lock().await.claim("other.test").is_none());
+	resume.send(()).unwrap();
+	let (_second, rejected) = tokio::time::timeout(std::time::Duration::from_secs(5), failed)
+		.await
+		.unwrap()
+		.unwrap();
+	assert!(matches!(rejected, Response::Error { .. }), "{rejected:?}");
+	tokio::time::timeout(std::time::Duration::from_secs(5), stopping)
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap();
+	assert!(harness.registrations.lock().await.claim("app.test").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_resolver_updates_finish_with_the_current_snapshot() {
+	let harness = start().await;
+	let mut first = Client::connect(harness.addr, &harness.token).await;
+	let mut second = Client::connect(harness.addr, &harness.token).await;
+	let (started, resume) = harness.resolver.gate_next(Ok(()));
+	let earlier = tokio::spawn(async move {
+		let result = first.request(register("one", "3000", false)).await;
+		(first, result)
+	});
+	tokio::time::timeout(std::time::Duration::from_secs(5), started)
+		.await
+		.unwrap()
+		.unwrap();
+	let later = tokio::spawn(async move {
+		let result = second.request(register("two", "4000", false)).await;
+		(second, result)
+	});
+	wait_for_target(&harness, "two.test", Some("127.0.0.1:4000")).await;
+	let _ = tokio::time::timeout(std::time::Duration::from_millis(200), async {
+		while harness.resolver.applied.lock().unwrap().len() != 2 {
+			tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+		}
+	})
+	.await;
+	resume.send(()).unwrap();
+	let (_first, one) = tokio::time::timeout(std::time::Duration::from_secs(5), earlier)
+		.await
+		.unwrap()
+		.unwrap();
+	let (_second, two) = tokio::time::timeout(std::time::Duration::from_secs(5), later)
+		.await
+		.unwrap()
+		.unwrap();
+	assert!(matches!(one, Response::Ok), "{one:?}");
+	assert!(matches!(two, Response::Ok), "{two:?}");
+	let applied: Vec<String> = harness
+		.resolver
+		.applied
+		.lock()
+		.unwrap()
+		.iter()
+		.map(|name| name.domain.clone())
+		.collect();
+	assert_eq!(applied, ["one.test", "two.test"]);
 }
 
 #[tokio::test]
