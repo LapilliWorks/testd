@@ -16,8 +16,29 @@ permissions:
   contents: read
 
 jobs:
+  # Classify the change set so documentation-only edits do not start builds.
+  # The filters themselves live in scripts/ci-changes.sh.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      release: ${{ steps.filter.outputs.release }}
+      site: ${{ steps.filter.outputs.site }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: bash scripts/ci-changes.sh
+
   test:
     name: test (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.release == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -44,6 +65,8 @@ jobs:
 
   site:
     name: site
+    needs: changes
+    if: needs.changes.outputs.site == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -55,6 +78,8 @@ jobs:
 
   system-restore:
     name: system restore (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.release == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -75,8 +100,10 @@ jobs:
     # TESTD_CI_HOST_SYSTEM repository variable. Gated by default: the suite
     # changes the runner's resolver and trust store, and on Linux it needs
     # systemd-resolved, which the runner image does not start.
+    needs: changes
     if: >-
-      github.event.inputs.host_system == 'true' || vars.TESTD_CI_HOST_SYSTEM == 'true'
+      (needs.changes.outputs.rust == 'true' || needs.changes.outputs.release == 'true') &&
+      (github.event.inputs.host_system == 'true' || vars.TESTD_CI_HOST_SYSTEM == 'true')
     strategy:
       fail-fast: false
       matrix:
@@ -107,6 +134,8 @@ jobs:
 
   msrv:
     name: msrv (${{ matrix.toolchain }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -126,6 +155,8 @@ jobs:
 
   deny:
     name: cargo-deny
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
