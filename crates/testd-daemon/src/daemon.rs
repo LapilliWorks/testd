@@ -270,7 +270,7 @@ impl Daemon {
 	}
 }
 
-/// A lagged registration subscriber must still close shares after revocation.
+/// Reconcile shares against the live registry after any registration event.
 async fn retain_shares(
 	shares: Arc<crate::share::Shares>,
 	mut events: tokio::sync::broadcast::Receiver<crate::engine::EngineEvent>,
@@ -279,11 +279,12 @@ async fn retain_shares(
 ) {
 	let suffix = format!(".{tld}");
 	loop {
-		let registrations = match events.recv().await {
-			Ok(crate::engine::EngineEvent::Changed(registrations)) => registrations,
-			Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => registry.lock().await.snapshot(),
+		match events.recv().await {
+			Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
 			Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-		};
+		}
+		// An older event can arrive after a newer claim; its snapshot is not authoritative.
+		let registrations = registry.lock().await.snapshot();
 		let names: Vec<String> = registrations
 			.into_iter()
 			.map(|registration| {
@@ -361,6 +362,46 @@ mod tests {
 	use crate::engine::EngineEvent;
 	use crate::share::{Provider, Shares};
 	use std::os::unix::fs::PermissionsExt;
+
+	#[tokio::test]
+	async fn stale_change_events_do_not_close_a_share_for_a_current_claim() {
+		let dir = tempfile::tempdir().unwrap();
+		let provider = dir.path().join("provider");
+		std::fs::write(&provider, "#!/bin/sh\necho 'https://fixture.trycloudflare.com' >&2\nexec sleep 30\n").unwrap();
+		std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o700)).unwrap();
+		let shares = Arc::new(Shares::new(Provider::Cloudflared, Some(provider), None));
+		shares.start("keep.example", "127.0.0.1:3000", None).await.unwrap();
+		shares.start("stale.example", "127.0.0.1:3001", None).await.unwrap();
+		let registry = Arc::new(tokio::sync::Mutex::new(crate::registry::Registry::default()));
+		{
+			let mut registry = registry.lock().await;
+			let connection = registry.connection_id();
+			registry
+				.register(
+					connection,
+					testd_core::Registration { domain: "keep.example.test".into(), target: "127.0.0.1:3000".into() },
+					false,
+					&[],
+				)
+				.unwrap();
+		}
+		let (sender, receiver) = tokio::sync::broadcast::channel(1);
+		let task = tokio::spawn(retain_shares(Arc::clone(&shares), receiver, registry, "test".into()));
+		sender.send(EngineEvent::Changed(Vec::new())).unwrap();
+		tokio::time::timeout(std::time::Duration::from_secs(5), async {
+			while shares.list().await.iter().any(|share| share.name == "stale.example") {
+				tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("stale share was not reconciled");
+		let active = shares.list().await;
+		assert_eq!(active.len(), 1);
+		assert_eq!(active[0].name, "keep.example");
+		assert!(shares.stop("keep.example").await);
+		drop(sender);
+		task.await.unwrap();
+	}
 
 	#[tokio::test]
 	async fn a_lagged_subscriber_still_stops_a_share_whose_name_left() {
