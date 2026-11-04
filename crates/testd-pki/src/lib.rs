@@ -50,7 +50,7 @@ impl Ca {
 		let (root_cert_pem, root_issuer) = if root_cert_path.exists() {
 			let cert = std::fs::read_to_string(&root_cert_path).context("read root certificate")?;
 			// The root key may have been moved into an offline seed; serving does not need it.
-			let issuer = match std::fs::read_to_string(&root_key_path) {
+			let issuer = match read_private(&root_key_path) {
 				Ok(key) => {
 					let key = KeyPair::from_pem(&key).context("parse root key")?;
 					Some(Issuer::from_ca_cert_pem(&cert, key).context("load root issuer")?)
@@ -75,7 +75,7 @@ impl Ca {
 
 		let (node_cert_pem, node_issuer) = if node_cert_path.exists() && node_key_path.exists() {
 			let cert = std::fs::read_to_string(&node_cert_path).context("read node certificate")?;
-			let key = std::fs::read_to_string(&node_key_path).context("read node key")?;
+			let key = read_private(&node_key_path).context("read node key")?;
 			let key = KeyPair::from_pem(&key).context("parse node key")?;
 			let issuer = Issuer::from_ca_cert_pem(&cert, key).context("load node issuer")?;
 			(cert, issuer)
@@ -151,7 +151,7 @@ impl Ca {
 		if intermediate.not_after <= now + leaf_lifetime * 2 {
 			let root_key = self.dir.join("root.key");
 			if root_key.exists() {
-				let key = KeyPair::from_pem(&std::fs::read_to_string(&root_key)?)?;
+				let key = KeyPair::from_pem(&read_private(&root_key)?)?;
 				let root = Issuer::from_ca_cert_pem(&self.root_cert_pem, key)?;
 				/* Retain the signing key: renewal replaces only the certificate atomically. */
 				let key = KeyPair::from_pem(&intermediate.issuer.key().serialize_pem())?;
@@ -345,6 +345,43 @@ fn hex(bytes: &[u8]) -> String {
 	bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Read a key only after restricting access to it on Unix.
+fn read_private(path: &Path) -> std::io::Result<String> {
+	use std::io::Read;
+
+	let mut file = std::fs::File::open(path)?;
+	#[cfg(unix)]
+	restrict_file_permissions(path, &file)?;
+	let mut content = String::new();
+	file.read_to_string(&mut content)?;
+	Ok(content)
+}
+
+#[cfg(unix)]
+fn restrict_file_permissions(path: &Path, file: &std::fs::File) -> std::io::Result<()> {
+	use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+	let opened = file.metadata()?;
+	let mut permissions = opened.permissions();
+	let mode = permissions.mode();
+	if mode & 0o077 == 0 {
+		return Ok(());
+	}
+	let current = std::fs::symlink_metadata(path)?;
+	if current.file_type().is_symlink()
+		|| current.dev() != opened.dev()
+		|| current.ino() != opened.ino()
+		|| opened.nlink() != 1
+	{
+		return Err(std::io::Error::new(
+			std::io::ErrorKind::PermissionDenied,
+			format!("{} is linked or changed; restrict its permissions manually", path.display()),
+		));
+	}
+	permissions.set_mode(mode & !0o077);
+	file.set_permissions(permissions)
+}
+
 /// Write a secret file readable only by the current user.
 fn write_private(path: &Path, content: &[u8]) -> Result<()> {
 	#[cfg(unix)]
@@ -355,9 +392,11 @@ fn write_private(path: &Path, content: &[u8]) -> Result<()> {
 		let mut file = std::fs::OpenOptions::new()
 			.write(true)
 			.create(true)
-			.truncate(true)
+			.truncate(false)
 			.mode(0o600)
 			.open(path)?;
+		restrict_file_permissions(path, &file)?;
+		file.set_len(0)?;
 		file.write_all(content)?;
 		file.sync_all()?;
 	}
@@ -565,6 +604,122 @@ mod tests {
 		assert_eq!(renewed.root_cert_pem(), ca.root_cert_pem());
 		check_validity(dir.path()).unwrap();
 		renewed.mint_der("app.test").unwrap();
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn reloading_repairs_existing_key_permissions_without_changing_keys() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let dir = tempfile::tempdir().unwrap();
+		Ca::load_or_init(dir.path()).unwrap();
+		let mut keys = Vec::new();
+		for name in ["root.key", "node.key"] {
+			let path = dir.path().join(name);
+			keys.push((path.clone(), std::fs::read(&path).unwrap()));
+			std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+		}
+
+		Ca::load_or_init(dir.path()).unwrap().mint_der("app.test").unwrap();
+		for (path, original) in keys {
+			let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+			assert_eq!(mode & 0o077, 0, "{} must be private", path.display());
+			assert_eq!(std::fs::read(path).unwrap(), original);
+		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn an_insecure_linked_key_is_not_changed_automatically() {
+		use std::os::unix::fs::{PermissionsExt, symlink};
+
+		let dir = tempfile::tempdir().unwrap();
+		let external = tempfile::tempdir().unwrap();
+		Ca::load_or_init(dir.path()).unwrap();
+		let root_key = dir.path().join("root.key");
+		let target = external.path().join("root.key");
+		std::fs::rename(&root_key, &target).unwrap();
+		symlink(&target, &root_key).unwrap();
+		std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+		let original = std::fs::read(&target).unwrap();
+
+		let error = Ca::load_or_init(dir.path())
+			.err()
+			.expect("an insecure linked key must be refused");
+		assert!(format!("{error:#}").contains("restrict its permissions manually"));
+		assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o644);
+		assert_eq!(std::fs::read(&target).unwrap(), original);
+
+		std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o400)).unwrap();
+		Ca::load_or_init(dir.path()).unwrap().mint_der("app.test").unwrap();
+		assert_eq!(std::fs::metadata(target).unwrap().permissions().mode() & 0o777, 0o400);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn an_insecure_hard_linked_key_is_not_changed_automatically() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let dir = tempfile::tempdir().unwrap();
+		Ca::load_or_init(dir.path()).unwrap();
+		let root_key = dir.path().join("root.key");
+		let linked = dir.path().join("other-key");
+		std::fs::hard_link(&root_key, &linked).unwrap();
+		std::fs::set_permissions(&root_key, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+		let error = Ca::load_or_init(dir.path())
+			.err()
+			.expect("an insecure hard-linked key must be refused");
+		assert!(format!("{error:#}").contains("restrict its permissions manually"));
+		assert_eq!(std::fs::metadata(linked).unwrap().permissions().mode() & 0o777, 0o644);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn renewing_an_intermediate_repairs_the_root_key_permissions() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let dir = tempfile::tempdir().unwrap();
+		let ca = Ca::load_or_init(dir.path()).unwrap();
+		let root_key = dir.path().join("root.key");
+		std::fs::set_permissions(&root_key, std::fs::Permissions::from_mode(0o644)).unwrap();
+		ca.intermediate.lock().unwrap().not_after = 0;
+		ca.mint_der("app.test").unwrap();
+		let mode = std::fs::metadata(root_key).unwrap().permissions().mode();
+		assert_eq!(mode & 0o077, 0);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn private_writes_restrict_preexisting_files() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("key");
+		std::fs::write(&path, "old").unwrap();
+		std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+		write_private(&path, b"new").unwrap();
+		let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+		assert_eq!(mode & 0o077, 0);
+		assert_eq!(std::fs::read(path).unwrap(), b"new");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn private_writes_do_not_truncate_insecure_link_targets() {
+		use std::os::unix::fs::{PermissionsExt, symlink};
+
+		let dir = tempfile::tempdir().unwrap();
+		let target = dir.path().join("target");
+		let link = dir.path().join("link");
+		std::fs::write(&target, b"original").unwrap();
+		std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+		symlink(&target, &link).unwrap();
+
+		let error = write_private(&link, b"replacement").unwrap_err();
+		assert!(format!("{error:#}").contains("restrict its permissions manually"));
+		assert_eq!(std::fs::read(&target).unwrap(), b"original");
+		assert_eq!(std::fs::metadata(target).unwrap().permissions().mode() & 0o777, 0o644);
 	}
 
 	#[cfg(unix)]
