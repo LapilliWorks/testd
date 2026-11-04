@@ -2,7 +2,8 @@
 """Generate the Tauri bundle and tray icons from the canonical assets.
 
 Sources live in assets/brand/:
-  testd-app.png            1024px fat app icon
+  testd-app.png            1024px fat app icon for sizes below 128px
+  testd-app-large.png      1024px thin render of testd-slim.svg for 128px and above
   testd-tray-mask.png      alpha mask for the tray frame and `.t`
   testd-tray-plate-mask.png alpha mask for the plate knockout
 
@@ -26,22 +27,24 @@ TRAY_ALERT = (215, 0, 21)
 TRAY_REQUEST = (96, 165, 250)
 PLATE_COLOR = (255, 255, 255)
 
-_app_source: tuple[int, bytes] | None = None
+# Thin strokes disappear at small sizes; keep the fat source for trays and small app icons.
+LARGE_APP_MIN = 128
+_app_sources: dict[str, tuple[int, bytes]] = {}
 
 
-def load_app_source() -> tuple[int, bytes]:
-	global _app_source
-	if _app_source is None:
-		path = os.path.join(ASSETS, 'testd-app.png')
+def load_app_source(name: str) -> tuple[int, bytes]:
+	if name not in _app_sources:
+		path = os.path.join(ASSETS, name)
 		width, height, data = png.read_rgba(path)
 		if width != height:
 			raise ValueError(f'{path}: expected a square icon, got {width}x{height}')
-		_app_source = (width, data)
-	return _app_source
+		_app_sources[name] = (width, data)
+	return _app_sources[name]
 
 
 def app_rgba(size: int) -> bytes:
-	source_size, data = load_app_source()
+	name = 'testd-app-large.png' if size >= LARGE_APP_MIN else 'testd-app.png'
+	source_size, data = load_app_source(name)
 	return png.resize_rgba(data, source_size, source_size, size, size)
 
 

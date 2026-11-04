@@ -28,7 +28,7 @@ The workspace includes `testd-gui`. On a machine without GTK/WebKit, add `--excl
 python3 scripts/build-icons.py
 ```
 
-The script uses only the Python standard library. `testd-app.png` supplies the app icon at every size, and the two 32px masks supply the tray variants.
+The script uses only the Python standard library. `testd-app.png` supplies sizes below 128px, `testd-app-large.png` supplies 128px and above, and the two 32px masks supply the tray variants. `testd-app-large.png` is a 1024px render of `testd-slim.svg`; refresh it when the SVG changes.
 
 ## Website
 

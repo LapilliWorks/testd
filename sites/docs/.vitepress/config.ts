@@ -21,13 +21,13 @@ export default defineConfig({
 	lastUpdated: false,
 	titleTemplate: ':title | testd docs',
 	head: [
-		['link', { rel: 'icon', type: 'image/svg+xml', href: '/docs/testd-slim.svg' }],
+		['link', { rel: 'icon', type: 'image/png', href: '/docs/testd-app.png' }],
 		['meta', { name: 'theme-color', content: '#f2eee4' }],
 		['meta', { property: 'og:type', content: 'website' }],
 		['meta', { property: 'og:site_name', content: 'testd docs' }],
 	],
 	themeConfig: {
-		logo: { src: '/testd-slim.svg', alt: 'testd', width: 24, height: 24 },
+		logo: { src: '/testd-app.png', alt: 'testd', width: 24, height: 24 },
 		siteTitle: 'testd docs',
 		nav: [
 			{ text: 'Product', link: SITE },
