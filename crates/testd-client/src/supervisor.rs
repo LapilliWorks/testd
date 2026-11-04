@@ -739,7 +739,7 @@ async fn session_loop(
 								desired.insert(domain, target);
 								let _ = respond.send(Ok(()));
 							},
-							Ok(Response::Error { message }) => {
+							Ok(Response::Error { message, .. }) => {
 								let _ = respond.send(Err(message));
 							},
 							Ok(_) => {
@@ -789,7 +789,7 @@ async fn reregister(live: &mut Live, desired: &mut HashMap<String, String>, even
 		let request = Request::Register { domain: domain.clone(), target: target.clone(), force: false };
 		match live.request(&request).await {
 			Ok(Response::Ok) => {},
-			Ok(Response::Error { message }) => {
+			Ok(Response::Error { message, .. }) => {
 				desired.remove(&domain);
 				send_state(events, &domain, &target, EntryState::Configured, Some(message)).await;
 			},

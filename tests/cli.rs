@@ -250,6 +250,53 @@ fn a_leaf_without_a_credential_requests_one_and_saves_it() {
 	assert_eq!(std::fs::read_to_string(&credential).unwrap().trim(), "issued-token");
 }
 
+#[tokio::test]
+async fn run_exits_with_the_host_rejection_instead_of_retrying() {
+	use testd_core::protocol::{Auth, Request, Response, recv, send};
+	use tokio::io::BufReader;
+	use tokio::net::TcpListener;
+
+	let home = TempDir::new().unwrap();
+	let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let addr = listener.local_addr().unwrap();
+	let host = tokio::spawn(async move {
+		let (stream, _) = listener.accept().await.unwrap();
+		let (reader, mut writer) = stream.into_split();
+		let mut reader = BufReader::new(reader);
+		let auth: Auth = recv(&mut reader).await.unwrap().unwrap();
+		assert_eq!(auth.token, "test-token");
+		send(&mut writer, &Response::Ok).await.unwrap();
+		let request: Request = recv(&mut reader).await.unwrap().unwrap();
+		assert!(matches!(request, Request::Register { .. }));
+		send(&mut writer, &Response::terminal_error("name is already registered"))
+			.await
+			.unwrap();
+	});
+
+	let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_testd"));
+	command
+		.args(["run", "app:3000", "--host", &addr.to_string()])
+		.env("HOME", home.path())
+		.env("APPDATA", home.path().join("AppData/Roaming"))
+		.env("USERPROFILE", home.path())
+		.env("TESTD_TOKEN", "test-token")
+		.env_remove("TESTD_HOSTS")
+		.env_remove("TESTD_HOST")
+		.env_remove("TESTD_TOKEN_PROFILE")
+		.env_remove("TESTD_PROFILE")
+		.current_dir(home.path())
+		.kill_on_drop(true);
+	let output = tokio::time::timeout(std::time::Duration::from_secs(5), command.output())
+		.await
+		.expect("client kept retrying the rejected registration")
+		.unwrap();
+	host.await.unwrap();
+	assert!(!output.status.success());
+	let stderr = String::from_utf8_lossy(&output.stderr);
+	assert!(stderr.contains("name is already registered"), "{stderr}");
+	assert!(!stderr.contains("retrying"), "{stderr}");
+}
+
 #[test]
 fn host_config_has_no_leaf_credentials() {
 	let home = TempDir::new().unwrap();

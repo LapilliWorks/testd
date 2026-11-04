@@ -10,7 +10,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{Notify, mpsc};
 
 use testd_core::config::ClientConfig;
-use testd_core::protocol::{self, Auth, Request, Response, TokenRequest};
+use testd_core::protocol::{self, Auth, ErrorDisposition, Request, Response, TokenRequest};
 
 pub mod listeners;
 pub mod supervisor;
@@ -83,11 +83,11 @@ async fn authenticate(
 					);
 					config.token = token;
 				},
-				Response::Error { message } => bail!("access request failed: {message}"),
+				Response::Error { message, .. } => bail!("access request failed: {message}"),
 				_ => bail!("unexpected response to the access request"),
 			}
 		},
-		Response::Error { message } => bail!(
+		Response::Error { message, .. } => bail!(
 			"auth failed: {message}\nif the credential is stale, remove {} (or unset TESTD_TOKEN) and run again",
 			testd_core::config::credential_path(&config.token_profile).display()
 		),
@@ -228,7 +228,14 @@ async fn request(reader: &mut Reader, writer: &mut Writer, req: &Request) -> Res
 			Response::PendingGrant { id, domain } => {
 				eprintln!("[testd] [grant] the host is waiting for approval to grant {domain} (request {id})");
 			},
-			Response::Error { message } => bail!("host error: {message}"),
+			Response::Error { message, disposition } => {
+				let error = anyhow::anyhow!("host error: {message}");
+				return if disposition == Some(ErrorDisposition::Terminal) {
+					Err(anyhow::Error::new(ConnectFailure::rejected(error)))
+				} else {
+					Err(error)
+				};
+			},
 			other => bail!("host returned an unexpected response: {other:?}"),
 		}
 	}
@@ -272,6 +279,8 @@ enum LoopEnd {
 	/// connection was up, for a graceful deregistration, together with the
 	/// names that are still published.
 	Stopped { writer: Option<Writer>, entries: Vec<Entry> },
+	/// The host rejected a registration or authentication without retry.
+	Failed(anyhow::Error),
 	/// An operator stopped this leaf. The grant is still valid, so a later run
 	/// publishes the names again without asking.
 	StoppedByHost,
@@ -305,11 +314,9 @@ async fn maintain_registration(
 				conn
 			},
 			Err(e) => {
-				// Authentication failures include a denied or expired token request.
-				// Retrying would queue another request as soon as the operator answers.
+				// Definitive rejections must not retry or queue another approval request.
 				if e.downcast_ref::<ConnectFailure>().is_some_and(|failure| !failure.retry) {
-					eprintln!("[testd] [error] {e:#}");
-					return LoopEnd::Stopped { writer: None, entries };
+					return LoopEnd::Failed(e);
 				}
 				if !retrying {
 					// `{e:#}` prints the full context chain instead of only the outermost context.
@@ -437,6 +444,7 @@ pub async fn run(entries: &[Entry], command: &[String], force: bool, config: Cli
 				// The operator's action already printed why; the child is ours
 				// to stop, and exiting cleanly matches the operator's intent.
 				Ok(LoopEnd::StoppedByHost | LoopEnd::GrantRevoked | LoopEnd::Revoked) => std::process::exit(0),
+				Ok(LoopEnd::Failed(error)) => return Err(error.context("registration failed")),
 				Ok(LoopEnd::Stopped { writer: None, .. }) => bail!("registration stopped; see the error above"),
 				Ok(LoopEnd::Stopped { writer: Some(_), .. }) => bail!("registration stopped unexpectedly"),
 				Err(e) => bail!("registration task failed: {e}"),
@@ -469,6 +477,7 @@ pub async fn register(entries: &[Entry], force: bool, config: ClientConfig) -> R
 		result = &mut registration => match result {
 			// The operator's action already printed why.
 			Ok(LoopEnd::StoppedByHost | LoopEnd::GrantRevoked | LoopEnd::Revoked) => return Ok(()),
+			Ok(LoopEnd::Failed(error)) => return Err(error.context("registration failed")),
 			Ok(LoopEnd::Stopped { writer: None, .. }) => bail!("registration stopped; see the error above"),
 			Ok(LoopEnd::Stopped { writer: Some(_), .. }) => bail!("registration stopped unexpectedly"),
 			Err(e) => bail!("registration task failed: {e}"),
@@ -509,7 +518,103 @@ impl Entry {
 
 #[cfg(test)]
 mod tests {
-	use super::{format_label, is_published_name};
+	use super::*;
+
+	async fn request_error(response: Option<Response>) -> anyhow::Error {
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let addr = listener.local_addr().unwrap();
+		let server = tokio::spawn(async move {
+			let (stream, _) = listener.accept().await.unwrap();
+			let (reader, mut writer) = stream.into_split();
+			let mut reader = BufReader::new(reader);
+			let _: Request = protocol::recv(&mut reader).await.unwrap().unwrap();
+			if let Some(response) = response {
+				protocol::send(&mut writer, &response).await.unwrap();
+			}
+		});
+		let stream = TcpStream::connect(addr).await.unwrap();
+		let (reader, mut writer) = stream.into_split();
+		let mut reader = BufReader::new(reader);
+		let registration = Request::Register { domain: "app".into(), target: "3000".into(), force: false };
+		let error = tokio::time::timeout(Duration::from_secs(5), request(&mut reader, &mut writer, &registration))
+			.await
+			.expect("host response timed out")
+			.unwrap_err();
+		server.await.unwrap();
+		error
+	}
+
+	#[tokio::test]
+	async fn terminal_host_errors_stop_reconnection() {
+		let error = request_error(Some(Response::terminal_error("already registered"))).await;
+		let failure = error.downcast_ref::<ConnectFailure>().expect("terminal failure");
+		assert!(!failure.is_retryable());
+		assert!(error.to_string().contains("already registered"));
+	}
+
+	#[tokio::test]
+	async fn unclassified_and_transport_errors_keep_the_existing_retry_policy() {
+		for response in [
+			Some(Response::error("legacy host")),
+			Some(Response::Error { message: "temporary".into(), disposition: Some(ErrorDisposition::Retryable) }),
+			Some(Response::Error { message: "unknown".into(), disposition: Some(ErrorDisposition::Unknown) }),
+			None,
+		] {
+			let error = request_error(response).await;
+			assert!(error.downcast_ref::<ConnectFailure>().is_none(), "{error:#}");
+		}
+	}
+
+	#[tokio::test]
+	async fn an_unclassified_registration_error_is_retried() {
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let addr = listener.local_addr().unwrap();
+		let (registered, ready) = tokio::sync::oneshot::channel();
+		let server = tokio::spawn(async move {
+			let mut registered = Some(registered);
+			for attempt in 0..2 {
+				let (stream, _) = listener.accept().await.unwrap();
+				let (reader, mut writer) = stream.into_split();
+				let mut reader = BufReader::new(reader);
+				let _: Auth = protocol::recv(&mut reader).await.unwrap().unwrap();
+				protocol::send(&mut writer, &Response::Ok).await.unwrap();
+				let _: Request = protocol::recv(&mut reader).await.unwrap().unwrap();
+				if attempt == 0 {
+					protocol::send(&mut writer, &Response::error("temporary failure"))
+						.await
+						.unwrap();
+				} else {
+					protocol::send(&mut writer, &Response::Ok).await.unwrap();
+					registered.take().unwrap().send(()).unwrap();
+					let _: Option<Request> = protocol::recv(&mut reader).await.unwrap();
+				}
+			}
+		});
+		let config = ClientConfig {
+			token: "test".into(),
+			token_profile: "test".into(),
+			hosts: vec![addr.to_string()],
+			node_profile: "test".into(),
+		};
+		let stop = Arc::new(Notify::new());
+		let registration =
+			tokio::spawn(maintain_registration(vec![Entry::new("app", "3000")], config, Arc::clone(&stop), false));
+		tokio::time::timeout(Duration::from_secs(8), ready)
+			.await
+			.expect("client did not retry")
+			.unwrap();
+		stop.notify_one();
+		let outcome = tokio::time::timeout(Duration::from_secs(5), registration)
+			.await
+			.expect("client did not stop")
+			.unwrap();
+		assert!(matches!(outcome, LoopEnd::Stopped { writer: Some(_), .. }));
+		drop(outcome);
+		tokio::time::timeout(Duration::from_secs(5), server)
+			.await
+			.expect("server did not stop")
+			.unwrap();
+	}
 
 	#[test]
 	fn labels_name_the_user_and_host() {

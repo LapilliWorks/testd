@@ -4,14 +4,15 @@ use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
-use testd_core::config::{HostConfig, ResolverBackend};
-use testd_core::protocol::{Auth, Request, Response, TokenRequest, recv, send};
+use testd_core::config::{ClientConfig, HostConfig, ResolverBackend};
+use testd_core::protocol::{Auth, ErrorDisposition, Request, Response, TokenRequest, recv, send};
 use testd_daemon::access::{Access, Approved};
 use testd_daemon::engine::{HostEngine, OperatorAction};
 use testd_daemon::resolver::{ResolvedName, Resolver};
@@ -19,10 +20,14 @@ use testd_daemon::resolver::{ResolvedName, Resolver};
 /// Records the last applied registration set so tests can observe eviction.
 struct RecordingResolver {
 	applied: Mutex<Vec<ResolvedName>>,
+	fail_next: AtomicBool,
 }
 
 impl Resolver for RecordingResolver {
 	fn apply(&self, names: &[ResolvedName]) -> io::Result<()> {
+		if self.fail_next.swap(false, Ordering::SeqCst) {
+			return Err(io::Error::other("temporary resolver failure"));
+		}
 		*self.applied.lock().unwrap() = names.to_vec();
 		Ok(())
 	}
@@ -63,7 +68,7 @@ async fn start_with_dashboard(_dashboard_addr: Option<SocketAddr>) -> Harness {
 	let dir = std::env::temp_dir().join(format!("testd-engine-{}-{}", std::process::id(), addr.port()));
 	std::fs::create_dir_all(&dir).unwrap();
 
-	let resolver = Arc::new(RecordingResolver { applied: Mutex::new(Vec::new()) });
+	let resolver = Arc::new(RecordingResolver { applied: Mutex::new(Vec::new()), fail_next: AtomicBool::new(false) });
 	let config = HostConfig {
 		resolver: ResolverBackend::Dns,
 		listen_addr: "127.0.0.1:0".parse().unwrap(),
@@ -155,11 +160,69 @@ async fn duplicate_claim_is_rejected_and_names_the_owner() {
 
 	alice.request(register("app", "3000", false)).await;
 	match bob.request(register("app", "4000", false)).await {
-		Response::Error { message } => {
-			assert!(message.contains("already registered by connection"), "{message}")
+		Response::Error { message, disposition } => {
+			assert!(message.contains("already registered by connection"), "{message}");
+			assert_eq!(disposition, Some(ErrorDisposition::Terminal));
 		},
 		other => panic!("duplicate claim must be rejected, got {other:?}"),
 	}
+}
+
+#[tokio::test]
+async fn invalid_registrations_are_terminal_but_resolver_failures_remain_retryable() {
+	let harness = start().await;
+	let mut client = Client::connect(harness.addr, &harness.token).await;
+	for (domain, target) in [("bad!", "3000"), ("app", "0"), ("testd", "3000")] {
+		let response = client.request(register(domain, target, false)).await;
+		assert!(
+			matches!(response, Response::Error { disposition: Some(ErrorDisposition::Terminal), .. }),
+			"{response:?}"
+		);
+	}
+
+	harness.resolver.fail_next.store(true, Ordering::SeqCst);
+	let response = client.request(register("app", "3000", false)).await;
+	assert!(
+		matches!(response, Response::Error { disposition: None, ref message } if message.contains("temporary resolver failure")),
+		"{response:?}"
+	);
+	assert!(harness.registrations.lock().await.claim("app.test").is_none());
+	assert!(matches!(client.request(register("app", "3000", false)).await, Response::Ok));
+}
+
+#[tokio::test]
+async fn a_duplicate_registration_fails_without_retrying_or_leaking_partial_claims() {
+	let harness = start().await;
+	let mut owner = Client::connect(harness.addr, &harness.token).await;
+	assert!(matches!(owner.request(register("app", "3000", false)).await, Response::Ok));
+
+	let config = ClientConfig {
+		token: harness.token.clone(),
+		token_profile: "test".into(),
+		hosts: vec![harness.addr.to_string()],
+		node_profile: "test".into(),
+	};
+	let entries = [testd_client::Entry::new("other", "3001"), testd_client::Entry::new("app", "4000")];
+	let error =
+		tokio::time::timeout(std::time::Duration::from_secs(2), testd_client::register(&entries, false, config))
+			.await
+			.expect("a duplicate must not keep retrying")
+			.expect_err("the client must report the rejected registration");
+	assert!(format!("{error:#}").contains("already registered"), "{error:#}");
+
+	tokio::time::timeout(std::time::Duration::from_secs(2), async {
+		loop {
+			let claims = harness.registrations.lock().await;
+			if claims.claim("other.test").is_none() {
+				assert_eq!(claims.claim("app.test").unwrap().registration.target, "127.0.0.1:3000");
+				break;
+			}
+			drop(claims);
+			tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("partial claims should leave with the rejected connection");
 }
 
 #[tokio::test]
@@ -206,7 +269,7 @@ async fn non_owner_cannot_deregister() {
 
 	alice.request(register("app", "3000", false)).await;
 	match bob.request(Request::Deregister { domain: "app".into() }).await {
-		Response::Error { message } => assert!(message.contains("owned by"), "{message}"),
+		Response::Error { message, .. } => assert!(message.contains("owned by"), "{message}"),
 		other => panic!("non-owner deregistration must fail, got {other:?}"),
 	}
 }
@@ -284,7 +347,7 @@ async fn a_denied_request_is_told_why() {
 	let (mut waiting, id) = request_access(&harness, "alex@laptop", &["app"]).await;
 	harness.access.deny(&id).unwrap();
 	match recv::<_, Response>(&mut waiting.reader).await.unwrap().unwrap() {
-		Response::Error { message } => assert!(message.contains("denied"), "{message}"),
+		Response::Error { message, .. } => assert!(message.contains("denied"), "{message}"),
 		other => panic!("expected an error, got {other:?}"),
 	}
 	assert!(harness.access.tokens().is_empty());
@@ -498,10 +561,56 @@ async fn a_denied_name_grant_keeps_the_name_out() {
 		.unwrap()
 		.unwrap();
 	match denied {
-		Response::Error { message } => assert!(message.contains("denied"), "{message}"),
+		Response::Error { message, disposition } => {
+			assert!(message.contains("denied"), "{message}");
+			assert_eq!(disposition, Some(ErrorDisposition::Terminal));
+		},
 		other => panic!("expected a denial, got {other:?}"),
 	}
 	assert_eq!(harness.registrations.lock().await.snapshot().len(), 1);
+}
+
+#[tokio::test]
+async fn a_denied_name_grant_stops_the_client_without_repeating_the_request() {
+	let harness = start().await;
+	let (mut waiting, id) = request_access(&harness, "alex@laptop", &["app"]).await;
+	let Approved::Token(issued) = harness.access.approve(&id).unwrap() else { panic!("expected a token") };
+	assert!(matches!(recv::<_, Response>(&mut waiting.reader).await.unwrap(), Some(Response::Token { .. })));
+	drop(waiting);
+
+	let config = ClientConfig {
+		token: issued.token,
+		token_profile: "test".into(),
+		hosts: vec![harness.addr.to_string()],
+		node_profile: "test".into(),
+	};
+	let registration =
+		tokio::spawn(
+			async move { testd_client::register(&[testd_client::Entry::new("api", "4000")], false, config).await },
+		);
+	let id = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+		loop {
+			if let Some(request) = harness
+				.access
+				.pending()
+				.into_iter()
+				.find(|request| request.names == ["api.test"])
+			{
+				break request.id;
+			}
+			tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("client did not request the missing name");
+	harness.access.deny(&id).unwrap();
+	let error = tokio::time::timeout(std::time::Duration::from_secs(2), registration)
+		.await
+		.expect("denied registration kept retrying")
+		.unwrap()
+		.expect_err("denial must reach the client");
+	assert!(format!("{error:#}").contains("denied"), "{error:#}");
+	assert!(harness.access.pending().is_empty());
 }
 
 #[tokio::test]

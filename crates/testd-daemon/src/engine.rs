@@ -563,7 +563,7 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 		Some(request) => {
 			if !auth_msg.token.is_empty() {
 				let message = "present a token or request one, not both".to_owned();
-				reply(&out, Response::Error { message }).await?;
+				reply(&out, Response::error(message)).await?;
 				return Ok(());
 			}
 			match request_access(&shared, request, addr, &mut reader, &out).await? {
@@ -576,7 +576,7 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 		},
 		None => {
 			let Some(credential) = authenticate(&shared, &auth_msg.token, addr) else {
-				reply(&out, Response::Error { message: "Authentication failed".into() }).await?;
+				reply(&out, Response::error("Authentication failed")).await?;
 				eprintln!("[auth]   {} rejected", addr.ip());
 				return Ok(());
 			};
@@ -607,13 +607,13 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 				Request::Register { domain, target, force } => {
 					let domain = validate::normalize_bare_domain(&domain, &shared.tld);
 					if let Err(message) = validate::validate_domain(&domain, &shared.tld) {
-						if reply(&out, Response::Error { message }).await.is_err() {
+						if reply(&out, Response::terminal_error(message)).await.is_err() {
 							break;
 						}
 						continue;
 					}
 					if let Err(message) = validate::validate_target(&target) {
-						if reply(&out, Response::Error { message }).await.is_err() {
+						if reply(&out, Response::terminal_error(message)).await.is_err() {
 							break;
 						}
 						continue;
@@ -625,7 +625,7 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 					let reserved = [format!("testd.{}", shared.tld)];
 					if reserved.iter().any(|name| name == &fqdn) {
 						let message = format!("{fqdn} is a reserved name.");
-						if reply(&out, Response::Error { message }).await.is_err() {
+						if reply(&out, Response::terminal_error(message)).await.is_err() {
 							break;
 						}
 						continue;
@@ -646,7 +646,7 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 							"remote leaves may only target their own address: {target}; \
 							 set [host] allow_remote_targets = true to permit explicit targets"
 						);
-						if reply(&out, Response::Error { message }).await.is_err() {
+						if reply(&out, Response::terminal_error(message)).await.is_err() {
 							break;
 						}
 						continue;
@@ -667,13 +667,13 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 								"{fqdn} is already registered by connection {owner}. Use --force to take it over."
 							);
 							eprintln!("[warn]   {message}");
-							if reply(&out, Response::Error { message }).await.is_err() {
+							if reply(&out, Response::terminal_error(message)).await.is_err() {
 								break;
 							}
 						},
 						Err(RegisterError::Reserved) => {
 							let message = format!("{fqdn} is a reserved name.");
-							if reply(&out, Response::Error { message }).await.is_err() {
+							if reply(&out, Response::terminal_error(message)).await.is_err() {
 								break;
 							}
 						},
@@ -685,7 +685,7 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 								drop(regs);
 								let _ = apply(&shared).await;
 								eprintln!("[error]  {fqdn} apply failed: {e}");
-								if reply(&out, Response::Error { message: format!("{e}") }).await.is_err() {
+								if reply(&out, Response::error(format!("{e}"))).await.is_err() {
 									break;
 								}
 							} else {
@@ -703,7 +703,7 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 				Request::Deregister { domain } => {
 					let domain = validate::normalize_bare_domain(&domain, &shared.tld);
 					if let Err(message) = validate::validate_domain(&domain, &shared.tld) {
-						if reply(&out, Response::Error { message }).await.is_err() {
+						if reply(&out, Response::error(message)).await.is_err() {
 							break;
 						}
 						continue;
@@ -735,7 +735,7 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 						Err(DeregisterError::NotOwner { owner }) => format!("{fqdn} is owned by connection {owner}."),
 					};
 
-					if reply(&out, Response::Error { message: error }).await.is_err() {
+					if reply(&out, Response::error(error)).await.is_err() {
 						break;
 					}
 				},
@@ -891,7 +891,7 @@ where
 	let (id, mut decision) = match shared.access.request(&request.label, &addr.to_string(), names) {
 		Ok(waiting) => waiting,
 		Err(message) => {
-			reply(out, Response::Error { message }).await?;
+			reply(out, Response::error(message)).await?;
 			return Ok(None);
 		},
 	};
@@ -918,24 +918,24 @@ where
 		},
 		Waited::Decided(Some(Decision::ApproveName)) => {
 			let message = "the operator approved a name grant, not a token".to_owned();
-			reply(out, Response::Error { message }).await?;
+			reply(out, Response::error(message)).await?;
 			Ok(None)
 		},
 		Waited::Decided(Some(Decision::Deny)) => {
 			let message = "the operator denied this access request".to_owned();
-			reply(out, Response::Error { message }).await?;
+			reply(out, Response::error(message)).await?;
 			eprintln!("[auth]   {} denied ({id})", addr.ip());
 			Ok(None)
 		},
 		Waited::Decided(None) => {
 			let message = "the access request is no longer pending".to_owned();
-			let _ = reply(out, Response::Error { message }).await;
+			let _ = reply(out, Response::error(message)).await;
 			Ok(None)
 		},
 		Waited::Closed => Ok(None),
 		Waited::Expired => {
 			let message = "the access request expired without approval".to_owned();
-			let _ = reply(out, Response::Error { message }).await;
+			let _ = reply(out, Response::error(message)).await;
 			eprintln!("[auth]   {} request expired ({id})", addr.ip());
 			Ok(None)
 		},
@@ -956,7 +956,7 @@ async fn request_name_grant<R: AsyncBufRead + Unpin>(
 	let (id, mut decision) = match shared.access.request_name(grant, fqdn, &addr.to_string()) {
 		Ok(waiting) => waiting,
 		Err(message) => {
-			reply(out, Response::Error { message }).await?;
+			reply(out, Response::error(message)).await?;
 			return Ok(false);
 		},
 	};
@@ -979,18 +979,18 @@ async fn request_name_grant<R: AsyncBufRead + Unpin>(
 		},
 		Some(Decision::Deny) => {
 			let message = "the operator denied the grant for this name".to_owned();
-			reply(out, Response::Error { message }).await?;
+			reply(out, Response::terminal_error(message)).await?;
 			eprintln!("[auth]   {} denied {fqdn} ({id})", addr.ip());
 			Ok(false)
 		},
 		Some(Decision::Approve(_)) => {
 			let message = "the operator approved a token, not a name grant".to_owned();
-			reply(out, Response::Error { message }).await?;
+			reply(out, Response::error(message)).await?;
 			Ok(false)
 		},
 		None => {
 			let message = "the grant request expired without approval".to_owned();
-			reply(out, Response::Error { message }).await?;
+			reply(out, Response::error(message)).await?;
 			eprintln!("[auth]   {} grant request for {fqdn} expired ({id})", addr.ip());
 			Ok(false)
 		},

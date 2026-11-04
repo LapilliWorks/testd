@@ -57,6 +57,17 @@ pub enum Request {
 	Deregister { domain: String },
 }
 
+/// How the host wants a client to handle an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorDisposition {
+	Terminal,
+	Retryable,
+	/// An unrecognized disposition must not prevent older clients from reading the error.
+	#[serde(other)]
+	Unknown,
+}
+
 /// Response sent from the host daemon back to the client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -98,7 +109,22 @@ pub enum Response {
 	GrantRevoked,
 	Error {
 		message: String,
+		/// Absent from older hosts; clients retain their prior retry behavior.
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		disposition: Option<ErrorDisposition>,
 	},
+}
+
+impl Response {
+	/// An unclassified error, compatible with hosts that predate dispositions.
+	pub fn error(message: impl Into<String>) -> Self {
+		Self::Error { message: message.into(), disposition: None }
+	}
+
+	/// An error that requires an operator or client change before retrying.
+	pub fn terminal_error(message: impl Into<String>) -> Self {
+		Self::Error { message: message.into(), disposition: Some(ErrorDisposition::Terminal) }
+	}
 }
 
 // -- NDJSON framing --
@@ -160,6 +186,29 @@ pub async fn recv<R: AsyncBufRead + Unpin, T: DeserializeOwned>(reader: &mut R) 
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn error_dispositions_remain_compatible_with_older_and_newer_peers() {
+		#[derive(Deserialize)]
+		#[serde(tag = "type")]
+		enum LegacyResponse {
+			Error { message: String },
+		}
+
+		let encoded = serde_json::to_string(&Response::terminal_error("already registered")).unwrap();
+		let LegacyResponse::Error { message } = serde_json::from_str(&encoded).unwrap();
+		assert_eq!(message, "already registered");
+
+		let legacy = r#"{"type":"Error","message":"old host"}"#;
+		assert!(matches!(serde_json::from_str::<Response>(legacy).unwrap(), Response::Error { disposition: None, .. }));
+		assert_eq!(serde_json::to_string(&Response::error("old host")).unwrap(), legacy);
+
+		let future = r#"{"type":"Error","message":"new host","disposition":"future"}"#;
+		assert!(matches!(
+			serde_json::from_str::<Response>(future).unwrap(),
+			Response::Error { disposition: Some(ErrorDisposition::Unknown), .. }
+		));
+	}
 
 	#[tokio::test]
 	async fn frames_are_bounded_and_newline_terminated() {
