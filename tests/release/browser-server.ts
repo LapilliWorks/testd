@@ -75,7 +75,7 @@ async function saveReport(request: Request): Promise<Response> {
 	return Response.json({ saved: path });
 }
 
-Bun.serve({
+const server = Bun.serve({
 	hostname: '127.0.0.1',
 	port,
 	maxRequestBodySize: 128 * 1024 * 1024,
@@ -109,4 +109,5 @@ Bun.serve({
 		message(socket, message) { socket.send(message); },
 	},
 });
+if (port === 0) await Bun.write(join(reportDirectory, 'listener-port'), String(server.port));
 console.log(`Browser fixture: ${appOrigin}/ (keep the terminal open)`);
