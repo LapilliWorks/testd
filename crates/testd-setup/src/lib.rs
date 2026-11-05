@@ -211,22 +211,6 @@ fn resolved_global_values(files: &[String]) -> (Option<String>, Option<String>) 
 	(joined(dns), joined(domains))
 }
 
-/// resolved.conf plus its drop-ins, except testd's own file.
-#[cfg(target_os = "linux")]
-fn resolved_conf_files() -> Vec<std::path::PathBuf> {
-	let mut files = vec![std::path::PathBuf::from("/etc/systemd/resolved.conf")];
-	let Ok(entries) = std::fs::read_dir(RESOLVED_DROPIN_DIR) else { return files };
-	let mut dropins: Vec<std::path::PathBuf> = entries
-		.flatten()
-		.map(|entry| entry.path())
-		.filter(|path| path.extension().is_some_and(|extension| extension == "conf"))
-		.filter(|path| path != Path::new(RESOLVED_DROPIN))
-		.collect();
-	dropins.sort();
-	files.extend(dropins);
-	files
-}
-
 #[cfg(target_os = "linux")]
 fn resolved_active() -> bool {
 	silent_command("systemctl")
@@ -235,21 +219,35 @@ fn resolved_active() -> bool {
 		.is_ok_and(|status| status.success())
 }
 
-/// Refuse before elevating when the route cannot take effect, or when writing it
-/// would replace global resolver settings that testd cannot merge with.
 #[cfg(target_os = "linux")]
-fn linux_resolver_preflight() -> io::Result<()> {
-	if !resolved_active() {
+#[derive(Debug, PartialEq, Eq)]
+enum LinuxResolverPreflight {
+	Compatible,
+	Ready,
+}
+
+#[cfg(target_os = "linux")]
+fn assess_linux_resolver(
+	tld: &str,
+	addr: SocketAddr,
+	dns_output: &str,
+	domain_output: &str,
+	configuration: &str,
+) -> io::Result<LinuxResolverPreflight> {
+	let state = global_resolver_state(dns_output, domain_output)?;
+	if state.is_compatible(tld, addr) {
+		return Ok(LinuxResolverPreflight::Compatible);
+	}
+	if !state.dns.is_empty() || !state.domains.is_empty() {
 		return Err(io::Error::new(
-			io::ErrorKind::Unsupported,
-			"systemd-resolved is not active; run `systemctl enable --now systemd-resolved` first",
+			io::ErrorKind::AlreadyExists,
+			format!(
+				"systemd-resolved has global DNS {:?} and domains {:?}; testd will not change them",
+				state.dns, state.domains
+			),
 		));
 	}
-	let files: Vec<String> = resolved_conf_files()
-		.iter()
-		.filter_map(|path| std::fs::read_to_string(path).ok())
-		.collect();
-	let (dns, domains) = resolved_global_values(&files);
+	let (dns, domains) = resolved_global_values(&[configuration.to_owned()]);
 	let existing: Vec<String> = [("DNS", dns), ("Domains", domains)]
 		.into_iter()
 		.filter_map(|(key, value)| value.map(|value| format!("{key}={value}")))
@@ -257,14 +255,28 @@ fn linux_resolver_preflight() -> io::Result<()> {
 	if !existing.is_empty() {
 		return Err(io::Error::new(
 			io::ErrorKind::AlreadyExists,
-			format!(
-				"systemd-resolved already has global {} configured, which the testd drop-in would replace; \
-				remove it from /etc/systemd/resolved.conf or its drop-ins, or use `resolver = \"hosts\"`",
-				existing.join(" ")
-			),
+			format!("systemd-resolved configuration contains global {}; testd will not change it", existing.join(" ")),
 		));
 	}
-	Ok(())
+	Ok(LinuxResolverPreflight::Ready)
+}
+
+/// Inspect the live global scope and systemd's merged configuration before
+/// authorizing a route that would share or replace global DNS settings.
+#[cfg(target_os = "linux")]
+fn linux_resolver_preflight(tld: &str, addr: SocketAddr) -> io::Result<LinuxResolverPreflight> {
+	if !resolved_active() {
+		return Err(io::Error::new(
+			io::ErrorKind::Unsupported,
+			"systemd-resolved is not active; run `systemctl enable --now systemd-resolved` first",
+		));
+	}
+	let (dns, domains) = linux_resolver_outputs()?;
+	if global_resolver_state(&dns, &domains)?.is_compatible(tld, addr) {
+		return Ok(LinuxResolverPreflight::Compatible);
+	}
+	let configuration = systemd_probe("systemd-analyze", &["cat-config", "systemd/resolved.conf"])?;
+	assess_linux_resolver(tld, addr, &dns, &domains, &configuration)
 }
 
 #[cfg(target_os = "windows")]
@@ -343,8 +355,10 @@ pub fn setup_os_resolver(tld: &str, addr: SocketAddr) -> io::Result<()> {
 
 	#[cfg(target_os = "linux")]
 	{
-		linux_resolver_preflight()?;
-		setup_sudo_unix(tld, addr)
+		match linux_resolver_preflight(tld, addr)? {
+			LinuxResolverPreflight::Compatible => Ok(()),
+			LinuxResolverPreflight::Ready => setup_sudo_unix(tld, addr),
+		}
 	}
 
 	#[cfg(target_os = "windows")]
@@ -403,7 +417,9 @@ fn setup_gui_macos(tld: &str, addr: SocketAddr) -> io::Result<()> {
 /// Linux: use `pkexec` (polkit) for a native auth dialog.
 #[cfg(target_os = "linux")]
 fn setup_gui_linux(tld: &str, addr: SocketAddr) -> io::Result<()> {
-	linux_resolver_preflight()?;
+	if linux_resolver_preflight(tld, addr)? == LinuxResolverPreflight::Compatible {
+		return Ok(());
+	}
 	let script = resolver_commands(tld, addr).join(" && ");
 
 	let status = silent_command("pkexec").args(["sh", "-c", &script]).status()?;
@@ -801,6 +817,32 @@ mod tests {
 		assert!(ipv6_state.is_compatible("test", ipv6));
 		assert_eq!(dns_server_value(ipv6), "[::1]:7753");
 		assert!(global_resolver_state("Link 2 (eth0): 1.1.1.1\n", domains).is_err());
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn linux_resolver_preflight_refuses_existing_or_pending_global_settings() {
+		let addr: SocketAddr = "127.0.0.1:7753".parse().unwrap();
+		let empty = "Global:";
+		assert_eq!(
+			assess_linux_resolver("test", addr, empty, empty, "# no global settings\n").unwrap(),
+			LinuxResolverPreflight::Ready
+		);
+		assert_eq!(
+			assess_linux_resolver("test", addr, "Global: 127.0.0.1:7753", "Global: ~test", "DNS=1.1.1.1").unwrap(),
+			LinuxResolverPreflight::Compatible
+		);
+		for (dns, domains, config) in [
+			("Global: 1.1.1.1", empty, ""),
+			(empty, "Global: ~corp", ""),
+			(empty, empty, "# /usr/lib/systemd/resolved.conf.d/40-vendor.conf\n[Resolve]\nDNS=9.9.9.9\n"),
+			(empty, empty, "# /run/systemd/resolved.conf.d/70-corp.conf\n[Resolve]\nDomains=~corp\n"),
+		] {
+			let error = assess_linux_resolver("test", addr, dns, domains, config).unwrap_err();
+			assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+		}
+		let reset = "[Resolve]\nDNS=1.1.1.1\nDomains=~corp\n[Resolve]\nDNS=\nDomains=\n";
+		assert_eq!(assess_linux_resolver("test", addr, empty, empty, reset).unwrap(), LinuxResolverPreflight::Ready);
 	}
 
 	#[cfg(target_os = "linux")]
