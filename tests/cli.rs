@@ -5,8 +5,9 @@ use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
-fn testd(home: &Path, args: &[&str]) -> Output {
-	Command::new(env!("CARGO_BIN_EXE_testd"))
+fn testd_command(home: &Path, args: &[&str]) -> Command {
+	let mut command = Command::new(env!("CARGO_BIN_EXE_testd"));
+	command
 		.args(args)
 		.env("HOME", home)
 		.env("APPDATA", home.join("AppData/Roaming"))
@@ -20,9 +21,12 @@ fn testd(home: &Path, args: &[&str]) -> Output {
 		.env_remove("TESTD_YES")
 		.env_remove("TESTD_TOKEN")
 		.env_remove("TESTD_TOKEN_PROFILE")
-		.env_remove("TESTD_PROFILE")
-		.output()
-		.expect("run testd")
+		.env_remove("TESTD_PROFILE");
+	command
+}
+
+fn testd(home: &Path, args: &[&str]) -> Output {
+	testd_command(home, args).output().expect("run testd")
 }
 
 fn init(home: &Path) -> Output {
@@ -137,6 +141,34 @@ fn init_reports_an_already_configured_resolver() {
 	let stderr = String::from_utf8_lossy(&out.stderr);
 	assert!(stderr.contains("already configured"), "{stderr}");
 	assert!(!stderr.contains("deferred"), "{stderr}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn uninstall_does_not_revert_unowned_loopback_resolver_settings() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let home = TempDir::new().unwrap();
+	let bin = home.path().join("bin");
+	std::fs::create_dir(&bin).unwrap();
+	let sudo = bin.join("sudo");
+	std::fs::write(&sudo, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TESTD_SUDO_LOG\"\nexit 0\n").unwrap();
+	std::fs::set_permissions(&sudo, std::fs::Permissions::from_mode(0o700)).unwrap();
+	let log = home.path().join("sudo.log");
+	let path = std::env::join_paths(
+		std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())),
+	)
+	.unwrap();
+
+	let out = testd_command(home.path(), &["uninstall", "--keep-certificate"])
+		.env("PATH", path)
+		.env("TESTD_SUDO_LOG", &log)
+		.output()
+		.unwrap();
+	assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+	let calls = std::fs::read_to_string(log).unwrap();
+	assert!(calls.contains("systemctl reload systemd-resolved"), "resolver teardown ran: {calls}");
+	assert!(!calls.contains("resolvectl revert lo"), "unowned link settings must remain: {calls}");
 }
 
 #[test]

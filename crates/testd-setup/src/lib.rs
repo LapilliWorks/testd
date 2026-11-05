@@ -489,12 +489,6 @@ fn teardown_linux(_tld: &str) -> io::Result<()> {
 	if !status.success() {
 		return Err(io::Error::new(io::ErrorKind::PermissionDenied, "removing the resolver drop-in failed"));
 	}
-	// Configurations written by older versions live on the link, not in a drop-in.
-	if let Ok(status) = silent_command("sudo").args(["resolvectl", "revert", "lo"]).status()
-		&& !status.success()
-	{
-		eprintln!("[warn]   could not revert the legacy resolvectl lo configuration");
-	}
 	Ok(())
 }
 
