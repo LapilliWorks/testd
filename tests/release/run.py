@@ -272,6 +272,39 @@ class Run:
 				self.record(name, status, f'exit {process.returncode}; {log}')
 
 
+def automated(run):
+	for tool in ('cargo', 'rustup', 'cargo-nextest', 'bun'):
+		require(tool)
+	print('The default Rust suite skips ignored contracts; run the contracts suite for the release gate.', flush=True)
+	run.command('format', ['cargo', '+stable', 'fmt', '--all', '--', '--check'], 300)
+	run.command('clippy', ['cargo', '+stable', 'clippy', '--workspace', '--all-targets', '--exclude',
+		'testd-gui', '--locked', '--', '-D', 'warnings'], 1200)
+	run.command('rust-tests', ['cargo', '+1.89.0', 'nextest', 'run', '--workspace', '--exclude',
+		'testd-gui', '--locked'], 1200)
+	run.command('release-script-tests', [sys.executable, '-m', 'unittest', 'discover',
+		'-s', 'tests/release', '-p', 'test_*.py'], 300)
+	fixture = ROOT / 'tests/release/browser.test.ts'
+	run.command('browser-fixture-tests', ['bun', 'test', str(fixture)], 300)
+	if run.args.gui:
+		run.command('msrv-tray', ['cargo', '+1.90.0', 'check', '-p', 'testd-gui', '--locked'], 1200)
+		run.command('gui-workspace-tests', ['cargo', '+stable', 'nextest', 'run', '--workspace', '--locked'], 1200)
+
+
+def contracts(run):
+	for tool in ('cargo', 'rustup', 'cargo-nextest'):
+		require(tool)
+	if run.args.gui:
+		raise RuntimeError('the Rust 1.89 contract gate excludes the GUI; run the GUI checks separately')
+	run.command('release-contracts', ['cargo', '+1.89.0', 'nextest', 'run', '--workspace', '--exclude',
+		'testd-gui', '--locked', '--run-ignored', 'all', '--no-fail-fast'], 1200)
+
+
+def audit(run):
+	for tool in ('cargo', 'rustup', 'cargo-deny'):
+		require(tool)
+	run.command('workspace-dependencies', ['cargo', '+stable', 'deny', '--workspace', '--locked', 'check'], 1200)
+
+
 def core(run):
 	require('cargo')
 	run.command('format', ['cargo', 'fmt', '--check'])
@@ -924,7 +957,7 @@ def interrupt(signum, frame):
 	raise KeyboardInterrupt(f'signal {signum}')
 
 
-def main():
+def main(argv=None):
 	if sys.version_info < (3, 12):
 		raise SystemExit('Please install Python 3.12 or newer for release validation')
 	# Start from UTF-8 so argparse and non-Windows captures never use the locale
@@ -934,12 +967,13 @@ def main():
 		if hasattr(stream, 'reconfigure'):
 			stream.reconfigure(encoding=ENCODING)
 	parser = argparse.ArgumentParser(description=__doc__)
-	parser.add_argument('suite', nargs='?', choices=['core', 'host', 'artifacts', 'browser', 'desktop', 'service'])
+	parser.add_argument('suite', nargs='?', choices=['automated', 'contracts', 'audit', 'core', 'host',
+		'artifacts', 'browser', 'desktop', 'service'])
 	parser.add_argument('--report', type=pathlib.Path, help='new persisted report directory')
 	parser.add_argument('--restore-report', type=pathlib.Path,
 		help='restore the system integration recorded in an existing report directory, then exit')
 	parser.add_argument('--bin', type=pathlib.Path, help='candidate CLI; otherwise build from source')
-	parser.add_argument('--gui', action='store_true', help='include Tauri in core checks')
+	parser.add_argument('--gui', action='store_true', help='include Tauri in automated or core checks')
 	parser.add_argument('--strict', action='store_true', help='fail rather than skip missing dependency/MSRV tools')
 	parser.add_argument('--system', action='store_true',
 		help='test resolver/trust changes; integration is snapshotted and restored')
@@ -952,7 +986,7 @@ def main():
 	parser.add_argument('--port', type=int, default=19080)
 	parser.add_argument('--edge-port', type=int, default=443)
 	parser.add_argument('--intake-port', type=int, default=7737)
-	args = parser.parse_args()
+	args = parser.parse_args(argv)
 	match_redirected_encoding()
 	if args.restore_report:
 		return restore_report(args.restore_report)

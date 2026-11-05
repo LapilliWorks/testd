@@ -248,6 +248,46 @@ class ArtifactInstallFixture:
 		self.records.append((name, status, detail))
 
 
+class PlatformSequenceTests(unittest.TestCase):
+	def test_automated_sequence_runs_the_documented_non_gui_checks(self):
+		run = Mock(args=SimpleNamespace(gui=False))
+		with patch.object(runner, 'require') as required:
+			runner.automated(run)
+		self.assertEqual([call.args[0] for call in required.call_args_list], ['cargo', 'rustup', 'cargo-nextest', 'bun'])
+		commands = {call.args[0]: call.args[1] for call in run.command.call_args_list}
+		self.assertEqual(commands['format'], ['cargo', '+stable', 'fmt', '--all', '--', '--check'])
+		self.assertEqual(commands['clippy'], ['cargo', '+stable', 'clippy', '--workspace', '--all-targets',
+			'--exclude', 'testd-gui', '--locked', '--', '-D', 'warnings'])
+		self.assertEqual(commands['rust-tests'], ['cargo', '+1.89.0', 'nextest', 'run', '--workspace',
+			'--exclude', 'testd-gui', '--locked'])
+		self.assertEqual(commands['release-script-tests'], [sys.executable, '-m', 'unittest', 'discover',
+			'-s', 'tests/release', '-p', 'test_*.py'])
+		self.assertEqual(commands['browser-fixture-tests'], ['bun', 'test', str(ROOT / 'tests/release/browser.test.ts')])
+
+	def test_gui_sequence_adds_the_tray_msrv_and_full_workspace_tests(self):
+		run = Mock(args=SimpleNamespace(gui=True))
+		with patch.object(runner, 'require'):
+			runner.automated(run)
+		commands = {call.args[0]: call.args[1] for call in run.command.call_args_list}
+		self.assertEqual(commands['msrv-tray'], ['cargo', '+1.90.0', 'check', '-p', 'testd-gui', '--locked'])
+		self.assertEqual(commands['gui-workspace-tests'], ['cargo', '+stable', 'nextest', 'run', '--workspace', '--locked'])
+
+	def test_contract_sequence_includes_ignored_cases_without_fail_fast(self):
+		run = Mock(args=SimpleNamespace(gui=False))
+		with patch.object(runner, 'require'):
+			runner.contracts(run)
+		command = run.command.call_args.args[1]
+		self.assertEqual(command, ['cargo', '+1.89.0', 'nextest', 'run', '--workspace', '--exclude',
+			'testd-gui', '--locked', '--run-ignored', 'all', '--no-fail-fast'])
+
+	def test_dependency_audit_covers_the_whole_workspace(self):
+		run = Mock(args=SimpleNamespace(gui=False))
+		with patch.object(runner, 'require') as required:
+			runner.audit(run)
+		self.assertEqual([call.args[0] for call in required.call_args_list], ['cargo', 'rustup', 'cargo-deny'])
+		self.assertEqual(run.command.call_args.args[1], ['cargo', '+stable', 'deny', '--workspace', '--locked', 'check'])
+
+
 class ArtifactInstallTests(unittest.TestCase):
 	def test_upgrade_and_rollback_preserve_state_with_backups(self):
 		with tempfile.TemporaryDirectory() as directory:
