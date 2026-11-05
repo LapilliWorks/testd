@@ -684,6 +684,38 @@ def watch_restart_requests(run, host, stop, errors):
 		raise
 
 
+BROWSER_CHECKS = frozenset({
+	'HTTPS and secure context',
+	'WebSocket, including 60 seconds idle',
+	'Streaming SSE and 100 MiB upload',
+	'Cookie scope across app and api',
+})
+
+
+def browser_report_error(result, commit, edge_port):
+	if not isinstance(result, dict) or result.get('manualConfirmed') is not True:
+		return 'manual browser observations are incomplete'
+	for field in ('browser', 'notes'):
+		if not isinstance(result.get(field), str) or not result[field].strip():
+			return f'missing browser evidence: {field}'
+	fingerprint = result.get('fingerprint')
+	if not isinstance(fingerprint, str) or not re.fullmatch(r'[0-9a-f]{64}', fingerprint.lower()):
+		return 'missing or invalid leaf fingerprint'
+	origin = 'https://app.releasecheck.test' + (f':{edge_port}' if edge_port != 443 else '')
+	if result.get('commit') != commit or result.get('origin') != origin:
+		return 'browser report does not match the candidate commit and origin'
+	checks = result.get('checks')
+	if not isinstance(checks, list) or len(checks) != len(BROWSER_CHECKS):
+		return 'browser report is missing checks'
+	if any(not isinstance(check, dict) or not isinstance(check.get('name'), str) for check in checks):
+		return 'browser report has malformed checks'
+	if {check['name'] for check in checks} != BROWSER_CHECKS:
+		return 'browser report has duplicate, missing, or unknown checks'
+	if any(check.get('status') != 'pass' for check in checks):
+		return 'a browser check did not pass'
+	return None
+
+
 def browser(run):
 	require('bun')
 	check_ports([run.args.port, run.args.port + 1])
@@ -725,9 +757,9 @@ def browser(run):
 		run.record('browser-results', 'skip', 'no browser report was saved')
 	for report in reports:
 		result = json.loads(report.read_text(encoding=ENCODING))
-		has_passed = result.get('manualConfirmed') and all(item['status'] == 'pass' for item in result['checks'])
-		status = 'pass' if has_passed else 'fail'
-		run.record('browser-results', status, str(report))
+		error = browser_report_error(result, run.metadata['commit'], run.args.edge_port)
+		status = 'fail' if error else 'pass'
+		run.record('browser-results', status, f'{report}; {error}' if error else str(report))
 
 
 def desktop_config_dir():

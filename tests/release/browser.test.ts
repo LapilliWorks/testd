@@ -105,17 +105,27 @@ test('sets project cookies and permits only the harness origin to read them', as
 	expect(foreign.headers.get('access-control-allow-origin')).toBeNull();
 });
 
-test('refuses cross-site reports and saves complete operator results', async () => {
+test('refuses cross-site reports and retains passing and failing operator evidence', async () => {
 	const forbidden = await fetch(`${origin}/report`, { method: 'POST', body: '{}' });
 	expect(forbidden.status).toBe(403);
-	const result = { manualConfirmed: true, checks: Array.from({ length: 4 }, (_, index) =>
-		({ name: `check${index}`, status: 'pass' })) };
-	const response = await fetch(`${origin}/report`, { method: 'POST',
-		headers: { Origin: appOrigin, 'X-Testd-Browser-Report': '1' }, body: JSON.stringify(result) });
+	const page = await (await fetch(`${origin}/`)).text();
+	const names = Array.from(page.matchAll(/await check\('([^']+)'/g), match => match[1]);
+	expect(names).toHaveLength(4);
+	const result = { browser: 'fixture browser', notes: 'fixture OS', fingerprint: 'a'.repeat(64),
+		manualConfirmed: true, checks: names.map(name => ({ name, status: 'pass' })) };
+	const headers = { Origin: appOrigin, 'X-Testd-Browser-Report': '1' };
+	const response = await fetch(`${origin}/report`, { method: 'POST', headers, body: JSON.stringify(result) });
 	expect(response.ok).toBe(true);
+	const failed = { ...result, manualConfirmed: false, fingerprint: '',
+		checks: result.checks.map(check => ({ ...check, status: 'fail' })) };
+	expect((await fetch(`${origin}/report`, { method: 'POST', headers, body: JSON.stringify(failed) })).ok).toBe(true);
+	const incomplete = { ...result, checks: result.checks.slice(0, 3) };
+	expect((await fetch(`${origin}/report`, { method: 'POST', headers, body: JSON.stringify(incomplete) })).status).toBe(400);
 	const files = (await readdir(directory)).filter(file => file.startsWith('browser-'));
-	expect(files).toHaveLength(1);
-	expect((await Bun.file(join(directory, files[0])).json()).commit).toBe('fixture-commit');
+	expect(files).toHaveLength(2);
+	const reports = await Promise.all(files.map(file => Bun.file(join(directory, file)).json()));
+	expect(reports.every(report => report.commit === 'fixture-commit' && report.origin === appOrigin)).toBe(true);
+	expect(reports.some(report => report.manualConfirmed === false)).toBe(true);
 });
 
 test('records restart requests and reports their result', async () => {

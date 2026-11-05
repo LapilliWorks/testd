@@ -847,6 +847,57 @@ class BrowserTests(unittest.TestCase):
 			wait.assert_called_once_with(7737, 'process', 'output')
 			command.assert_called_once()
 
+	def test_expected_browser_checks_match_the_page(self):
+		page = (ROOT / 'tests/release/browser.html').read_text(encoding='utf-8')
+		names = re.findall(r"await check\('([^']+)'", page)
+		self.assertEqual(len(names), len(runner.BROWSER_CHECKS))
+		self.assertEqual(set(names), runner.BROWSER_CHECKS)
+
+	def test_browser_report_requires_all_evidence_and_expected_checks(self):
+		valid = {'browser': 'fixture browser', 'notes': 'fixture OS', 'fingerprint': 'a' * 64,
+			'manualConfirmed': True, 'commit': 'fixture-commit', 'origin': 'https://app.releasecheck.test',
+			'checks': [{'name': name, 'status': 'pass'} for name in sorted(runner.BROWSER_CHECKS)]}
+		self.assertIsNone(runner.browser_report_error(valid, 'fixture-commit', 443))
+		for change in ('manual', 'browser', 'notes', 'fingerprint', 'commit', 'origin', 'missing', 'duplicate',
+			'unknown', 'malformed', 'failed'):
+			with self.subTest(change=change):
+				result = json.loads(json.dumps(valid))
+				if change == 'manual': result['manualConfirmed'] = 'true'
+				if change == 'browser': result['browser'] = ''
+				if change == 'notes': result['notes'] = '  '
+				if change == 'fingerprint': result['fingerprint'] = 'bad'
+				if change == 'commit': result['commit'] = 'different'
+				if change == 'origin': result['origin'] = 'https://different.example'
+				if change == 'missing': result['checks'].pop()
+				if change == 'duplicate': result['checks'][0] = result['checks'][1]
+				if change == 'unknown': result['checks'][0]['name'] = 'not a browser check'
+				if change == 'malformed': result['checks'][0] = None
+				if change == 'failed': result['checks'][0]['status'] = 'fail'
+				self.assertIsNotNone(runner.browser_report_error(result, 'fixture-commit', 443))
+		valid['origin'] = 'https://app.releasecheck.test:8443'
+		self.assertIsNone(runner.browser_report_error(valid, 'fixture-commit', 8443))
+		self.assertIsNotNone(runner.browser_report_error(None, 'fixture-commit', 443))
+
+	def test_duplicate_browser_checks_cannot_pass_the_release_report(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			result = {'browser': 'fixture browser', 'notes': 'fixture OS', 'fingerprint': 'a' * 64,
+				'manualConfirmed': True, 'commit': run.metadata['commit'], 'origin': 'https://app.releasecheck.test',
+				'checks': [{'name': 'HTTPS and secure context', 'status': 'pass'} for _ in range(4)]}
+
+			def write_report(*args, **kwargs):
+				(run.output / 'browser-duplicate.json').write_text(json.dumps(result), encoding='utf-8')
+				return ''
+
+			with patch.object(runner, 'require'), patch.object(runner, 'check_ports'), \
+				patch.object(runner, 'local_host_status', return_value={'tld': 'test'}), \
+				patch.object(runner, 'binary', return_value=pathlib.Path('/bin/true')), \
+				patch.object(runner, 'require_host_resolution'), patch.object(run, 'command', side_effect=write_report), \
+				redirect_stdout(io.StringIO()):
+				runner.browser(run)
+			self.assertEqual(run.results[-1]['name'], 'browser-results')
+			self.assertEqual(run.results[-1]['status'], 'fail')
+
 	def test_a_managed_host_can_be_restarted(self):
 		with tempfile.TemporaryDirectory() as directory:
 			run = self.create_run(directory)
