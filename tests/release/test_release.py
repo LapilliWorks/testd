@@ -1,6 +1,7 @@
 import contextlib
 import importlib.util
 import hashlib
+import http.client
 import io
 import locale
 import os
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import tarfile
 import threading
+import time
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import Mock, patch
 import json
@@ -959,6 +961,48 @@ class BrowserTests(unittest.TestCase):
 		valid['origin'] = 'https://app.releasecheck.test:8443'
 		self.assertIsNone(runner.browser_report_error(valid, 'fixture-commit', 8443))
 		self.assertIsNotNone(runner.browser_report_error(None, 'fixture-commit', 443))
+
+	@unittest.skipUnless(shutil.which('bun'), 'Bun is not installed')
+	def test_fixture_reports_match_the_release_runner_contract(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = pathlib.Path(directory)
+			(root / 'report.json').write_text(json.dumps({'commit': 'fixture-commit'}), encoding='utf-8')
+			env = {**os.environ, 'TESTD_BROWSER_REPORT': directory, 'TESTD_BROWSER_PORT': '0',
+				'TESTD_BROWSER_TLD': 'test', 'TESTD_BROWSER_EDGE_PORT': '8443'}
+			process = subprocess.Popen(['bun', 'tests/release/browser-server.ts'], cwd=ROOT, env=env,
+				stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+			try:
+				port_file = root / 'listener-port'
+				deadline = time.monotonic() + 5
+				port = None
+				while time.monotonic() < deadline and process.poll() is None:
+					if port_file.exists():
+						value = port_file.read_text().strip()
+						if value.isdecimal() and 0 < int(value) <= 65535:
+							port = int(value)
+							break
+					time.sleep(0.02)
+				self.assertIsNotNone(port, 'browser fixture did not report its port')
+				connection = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+				result = {'browser': 'fixture browser', 'notes': 'fixture OS', 'fingerprint': 'a' * 64,
+					'manualConfirmed': True,
+					'checks': [{'name': name, 'status': 'pass'} for name in sorted(runner.BROWSER_CHECKS)]}
+				connection.request('POST', '/report', json.dumps(result),
+					{'Origin': 'https://app.releasecheck.test:8443', 'X-Testd-Browser-Report': '1'})
+				response = connection.getresponse()
+				self.assertEqual(response.status, 200)
+				saved = pathlib.Path(json.loads(response.read())['saved'])
+				connection.close()
+				report = json.loads(saved.read_text(encoding='utf-8'))
+				self.assertIsNone(runner.browser_report_error(report, 'fixture-commit', 8443))
+			finally:
+				if process.poll() is None:
+					process.terminate()
+				try:
+					process.communicate(timeout=5)
+				except subprocess.TimeoutExpired:
+					process.kill()
+					process.communicate(timeout=5)
 
 	def test_duplicate_browser_checks_cannot_pass_the_release_report(self):
 		with tempfile.TemporaryDirectory() as directory:
