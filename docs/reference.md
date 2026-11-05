@@ -183,7 +183,7 @@ testd uninstall [--purge] [--keep-resolver] [--keep-certificate]
 | `--keep-resolver` | Leave the OS resolver route in place |
 | `--keep-certificate` | Leave the trusted root in place |
 
-Stop the daemon first. The hosts helper and its sudoers rule are removed whenever they are present. `--purge` proceeds only when system cleanup succeeds. If the local root certificate is missing, trust removal is skipped and cleanup is incomplete; restore the certificate before retrying or use `--keep-certificate` to retain trust intentionally.
+Stop the daemon first. `--purge` proceeds only when system cleanup succeeds. If the local root certificate is missing, trust removal is skipped and cleanup is incomplete; restore the certificate before retrying or use `--keep-certificate` to retain trust intentionally.
 
 On Linux, testd leaves unowned or changed resolver and trust state in place. If the root remains trusted through another source, cleanup reports it. Purging with either `--keep-resolver` or `--keep-certificate` deletes `system-ownership-id`; back it up first if testd should remove its owned system state later. For retained trust, also back up `pki/root.crt`.
 

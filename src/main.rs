@@ -1130,8 +1130,6 @@ fn uninstall(purge: bool, keep_resolver: bool, keep_certificate: bool) -> anyhow
 		remove_trusted_root(config.as_ref(), &mut errors);
 	}
 
-	remove_hosts_helper(config.as_ref(), &mut errors);
-
 	if purge {
 		if errors.is_empty() {
 			remove_local_data(&mut errors);
@@ -1177,31 +1175,6 @@ fn remove_trusted_root(config: Option<&testd_core::config::HostConfig>, errors: 
 		&& let Err(e) = testd_daemon::health::set_auto_trust(&pki_dir, false)
 	{
 		errors.push(format!("certificate: {e}"));
-	}
-}
-
-fn remove_hosts_helper(config: Option<&testd_core::config::HostConfig>, errors: &mut Vec<String>) {
-	use std::process::Command;
-
-	let default_helper = std::path::PathBuf::from("/usr/local/libexec/testd-hosts-helper");
-	let helper = config.map(|config| &config.hosts_helper_path).unwrap_or(&default_helper);
-	if helper.exists() {
-		eprintln!("removing the hosts helper {}", helper.display());
-		match Command::new("sudo").args(["rm", "-f"]).arg(helper).status() {
-			Ok(status) if status.success() => {},
-			Ok(_) => errors.push("hosts helper: sudo rm failed".into()),
-			Err(e) => errors.push(format!("hosts helper: {e}")),
-		}
-	}
-
-	let sudoers = std::path::Path::new("/etc/sudoers.d/testd-hosts-helper");
-	if sudoers.exists() {
-		eprintln!("removing the sudoers rule {}", sudoers.display());
-		match Command::new("sudo").args(["rm", "-f"]).arg(sudoers).status() {
-			Ok(status) if status.success() => {},
-			Ok(_) => errors.push("hosts helper: sudo rm of the sudoers rule failed".into()),
-			Err(e) => errors.push(format!("hosts helper: {e}")),
-		}
 	}
 }
 

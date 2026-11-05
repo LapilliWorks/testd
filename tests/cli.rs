@@ -178,6 +178,27 @@ fn uninstall_does_not_revert_unowned_loopback_resolver_settings() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn uninstall_does_not_remove_a_configured_hosts_helper_path() {
+	let home = TempDir::new().unwrap();
+	let unrelated = home.path().join("unrelated-file");
+	std::fs::write(&unrelated, "keep this file").unwrap();
+	let config = config_dir(home.path()).join("config.toml");
+	std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+	std::fs::write(&config, format!("[host]\nhosts_helper_path = {:?}\n", unrelated.to_str().unwrap())).unwrap();
+	let (path, log) = fake_sudo(home.path());
+	let out = testd_command(home.path(), &["uninstall", "--keep-resolver", "--keep-certificate"])
+		.env("PATH", path)
+		.env("TESTD_SUDO_LOG", &log)
+		.output()
+		.unwrap();
+	assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+	assert_eq!(std::fs::read_to_string(unrelated).unwrap(), "keep this file");
+	let calls = std::fs::read_to_string(log).unwrap_or_default();
+	assert!(calls.is_empty(), "uninstall must not remove helper files or sudoers rules: {calls}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn uninstall_keeps_data_when_root_certificate_is_missing() {
 	let home = TempDir::new().unwrap();
 	let data = config_dir(home.path()).join("keep-me");
