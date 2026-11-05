@@ -44,7 +44,7 @@ bun test tests/release/browser.test.ts
 
 The GUI requires its platform build prerequisites and separate Rust 1.90 checks. Run the full dependency policy against the selected release scope; a non-GUI or CI-scoped pass does not clear a GUI-only advisory. PowerShell parser and behavior fixtures skip when PowerShell is unavailable; a PowerShell fixture is not a Windows platform run.
 
-The following contracts are deliberately ignored in the default Rust run because they currently fail. Run them explicitly to reproduce the known failures, then remove the ignore markers when the behavior is implemented. The release runner's `core` suite includes ignored tests, so it remains blocked by these failures. The four share contracts use fake Unix providers and do not test the deferred grant-revocation race.
+The following contracts are deliberately ignored in the default Rust run because they currently fail. Run them explicitly to reproduce the known failures, then remove the ignore markers when the behavior is implemented. The release runner's `core` suite includes ignored tests, so it remains blocked by these failures. Stable version tags also run that gate in CI; prerelease tags and ordinary CI runs do not, and do not constitute release approval. The four share contracts use fake Unix providers and do not test the deferred grant-revocation race.
 
 ```sh
 cargo +1.89.0 test -p testd-daemon --lib dns_labels_are_case_insensitive -- --ignored

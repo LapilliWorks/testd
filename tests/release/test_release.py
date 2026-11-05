@@ -79,6 +79,11 @@ class ReleaseTests(unittest.TestCase):
 				else:
 					self.assertIn('--include-ignored', command)
 
+	def test_stable_release_ci_runs_ignored_contracts(self):
+		workflow = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
+		self.assertIn("if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')", workflow)
+		self.assertIn('cargo nextest run --workspace --locked --run-ignored all', workflow)
+
 	def test_notification_dependency_is_not_downgraded_to_4_17(self):
 		manifest = release.tomllib.loads((ROOT / 'crates/testd-daemon/Cargo.toml').read_text())
 		self.assertEqual(manifest['dependencies']['notify-rust'], '4.18')
