@@ -215,8 +215,8 @@ Path: `~/.config/testd/config.toml`; on Windows, `%APPDATA%\testd\config.toml`. 
 | Key | Default | Meaning |
 |---|---|---|
 | `resolver` | `dns` | `dns` for the built-in server or `hosts` for a managed hosts block |
-| `listen_addr` | `0.0.0.0:7737` | Leaf intake |
-| `edge_addr` | `0.0.0.0:443` | HTTPS edge when `edge_enabled` is true |
+| `listen_addr` | `127.0.0.1:7737` | Leaf intake |
+| `edge_addr` | `127.0.0.1:443` | HTTPS edge when `edge_enabled` is true |
 | `edge_enabled` | `true` | Start the built-in TLS listener; the plain listener always runs |
 | `http_addr` | `127.0.0.1:7740` | Plain HTTP routing for an external front; always on |
 | `answer_addr` | `127.0.0.1` | A-record address returned for registered names |
@@ -283,9 +283,9 @@ The host's token store is the source of truth. A leaf's credential file is a cop
 
 | Listener | Default | Config key | Notes |
 |---|---|---|---|
-| Leaf intake | `0.0.0.0:7737` | `listen_addr` | Plain TCP, bearer token |
+| Leaf intake | `127.0.0.1:7737` | `listen_addr` | Plain TCP, bearer token |
 | Dashboard | `127.0.0.1:7737` | follows `listen_addr` port | Loopback only |
-| HTTPS edge | `0.0.0.0:443` | `edge_addr` | Only when `edge_enabled`; needs privilege on Linux |
+| HTTPS edge | `127.0.0.1:443` | `edge_addr` | Only when `edge_enabled`; needs privilege on Linux |
 | Plain HTTP routing | `127.0.0.1:7740` | `http_addr` | Always on; used by external fronts |
 | DNS | `127.0.0.1:7753` | fixed | Linux and macOS |
 | DNS | `127.0.0.1:53` | fixed | Windows |

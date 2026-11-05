@@ -210,6 +210,28 @@ mod tests {
 	use super::*;
 
 	#[test]
+	fn default_registration_listener_is_loopback() {
+		let config: HostConfig = toml::from_str("").unwrap();
+		assert_eq!(config.listen_addr, SocketAddr::from(([127, 0, 0, 1], DEFAULT_PORT)));
+	}
+
+	#[test]
+	fn default_https_listener_is_loopback() {
+		let config: HostConfig = toml::from_str("").unwrap();
+		assert_eq!(config.edge_addr, SocketAddr::from(([127, 0, 0, 1], 443)));
+	}
+
+	#[test]
+	fn explicitly_configured_network_listeners_are_honored() {
+		for ip in ["0.0.0.0", "192.0.2.1"] {
+			let text = format!("listen_addr = '{ip}:7737'\nedge_addr = '{ip}:443'\n");
+			let config: HostConfig = toml::from_str(&text).unwrap();
+			assert_eq!(config.listen_addr, format!("{ip}:7737").parse().unwrap());
+			assert_eq!(config.edge_addr, format!("{ip}:443").parse().unwrap());
+		}
+	}
+
+	#[test]
 	fn the_tray_opens_the_loopback_dashboard_even_with_the_edge_on() {
 		let mut config: HostConfig = toml::from_str("").unwrap();
 		config.edge_enabled = true;
@@ -846,7 +868,7 @@ mod defaults {
 	use std::path::PathBuf;
 
 	pub fn listen_addr() -> SocketAddr {
-		SocketAddr::from(([0, 0, 0, 0], super::DEFAULT_PORT))
+		SocketAddr::from(([127, 0, 0, 1], super::DEFAULT_PORT))
 	}
 
 	pub fn host_addr() -> String {
@@ -899,7 +921,7 @@ mod defaults {
 	}
 
 	pub fn edge_addr() -> SocketAddr {
-		SocketAddr::from(([0, 0, 0, 0], 443))
+		SocketAddr::from(([127, 0, 0, 1], 443))
 	}
 
 	pub fn http_addr() -> SocketAddr {

@@ -60,8 +60,8 @@ The daemon owns the listeners:
 
 | Listener | Default | Purpose |
 |---|---|---|
-| TCP | `0.0.0.0:7737` | Leaf intake; the dashboard answers on `127.0.0.1:7737` |
-| TCP | `0.0.0.0:443` | HTTPS edge for registered names, when `edge_enabled` is true |
+| TCP | `127.0.0.1:7737` | Leaf intake; the dashboard answers on `127.0.0.1:7737` |
+| TCP | `127.0.0.1:443` | HTTPS edge for registered names, when `edge_enabled` is true |
 | TCP | `127.0.0.1:7740` | Plain HTTP routing for an external front |
 | UDP | `127.0.0.1:7753` | DNS for `.test` on Linux and macOS |
 | UDP | `127.0.0.1:53` | DNS for `.test` on Windows |
@@ -99,6 +99,8 @@ testd doctor
 Exit code `0` means ready. `1` means missing configuration or state, `2` means the resolver is not configured, and `3` means the edge or certificate trust is not ready. `testd doctor --json` is stable for scripts. `testd doctor --fix` repairs the resolver, Caddyfile import, and root trust.
 
 ## Remote project in one minute
+
+The host intake defaults to loopback. Configure a reachable `[host] listen_addr` and restrict access; see [Advanced usage](advanced.md#remote-development).
 
 On the other machine, point at the host:
 

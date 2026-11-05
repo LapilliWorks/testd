@@ -152,6 +152,8 @@ A public share is a public route to the app. A tailnet share is only as private 
 
 ## Access requests and tokens
 
+The host intake defaults to loopback. For a remote leaf, configure a reachable `[host] listen_addr` and restrict access; see [Advanced usage](advanced.md#remote-development).
+
 A leaf with no credential for the selected profile asks for access, naming the names it wants:
 
 ```sh

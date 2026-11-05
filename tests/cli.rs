@@ -56,6 +56,19 @@ fn init_is_idempotent() {
 }
 
 #[test]
+fn init_defaults_to_loopback_listeners() {
+	let home = TempDir::new().unwrap();
+	assert!(init(home.path()).status.success());
+
+	let table: toml::Value = toml::from_str(&config(home.path())).unwrap();
+	let host: testd_core::config::HostConfig = table["host"].clone().try_into().unwrap();
+	assert_eq!(host.listen_addr.to_string(), "127.0.0.1:7737");
+	assert_eq!(host.edge_addr.to_string(), "127.0.0.1:443");
+	assert_eq!(host.http_addr.to_string(), "127.0.0.1:7740");
+	assert_eq!(host.local_dashboard_url(), "http://127.0.0.1:7737");
+}
+
+#[test]
 fn init_writes_and_keeps_an_operator_secret() {
 	let home = TempDir::new().unwrap();
 	assert!(init(home.path()).status.success());

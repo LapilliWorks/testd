@@ -85,6 +85,8 @@ testd run 10.0.0.5:myapp:3000 -- npm run dev   # custom target host
 
 Registration and token issuance use plain TCP. Use a trusted network or a separately secured transport, such as an encrypted private network or SSH tunnel. Do not expose port 7737 to the public internet. The HTTPS edge encrypts browser traffic; it does not encrypt leaf registration traffic.
 
+The host intake defaults to loopback. For a remote leaf, configure a reachable `[host] listen_addr` and restrict access; see [Advanced usage](docs/advanced.md#remote-development).
+
 From the VM, container, or WSL instance, run:
 
 ```sh
@@ -212,8 +214,8 @@ Useful `[host]` keys:
 | Key | Default | Meaning |
 |---|---|---|
 | `resolver` | `dns` | `dns` (built-in server) or `hosts` (single-node only) |
-| `listen_addr` | `0.0.0.0:7737` | Dev-environment intake |
-| `edge_addr` | `0.0.0.0:443` | HTTPS edge; use a high port if the binary lacks `CAP_NET_BIND_SERVICE` |
+| `listen_addr` | `127.0.0.1:7737` | Dev-environment intake |
+| `edge_addr` | `127.0.0.1:443` | HTTPS edge; use a high port if the binary lacks `CAP_NET_BIND_SERVICE` |
 | `allow_remote_targets` | `false` | Permit a remote leaf to name a target other than its own address |
 | `trust_forwarded_for` | `false` | Trust `X-Forwarded-For` from a configured front proxy; the dashboard name needs it on the plain listener |
 

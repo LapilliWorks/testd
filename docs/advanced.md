@@ -7,6 +7,8 @@ description: 'Remote development, profiles, grants, quick launches, tunnels, ext
 
 ## Remote development
 
+The host intake defaults to loopback. To accept remote leaves, set `[host] listen_addr` to a reachable address. A specific non-loopback bind does not listen on the loopback address. A `0.0.0.0:7737` bind includes loopback but exposes the intake on every IPv4 interface; if used, restrict port 7737 with a firewall.
+
 A remote leaf registers over the host's intake port. With no credential for the selected profile, it asks for access and prints a request. On the host:
 
 ```sh
