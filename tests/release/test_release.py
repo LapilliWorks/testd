@@ -83,8 +83,10 @@ class ReleaseTests(unittest.TestCase):
 
 	def test_stable_release_ci_runs_ignored_contracts(self):
 		workflow = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
-		self.assertIn("if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')", workflow)
-		self.assertIn('cargo nextest run --workspace --locked --run-ignored all', workflow)
+		test_job = workflow.split('\n  test:\n', 1)[1].split('\n  site:\n', 1)[0]
+		gate = test_job.split('\n      - name: Stable-release contract gate\n', 1)[1].split('\n      - ', 1)[0]
+		self.assertIn("if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')", gate)
+		self.assertIn('cargo nextest run --workspace --locked --run-ignored all', gate)
 
 	def test_notification_dependency_is_not_downgraded_to_4_17(self):
 		manifest = release.tomllib.loads((ROOT / 'crates/testd-daemon/Cargo.toml').read_text())
