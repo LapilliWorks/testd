@@ -76,10 +76,6 @@ const SECRET: &str = "test-secret";
 const LOCAL_TOKEN: &str = "local-test-token";
 
 async fn start() -> Harness {
-	start_with_dashboard(None).await
-}
-
-async fn start_with_dashboard(_dashboard_addr: Option<SocketAddr>) -> Harness {
 	let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let addr = listener.local_addr().unwrap();
 
@@ -913,7 +909,7 @@ async fn the_dashboard_offers_stop_and_grant_delete() {
 
 #[tokio::test]
 async fn the_loopback_dashboard_is_local_and_exposes_local_actions() {
-	let harness = start_with_dashboard(None).await;
+	let harness = start().await;
 
 	let local_get = |path: &str| get(path, &[]);
 	let page = http(harness.addr, &local_get("/")).await;
