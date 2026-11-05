@@ -1,7 +1,7 @@
 //! DNS resolver: runs a minimal DNS server answering queries for registered domains.
 //!
 //! The server listens on a local UDP port and responds to A record queries for
-//! domains in the registration set. All other queries get NXDOMAIN.
+//! registered domains. Unknown A names get NXDOMAIN; other types receive no answer.
 
 use std::collections::HashMap;
 use std::io;
@@ -30,10 +30,20 @@ pub struct DnsResolver {
 impl DnsResolver {
 	/// Create a new DNS resolver and start the server task.
 	pub async fn start(tld: &str, answer_addr: Ipv4Addr, elevation: testd_setup::Elevation) -> io::Result<Self> {
-		let listen_addr = SocketAddr::from(([127, 0, 0, 1], DEFAULT_DNS_PORT));
-		let domains: DomainMap = Arc::new(RwLock::new(HashMap::new()));
+		let socket = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], DEFAULT_DNS_PORT))).await?;
+		Self::start_with_socket(tld, answer_addr, elevation, socket)
+	}
 
-		let socket = UdpSocket::bind(listen_addr).await?;
+	/// Start with an already-bound loopback socket in a Tokio runtime.
+	pub fn start_with_socket(
+		tld: &str,
+		answer_addr: Ipv4Addr,
+		elevation: testd_setup::Elevation,
+		socket: UdpSocket,
+	) -> io::Result<Self> {
+		let listen_addr = socket.local_addr()?;
+		check_loopback(listen_addr)?;
+		let domains: DomainMap = Arc::new(RwLock::new(HashMap::new()));
 		let server_domains = domains.clone();
 		let server_tld = tld.to_owned();
 
@@ -50,6 +60,13 @@ impl DnsResolver {
 	pub fn listen_addr(&self) -> SocketAddr {
 		self.listen_addr
 	}
+}
+
+fn check_loopback(addr: SocketAddr) -> io::Result<()> {
+	if !addr.ip().is_loopback() {
+		return Err(io::Error::new(io::ErrorKind::InvalidInput, "DNS listener must bind to loopback"));
+	}
+	Ok(())
 }
 
 impl Resolver for DnsResolver {
@@ -156,35 +173,90 @@ mod tests {
 	use super::*;
 	use simple_dns::{CLASS, TYPE, Name, QCLASS, QTYPE, Question, RCODE};
 
-	fn query(name: &str) -> Vec<u8> {
+	#[test]
+	fn supplied_listeners_must_be_loopback() {
+		for address in ["127.0.0.1:1234", "[::1]:1234"] {
+			assert!(check_loopback(address.parse().unwrap()).is_ok(), "{address}");
+		}
+		for address in ["0.0.0.0:1234", "192.0.2.1:1234", "[::]:1234", "[2001:db8::1]:1234"] {
+			let error = check_loopback(address.parse().unwrap()).unwrap_err();
+			assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{address}");
+		}
+	}
+
+	fn query(name: &str, record_type: TYPE, class: CLASS) -> Vec<u8> {
 		let mut packet = Packet::new_query(1);
 		packet.questions.push(Question::new(
 			Name::new(name).unwrap(),
-			QTYPE::TYPE(TYPE::A),
-			QCLASS::CLASS(CLASS::IN),
+			QTYPE::TYPE(record_type),
+			QCLASS::CLASS(class),
 			false,
 		));
 		packet.build_bytes_vec().unwrap()
 	}
 
 	#[tokio::test]
-	async fn known_name_resolves_and_unknown_name_is_nxdomain() {
+	async fn registered_a_queries_return_the_configured_address() {
+		let domains: DomainMap = Arc::new(RwLock::new(HashMap::new()));
+		let address = Ipv4Addr::new(192, 0, 2, 42);
+		domains.write().await.insert("myapp.test".into(), address);
+
+		let reply = handle_query(&query("myapp.test", TYPE::A, CLASS::IN), &domains, "test")
+			.await
+			.unwrap();
+		let packet = Packet::parse(&reply).unwrap();
+		assert_eq!(packet.rcode(), RCODE::NoError);
+		assert!(packet.has_flags(PacketFlag::AUTHORITATIVE_ANSWER));
+		assert_eq!(packet.answers.len(), 1);
+		assert_eq!(packet.answers[0].rdata, RData::A(A { address: u32::from(address) }));
+	}
+
+	#[tokio::test]
+	async fn unknown_names_and_other_zones_do_not_resolve() {
 		let domains: DomainMap = Arc::new(RwLock::new(HashMap::new()));
 		domains.write().await.insert("myapp.test".into(), Ipv4Addr::LOCALHOST);
 
-		let reply = handle_query(&query("myapp.test"), &domains, "test").await.unwrap();
-		let packet = Packet::parse(&reply).unwrap();
-		assert_eq!(packet.rcode(), RCODE::NoError);
-		assert_eq!(packet.answers.len(), 1);
+		for name in ["nope.test", "other.dev", "myapp.test.example", "myapptest"] {
+			let reply = handle_query(&query(name, TYPE::A, CLASS::IN), &domains, "test").await.unwrap();
+			let packet = Packet::parse(&reply).unwrap();
+			assert_eq!(packet.rcode(), RCODE::NameError, "{name}");
+			assert!(packet.answers.is_empty(), "{name}");
+		}
+	}
 
-		let reply = handle_query(&query("nope.test"), &domains, "test").await.unwrap();
-		let packet = Packet::parse(&reply).unwrap();
-		assert_eq!(packet.rcode(), RCODE::NameError);
-		assert!(packet.answers.is_empty());
+	#[tokio::test]
+	async fn other_record_types_and_classes_never_return_an_a_record() {
+		let domains: DomainMap = Arc::new(RwLock::new(HashMap::new()));
+		domains.write().await.insert("myapp.test".into(), Ipv4Addr::LOCALHOST);
 
-		// Names outside the configured zone are not ours to answer.
-		let reply = handle_query(&query("other.dev"), &domains, "test").await.unwrap();
-		let packet = Packet::parse(&reply).unwrap();
-		assert_eq!(packet.rcode(), RCODE::NameError);
+		for (record_type, class) in [(TYPE::AAAA, CLASS::IN), (TYPE::A, CLASS::CH)] {
+			let reply = handle_query(&query("myapp.test", record_type, class), &domains, "test")
+				.await
+				.unwrap();
+			let packet = Packet::parse(&reply).unwrap();
+			assert!(packet.answers.is_empty(), "{record_type:?} {class:?}");
+		}
+	}
+
+	#[tokio::test]
+	#[ignore = "DNS lookup currently matches letter case; required before relying on mixed-case queries"]
+	async fn dns_labels_are_case_insensitive() {
+		let domains: DomainMap = Arc::new(RwLock::new(HashMap::new()));
+		domains.write().await.insert("myapp.test".into(), Ipv4Addr::LOCALHOST);
+
+		for name in ["myapp.test", "MYAPP.TEST", "MyApP.TeSt"] {
+			let reply = handle_query(&query(name, TYPE::A, CLASS::IN), &domains, "test").await.unwrap();
+			let packet = Packet::parse(&reply).unwrap();
+			assert_eq!(packet.rcode(), RCODE::NoError, "{name}");
+			assert_eq!(packet.answers.len(), 1, "{name}");
+		}
+	}
+
+	#[tokio::test]
+	async fn malformed_queries_are_rejected() {
+		let domains: DomainMap = Arc::new(RwLock::new(HashMap::new()));
+		for bytes in [&[][..], &[0, 1, 2, 3][..]] {
+			assert!(handle_query(bytes, &domains, "test").await.is_err());
+		}
 	}
 }
