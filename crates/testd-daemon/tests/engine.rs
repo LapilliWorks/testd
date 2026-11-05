@@ -69,6 +69,7 @@ struct Harness {
 	access: Arc<Access>,
 	token: String,
 	stop: Option<oneshot::Sender<()>>,
+	_dir: tempfile::TempDir,
 }
 
 const SECRET: &str = "test-secret";
@@ -82,8 +83,7 @@ async fn start_with_dashboard(_dashboard_addr: Option<SocketAddr>) -> Harness {
 	let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let addr = listener.local_addr().unwrap();
 
-	let dir = std::env::temp_dir().join(format!("testd-engine-{}-{}", std::process::id(), addr.port()));
-	std::fs::create_dir_all(&dir).unwrap();
+	let dir = tempfile::tempdir().unwrap();
 
 	let resolver = Arc::new(RecordingResolver {
 		applied: Mutex::new(Vec::new()),
@@ -92,9 +92,9 @@ async fn start_with_dashboard(_dashboard_addr: Option<SocketAddr>) -> Harness {
 	});
 	let config = HostConfig {
 		listen_addr: "127.0.0.1:0".parse().unwrap(),
-		caddyfile_path: dir.join("Caddyfile"),
-		caddy_config_path: dir.join("global-Caddyfile"),
-		pki_dir: dir.join("pki"),
+		caddyfile_path: dir.path().join("Caddyfile"),
+		caddy_config_path: dir.path().join("global-Caddyfile"),
+		pki_dir: dir.path().join("pki"),
 		edge_addr: "127.0.0.1:0".parse().unwrap(),
 		edge_enabled: false,
 		http_addr: "127.0.0.1:0".parse().unwrap(),
@@ -104,7 +104,7 @@ async fn start_with_dashboard(_dashboard_addr: Option<SocketAddr>) -> Harness {
 		trust_forwarded_for: false,
 	};
 
-	let access = Arc::new(Access::load(dir.join("tokens.json")).unwrap());
+	let access = Arc::new(Access::load(dir.path().join("tokens.json")).unwrap());
 	let mut engine = HostEngine::new(config, resolver.clone(), Arc::clone(&access));
 	engine.set_local_token(LOCAL_TOKEN.into());
 	let engine = Arc::new(engine);
@@ -118,7 +118,7 @@ async fn start_with_dashboard(_dashboard_addr: Option<SocketAddr>) -> Harness {
 		}
 	});
 
-	Harness { addr, engine, resolver, registrations, access, token: SECRET.to_owned(), stop: Some(stop) }
+	Harness { addr, engine, resolver, registrations, access, token: SECRET.to_owned(), stop: Some(stop), _dir: dir }
 }
 
 impl Drop for Harness {

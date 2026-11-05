@@ -31,7 +31,7 @@ type Body = BoxBody<Bytes, Infallible>;
 struct Harness {
 	edge: Edge,
 	registry: Arc<AsyncMutex<Registry>>,
-	dir: std::path::PathBuf,
+	dir: tempfile::TempDir,
 	upstream_dropped: Arc<Notify>,
 }
 
@@ -50,8 +50,7 @@ async fn start_plain() -> Harness {
 
 async fn start_with(upstream_timeout: Duration, tls: bool) -> Harness {
 	let (upstream, upstream_dropped) = start_upstream().await;
-	let dir = std::env::temp_dir().join(format!("testd-edge-{}-{}", std::process::id(), upstream.port()));
-	std::fs::create_dir_all(&dir).unwrap();
+	let dir = tempfile::tempdir().unwrap();
 
 	let registry = Arc::new(AsyncMutex::new(Registry::default()));
 	let connection = registry.lock().await.connection_id();
@@ -64,7 +63,7 @@ async fn start_with(upstream_timeout: Duration, tls: bool) -> Harness {
 	let mut ctx = EdgeContext::new("test", registry.clone());
 	ctx.upstream_timeout = upstream_timeout;
 
-	let pki_dir = dir.join("pki");
+	let pki_dir = dir.path().join("pki");
 	let tls_addr = tls.then(|| "127.0.0.1:0".parse().unwrap());
 	let edge = edge::start(Arc::new(ctx), tls_addr, "127.0.0.1:0".parse().unwrap(), &pki_dir).unwrap();
 
@@ -458,7 +457,7 @@ async fn websocket_upgrade_is_spliced() {
 #[tokio::test]
 async fn tls_serves_a_minted_leaf_from_the_local_root() {
 	let harness = start().await;
-	let ca = Ca::load_or_init(&harness.dir.join("pki")).unwrap();
+	let ca = Ca::load_or_init(&harness.dir.path().join("pki")).unwrap();
 	let mut roots = rustls::RootCertStore::empty();
 	roots.add(ca.root_cert_der().unwrap()).unwrap();
 	let config = rustls::ClientConfig::builder()
@@ -497,7 +496,7 @@ async fn tls_serves_a_minted_leaf_from_the_local_root() {
 #[tokio::test]
 async fn tls_refuses_out_of_zone_server_names() {
 	let harness = start().await;
-	let ca = Ca::load_or_init(&harness.dir.join("pki")).unwrap();
+	let ca = Ca::load_or_init(&harness.dir.path().join("pki")).unwrap();
 	let mut roots = rustls::RootCertStore::empty();
 	roots.add(ca.root_cert_der().unwrap()).unwrap();
 	let config = rustls::ClientConfig::builder()
