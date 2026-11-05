@@ -64,11 +64,7 @@ PY
 	else
 		fail 'resolver file'
 	fi
-	if [ "$(system_http_status "testd.$TLD" /ok.svg)" = '404' ]; then
-		pass 'system trust store accepts the edge certificate'
-	else
-		fail 'system trust store accepts the edge certificate'
-	fi
+	check_system_trust
 	# The URL handler forwards to the running daemon instead of repairing twice.
 	if HOME="$TEST_HOME" "$TESTD_BIN" url testd://fix/resolver >/dev/null 2>&1; then
 		pass 'testd url forwards the resolver repair'

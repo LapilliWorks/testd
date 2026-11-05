@@ -114,6 +114,14 @@ assert isinstance(value["shares"], list)
 	fi
 }
 
+check_system_trust() {
+	if [ "$(system_http_status "testd.$TLD" /ok.svg)" = '200' ]; then
+		pass 'system trust store accepts the edge certificate'
+	else
+		fail 'system trust store accepts the edge certificate'
+	fi
+}
+
 check_dashboard() {
 	section 'local dashboard'
 	local page

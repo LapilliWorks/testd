@@ -690,6 +690,28 @@ class HostSystemTests(unittest.TestCase):
 				self.assertEqual(command.call_args.kwargs['terminal'], system)
 
 
+@unittest.skipUnless(os.name != 'nt' and shutil.which('bash'), 'Unix bash host checks are unavailable')
+class UnixHostContractTests(unittest.TestCase):
+	def test_system_trust_requires_a_successful_dashboard_response(self):
+		script = '''
+set -eu
+source tests/host/common.sh
+TLD=testdcheck
+system_http_status() {
+	[ "$1" = 'testd.testdcheck' ] && [ "$2" = '/ok.svg' ]
+	printf '%s' "$HTTP_STATUS"
+}
+pass() { printf 'pass:%s' "$1"; }
+fail() { printf 'fail:%s' "$1"; }
+check_system_trust
+'''
+		for code, expected in [('200', 'pass'), ('404', 'fail'), ('000', 'fail')]:
+			with self.subTest(status=code):
+				result = subprocess.run(['bash', '-c', script], cwd=ROOT, env={**os.environ, 'HTTP_STATUS': code},
+					capture_output=True, text=True, timeout=5, check=True)
+				self.assertEqual(result.stdout, f'{expected}:system trust store accepts the edge certificate')
+
+
 class DesktopRunnerTests(unittest.TestCase):
 	def create_run(self, directory):
 		app = pathlib.Path(directory) / 'candidate'

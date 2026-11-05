@@ -245,8 +245,7 @@ the edge and proxy checks. That validates routing and TLS minting without
 requiring a trust-store change. The elevated run then calls
 `testd doctor --fix`, checks the NRPT rule and the machine root store, and
 repeats a request to `https://testd.<tld>/` without `--insecure` to prove the OS
-trust path. The edge answers that name with 404 because the dashboard is not
-proxied; any HTTP status means Schannel accepted the chain.
+trust path. The loopback dashboard is proxied through the edge and returns 200.
 
 `testd init` and `testd doctor --fix` no longer need the whole process elevated
 on Windows. Privileged actions are delegated to
@@ -423,7 +422,7 @@ Run each in every browser you support: Chrome, Firefox, Safari, Edge.
 4. WebSocket: a dev server using HMR websockets connects over `wss` and survives 60 seconds idle.
 5. SSE and a 100 MB upload complete without a truncated response.
 6. Cookies: two names in one project (`app.example.test`, `api.example.test`) share a cookie set on `.example.test`, exactly as `app.example.com` and `api.example.com` would.
-7. Stop the upstream, reload: the edge returns `502`. Request an unregistered name: `404`.
+7. Stop the upstream, reload: the edge returns `502`. An unregistered name does not reach an application; DNS or TLS may reject it before any HTTP response.
 8. Single-label warning: `testd run app:3000` prints the cross-site warning, and `app.test` still resolves.
 
 ### Record
