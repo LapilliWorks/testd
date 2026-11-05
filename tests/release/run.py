@@ -358,7 +358,7 @@ def native_build_target(run, env):
 	for line in output.splitlines():
 		if line.startswith('host: '):
 			target = line.removeprefix('host: ').strip()
-			if re.fullmatch(r'[A-Za-z0-9_.-]+', target):
+			if target not in ('.', '..') and re.fullmatch(r'[A-Za-z0-9_.-]+', target):
 				return target
 	raise RuntimeError('could not determine the native Rust target from rustc')
 

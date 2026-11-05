@@ -307,9 +307,11 @@ class PlatformSequenceTests(unittest.TestCase):
 		run.command.return_value = 'rustc 1.99.0\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\n'
 		self.assertEqual(runner.native_build_target(run, {}), 'x86_64-unknown-linux-gnu')
 		run.command.assert_called_once_with('rustc-host', ['rustc', '+stable', '-vV'], 60, env={})
-		run.command.return_value = 'rustc 1.99.0\nhost: ../../outside\n'
-		with self.assertRaisesRegex(RuntimeError, 'native Rust target'):
-			runner.native_build_target(run, {})
+		for target in ('../../outside', '..', '.', ''):
+			with self.subTest(target=target):
+				run.command.return_value = f'rustc 1.99.0\nhost: {target}\n'
+				with self.assertRaisesRegex(RuntimeError, 'native Rust target'):
+					runner.native_build_target(run, {})
 
 	def test_automatic_build_refuses_an_explicit_cross_target(self):
 		run = Mock(args=SimpleNamespace(bin=None), metadata={'commit': 'fixture'})
