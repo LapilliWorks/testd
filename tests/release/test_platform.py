@@ -46,7 +46,7 @@ class PlatformScriptsTests(unittest.TestCase):
 
 	def test_host_requires_a_candidate_and_a_new_report(self):
 		with tempfile.TemporaryDirectory() as directory:
-			root = pathlib.Path(directory)
+			root = pathlib.Path(directory).resolve()
 			candidate = root / 'testd'
 			candidate.write_text('fixture', encoding='utf-8')
 			report = root / 'report'
@@ -65,7 +65,7 @@ class PlatformScriptsTests(unittest.TestCase):
 
 	def test_host_can_build_a_candidate_only_when_explicitly_requested(self):
 		with tempfile.TemporaryDirectory() as directory:
-			report = pathlib.Path(directory) / 'report'
+			report = pathlib.Path(directory).resolve() / 'report'
 			with patch.object(self.script.platform, 'system', return_value='Linux'), \
 				patch.object(self.script, 'is_ephemeral_report', return_value=False), \
 				patch.object(self.script.runner, 'main', return_value=0) as run:
@@ -75,7 +75,7 @@ class PlatformScriptsTests(unittest.TestCase):
 
 	def test_system_host_checks_require_an_interactive_affirmative_confirmation(self):
 		with tempfile.TemporaryDirectory() as directory:
-			root = pathlib.Path(directory)
+			root = pathlib.Path(directory).resolve()
 			candidate = root / 'testd'
 			candidate.write_text('fixture', encoding='utf-8')
 			arguments = ['host', '--bin', str(candidate), '--report', str(root / 'report'), '--system']
@@ -99,7 +99,7 @@ class PlatformScriptsTests(unittest.TestCase):
 
 	def test_privileged_and_desktop_reports_cannot_be_in_the_temp_directory(self):
 		with tempfile.TemporaryDirectory() as directory:
-			root = pathlib.Path(directory)
+			root = pathlib.Path(directory).resolve()
 			candidate = root / 'candidate'
 			candidate.write_text('fixture', encoding='utf-8')
 			with patch.object(self.script.platform, 'system', return_value='Linux'), \
@@ -113,7 +113,7 @@ class PlatformScriptsTests(unittest.TestCase):
 
 	def test_desktop_and_browser_forward_only_relevant_options(self):
 		with tempfile.TemporaryDirectory() as directory:
-			root = pathlib.Path(directory)
+			root = pathlib.Path(directory).resolve()
 			candidate = root / 'candidate'
 			candidate.write_text('fixture', encoding='utf-8')
 			with patch.object(self.script.platform, 'system', return_value='Windows'), \
