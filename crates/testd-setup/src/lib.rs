@@ -1024,17 +1024,13 @@ pub fn is_root_trusted(cert_pem: &str) -> bool {
 	false
 }
 
-#[cfg(target_os = "linux")]
-fn system_root_path() -> std::path::PathBuf {
-	std::path::PathBuf::from(trust_layout().anchor)
-}
-
 /// Where a distro keeps local CA anchors and how it rebuilds the trust bundle.
 #[cfg(target_os = "linux")]
 #[derive(Debug, PartialEq, Eq)]
 struct TrustLayout<'a> {
 	directory: &'a str,
 	anchor: &'a str,
+	bundle: &'a str,
 	reload: &'a str,
 }
 
@@ -1048,12 +1044,14 @@ fn trust_layout_for(has_update_ca_certificates: bool, has_fedora_anchors: bool) 
 		TrustLayout {
 			directory: "/etc/pki/ca-trust/source/anchors",
 			anchor: "/etc/pki/ca-trust/source/anchors/testd-root.crt",
+			bundle: "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
 			reload: "update-ca-trust extract",
 		}
 	} else {
 		TrustLayout {
 			directory: "/usr/local/share/ca-certificates",
 			anchor: "/usr/local/share/ca-certificates/testd-root.crt",
+			bundle: "/etc/ssl/certs/ca-certificates.crt",
 			reload: "update-ca-certificates",
 		}
 	}
@@ -1159,6 +1157,70 @@ fn single_anchor_der(pem: &str) -> io::Result<Vec<u8>> {
 }
 
 #[cfg(target_os = "linux")]
+fn bundle_contains_root(bundle: &str, cert_pem: &str) -> io::Result<bool> {
+	let expected = single_anchor_der(cert_pem)?;
+	let begin = "-----BEGIN CERTIFICATE-----";
+	let end = "-----END CERTIFICATE-----";
+	let mut remaining = bundle;
+	let mut count = 0;
+	let mut contains_root = false;
+	while let Some(start) = remaining.find(begin) {
+		let block = &remaining[start..];
+		let stop = block
+			.find(end)
+			.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unterminated certificate in trust bundle"))?
+			+ end.len();
+		contains_root |= pem_to_der(&block[..stop])? == expected;
+		count += 1;
+		remaining = &block[stop..];
+	}
+	if count == 0 && !bundle.trim().is_empty() {
+		return Err(io::Error::new(io::ErrorKind::InvalidData, "trust bundle contains no certificates"));
+	}
+	Ok(contains_root)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_bundle_contains_root(layout: &TrustLayout<'_>, cert_pem: &str) -> io::Result<bool> {
+	let bundle = std::fs::read_to_string(layout.bundle).map_err(|error| {
+		io::Error::new(error.kind(), format!("cannot inspect system trust bundle {}: {error}", layout.bundle))
+	})?;
+	bundle_contains_root(&bundle, cert_pem).map_err(|error| {
+		io::Error::new(error.kind(), format!("cannot inspect system trust bundle {}: {error}", layout.bundle))
+	})
+}
+
+#[cfg(target_os = "linux")]
+fn require_linux_root_absent(layout: &TrustLayout<'_>, cert_pem: &str) -> io::Result<()> {
+	if linux_bundle_contains_root(layout, cert_pem)? {
+		return Err(io::Error::other("the root remains in the system trust bundle; unowned trust was not removed"));
+	}
+	Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq, Eq)]
+enum LinuxTrustPreflight {
+	Compatible,
+	Ready,
+}
+
+#[cfg(target_os = "linux")]
+fn linux_trust_preflight(layout: &TrustLayout<'_>, cert_pem: &str) -> io::Result<LinuxTrustPreflight> {
+	if linux_bundle_contains_root(layout, cert_pem)? {
+		return Ok(LinuxTrustPreflight::Compatible);
+	}
+	let anchor = Path::new(layout.anchor);
+	if existing_linux_anchor(anchor, cert_pem)? {
+		return Err(io::Error::other(format!(
+			"{} contains the root, but it is absent from the system trust bundle; inspect it before retrying",
+			anchor.display()
+		)));
+	}
+	Ok(LinuxTrustPreflight::Ready)
+}
+
+#[cfg(target_os = "linux")]
 fn existing_linux_anchor(path: &Path, cert_pem: &str) -> io::Result<bool> {
 	let expected = single_anchor_der(cert_pem)?;
 	match std::fs::read_to_string(path) {
@@ -1225,7 +1287,7 @@ fn trust_remove_script(layout: &TrustLayout<'_>) -> String {
 
 #[cfg(target_os = "linux")]
 fn is_root_trusted_linux(cert_pem: &str) -> bool {
-	existing_linux_anchor(&system_root_path(), cert_pem).is_ok_and(|installed| installed)
+	linux_bundle_contains_root(&trust_layout(), cert_pem).is_ok_and(|trusted| trusted)
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -1367,7 +1429,7 @@ pub fn trust_root_gui(cert_pem: &str) -> io::Result<()> {
 fn trust_root_linux(cert_pem: &str, elevation: Elevation) -> io::Result<()> {
 	let layout = trust_layout();
 	let anchor = Path::new(layout.anchor);
-	if existing_linux_anchor(anchor, cert_pem)? {
+	if linux_trust_preflight(&layout, cert_pem)? == LinuxTrustPreflight::Compatible {
 		return Ok(());
 	}
 	let owner = ownership::InstallationId::load_or_create()?;
@@ -1376,7 +1438,11 @@ fn trust_root_linux(cert_pem: &str, elevation: Elevation) -> io::Result<()> {
 	command.args(["sh", "-c", &script]);
 	let status = run_with_stdin(command, &owned_trust_input(&owner, cert_pem))?;
 	match status.code() {
-		Some(0) => Ok(()),
+		Some(0) if linux_bundle_contains_root(&layout, cert_pem)? => Ok(()),
+		Some(0) => Err(io::Error::other(format!(
+			"{} was created but the root is absent from the system trust bundle; inspect it before retrying",
+			anchor.display()
+		))),
 		Some(TRUST_ANCHOR_CONFLICT) => Err(trust_anchor_conflict(anchor)),
 		Some(TRUST_OWNERSHIP_UNRECORDED) => Err(io::Error::other(format!(
 			"{} was created but ownership could not be recorded; inspect the file before retrying",
@@ -1490,7 +1556,7 @@ fn untrust_root_linux(cert_pem: &str, elevation: Elevation) -> io::Result<()> {
 	let has_anchor = system_entry_present(anchor)?;
 	let has_marker = system_entry_present(&marker)?;
 	if !has_anchor && !has_marker {
-		return Ok(());
+		return require_linux_root_absent(&layout, cert_pem);
 	}
 	if !has_marker {
 		return Err(trust_ownership_conflict(anchor));
@@ -1501,7 +1567,7 @@ fn untrust_root_linux(cert_pem: &str, elevation: Elevation) -> io::Result<()> {
 	command.args(["sh", "-c", &script]);
 	let status = run_with_stdin(command, &owned_trust_input(&owner, cert_pem))?;
 	match status.code() {
-		Some(0) => Ok(()),
+		Some(0) => require_linux_root_absent(&layout, cert_pem),
 		Some(TRUST_ANCHOR_CONFLICT) => Err(trust_ownership_conflict(anchor)),
 		_ => Err(io::Error::other("root CA removal or trust-store update failed")),
 	}
@@ -1645,6 +1711,7 @@ mod trust_tests {
 		let layout = TrustLayout {
 			directory: anchor.parent().unwrap().to_str().unwrap(),
 			anchor: anchor.to_str().unwrap(),
+			bundle: "",
 			reload: "printf '%s\\n' reloaded >> \"$TESTD_TRUST_LOG\"",
 		};
 		trust_install_script(&layout)
@@ -1664,6 +1731,7 @@ mod trust_tests {
 		let layout = TrustLayout {
 			directory: anchor.parent().unwrap().to_str().unwrap(),
 			anchor: anchor.to_str().unwrap(),
+			bundle: "",
 			reload: "printf '%s\\n' reloaded >> \"$TESTD_TRUST_LOG\"",
 		};
 		let mut command = std::process::Command::new("sh");
@@ -1805,6 +1873,7 @@ mod trust_tests {
 		let layout = TrustLayout {
 			directory: fixture.path().to_str().unwrap(),
 			anchor: anchor.to_str().unwrap(),
+			bundle: "",
 			reload: "sh -c 'exit 1'",
 		};
 		let mut command = std::process::Command::new("sh");
@@ -1855,6 +1924,63 @@ mod trust_tests {
 		assert_eq!(std::fs::metadata(marker).unwrap().permissions().mode() & 0o777, 0o600);
 		assert_eq!(std::fs::read_to_string(reload_log).unwrap(), "reloaded\n");
 		assert_eq!(std::fs::read_dir(anchor.parent().unwrap()).unwrap().count(), 2);
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn trust_preflight_uses_an_existing_bundle_entry_without_claiming_an_anchor() {
+		const EXPECTED: &str = "-----BEGIN CERTIFICATE-----\nAAECAwQ=\n-----END CERTIFICATE-----\n";
+		const WRAPPED: &str = "-----BEGIN CERTIFICATE-----\r\nAAEC\r\nAwQ=\r\n-----END CERTIFICATE-----\r\n";
+		const FOREIGN: &str = "-----BEGIN CERTIFICATE-----\nAAECAwU=\n-----END CERTIFICATE-----\n";
+
+		let fixture = tempfile::tempdir().unwrap();
+		let anchor = fixture.path().join("testd-root.crt");
+		let bundle = fixture.path().join("bundle.pem");
+		let layout = TrustLayout {
+			directory: fixture.path().to_str().unwrap(),
+			anchor: anchor.to_str().unwrap(),
+			bundle: bundle.to_str().unwrap(),
+			reload: "true",
+		};
+		std::fs::write(&anchor, FOREIGN).unwrap();
+		std::fs::write(&bundle, format!("{FOREIGN}{WRAPPED}")).unwrap();
+		assert_eq!(linux_trust_preflight(&layout, EXPECTED).unwrap(), LinuxTrustPreflight::Compatible);
+		assert_eq!(std::fs::read_to_string(&anchor).unwrap(), FOREIGN);
+		assert!(!trust_owner_marker(&layout).exists());
+		assert!(require_linux_root_absent(&layout, EXPECTED).is_err());
+
+		std::fs::write(&bundle, FOREIGN).unwrap();
+		assert_eq!(linux_trust_preflight(&layout, EXPECTED).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+		std::fs::write(&anchor, EXPECTED).unwrap();
+		let error = linux_trust_preflight(&layout, EXPECTED).unwrap_err();
+		assert!(error.to_string().contains("absent from the system trust bundle"));
+		assert!(require_linux_root_absent(&layout, EXPECTED).is_ok());
+		std::fs::remove_file(&anchor).unwrap();
+		assert_eq!(linux_trust_preflight(&layout, EXPECTED).unwrap(), LinuxTrustPreflight::Ready);
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn trust_bundle_must_be_readable_and_well_formed() {
+		const EXPECTED: &str = "-----BEGIN CERTIFICATE-----\nAAECAwQ=\n-----END CERTIFICATE-----\n";
+		let fixture = tempfile::tempdir().unwrap();
+		let anchor = fixture.path().join("testd-root.crt");
+		let bundle = fixture.path().join("bundle.pem");
+		let layout = TrustLayout {
+			directory: fixture.path().to_str().unwrap(),
+			anchor: anchor.to_str().unwrap(),
+			bundle: bundle.to_str().unwrap(),
+			reload: "true",
+		};
+		assert_eq!(linux_trust_preflight(&layout, EXPECTED).unwrap_err().kind(), io::ErrorKind::NotFound);
+		std::fs::write(&bundle, "-----BEGIN CERTIFICATE-----\nAAEC\n").unwrap();
+		assert_eq!(linux_trust_preflight(&layout, EXPECTED).unwrap_err().kind(), io::ErrorKind::InvalidData);
+		std::fs::write(&bundle, format!("{EXPECTED}-----BEGIN CERTIFICATE-----\nAAEC\n")).unwrap();
+		assert_eq!(linux_trust_preflight(&layout, EXPECTED).unwrap_err().kind(), io::ErrorKind::InvalidData);
+		std::fs::write(&bundle, "unexpected trust bundle content").unwrap();
+		assert_eq!(linux_trust_preflight(&layout, EXPECTED).unwrap_err().kind(), io::ErrorKind::InvalidData);
+		assert!(!anchor.exists());
+		assert!(!trust_owner_marker(&layout).exists());
 	}
 
 	#[cfg(target_os = "linux")]
@@ -2002,6 +2128,7 @@ mod trust_tests {
 		let layout = TrustLayout {
 			directory: fixture.path().to_str().unwrap(),
 			anchor: anchor.to_str().unwrap(),
+			bundle: "",
 			reload: "sh -c 'exit 17'",
 		};
 		let mut command = std::process::Command::new("sh");
@@ -2017,9 +2144,11 @@ mod trust_tests {
 	fn trust_layout_follows_the_distro_tool() {
 		let debian = trust_layout_for(true, false);
 		assert_eq!(debian.anchor, "/usr/local/share/ca-certificates/testd-root.crt");
+		assert_eq!(debian.bundle, "/etc/ssl/certs/ca-certificates.crt");
 		assert_eq!(debian.reload, "update-ca-certificates");
 		let fedora = trust_layout_for(false, true);
 		assert_eq!(fedora.anchor, "/etc/pki/ca-trust/source/anchors/testd-root.crt");
+		assert_eq!(fedora.bundle, "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem");
 		assert_eq!(fedora.reload, "update-ca-trust extract");
 		assert_eq!(trust_layout_for(false, false).anchor, debian.anchor, "unrecognised distros keep the old layout");
 		assert_eq!(trust_layout_for(true, true).anchor, debian.anchor);
