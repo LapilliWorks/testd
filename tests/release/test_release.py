@@ -691,6 +691,32 @@ class HostSystemTests(unittest.TestCase):
 
 
 class DesktopRunnerTests(unittest.TestCase):
+	def create_run(self, directory):
+		app = pathlib.Path(directory) / 'candidate'
+		app.write_text('fixture', encoding='utf-8')
+		args = SimpleNamespace(report=pathlib.Path(directory) / 'report', suite='desktop', app=app)
+		with redirect_stdout(io.StringIO()):
+			return runner.Run(args)
+
+	def test_desktop_user_data_paths_follow_the_product(self):
+		with patch.object(runner, 'SYSTEM', 'Windows'), patch.dict(os.environ, {'APPDATA': '/roaming'}, clear=True):
+			self.assertEqual(runner.desktop_config_dir(), pathlib.Path('/roaming/testd'))
+		with patch.object(runner, 'SYSTEM', 'Windows'), patch.dict(os.environ, {'USERPROFILE': '/user'}, clear=True):
+			self.assertEqual(runner.desktop_config_dir(), pathlib.Path('/user/AppData/Roaming/testd'))
+		with patch.object(runner, 'SYSTEM', 'Linux'), patch.dict(os.environ, {'HOME': '/user'}, clear=True):
+			self.assertEqual(runner.desktop_config_dir(), pathlib.Path('/user/.config/testd'))
+
+	@unittest.skipIf(os.name == 'nt', 'unprivileged symlink creation is not generally available on Windows')
+	def test_desktop_refuses_a_broken_user_data_symlink(self):
+		with tempfile.TemporaryDirectory() as directory:
+			config = pathlib.Path(directory) / '.config'
+			config.mkdir()
+			(config / 'testd').symlink_to(config / 'missing')
+			with patch.object(runner, 'SYSTEM', 'Linux'), patch.dict(os.environ, {'HOME': directory}):
+				with self.assertRaisesRegex(RuntimeError, 'existing testd user data'):
+					runner.require_fresh_desktop_user()
+			self.assertTrue((config / 'testd').is_symlink())
+
 	def test_desktop_domain_matches_the_product_tld(self):
 		config = (ROOT / 'crates/testd-core/src/config.rs').read_text(encoding='utf-8')
 		match = re.search(r'pub const TLD: &str = "([^"]+)";', config)
@@ -699,23 +725,68 @@ class DesktopRunnerTests(unittest.TestCase):
 
 	def test_desktop_snapshots_the_wizard_domain_and_clears_the_test_override(self):
 		with tempfile.TemporaryDirectory() as directory:
-			args = SimpleNamespace(report=pathlib.Path(directory) / 'report', suite='desktop', app=pathlib.Path('candidate'))
-			with redirect_stdout(io.StringIO()):
-				run = runner.Run(args)
+			run = self.create_run(directory)
 			backup = pathlib.Path(directory) / 'system-before'
 			terminal = Mock()
 			terminal.isatty.return_value = True
 			with patch.object(runner, 'SYSTEM', 'Windows'), patch.object(runner, 'HOST_TLD', 'testdcheck'), \
-				patch.dict(os.environ, {'TESTD_HOST_TLD': 'different'}), patch.object(runner.sys, 'stdin', terminal), \
+				patch.dict(os.environ, {'TESTD_HOST_TLD': 'different', 'APPDATA': directory}), \
+				patch.object(runner.sys, 'stdin', terminal), \
 				patch.object(runner, 'system_snapshot', return_value=backup) as snapshot, \
 				patch.object(runner, 'system_restore') as restore, patch.object(runner.subprocess, 'Popen') as launch, \
-				patch.object(runner, 'checklist_items', return_value=['fixture']), patch.object(runner, 'ask', return_value='q'), \
-				redirect_stdout(io.StringIO()):
+				patch.object(runner, 'checklist_items', return_value=['fixture']), \
+				patch.object(runner, 'ask', side_effect=['y', 'q', 'y']), redirect_stdout(io.StringIO()):
 				runner.desktop(run)
 			snapshot.assert_called_once_with(run, 'test', interactive=True)
 			restore.assert_called_once_with(run, backup, 'test', interactive=True)
 			self.assertNotIn('TESTD_HOST_TLD', launch.call_args.kwargs['env'])
 			self.assertTrue(run.metadata['incomplete'])
+
+	def test_desktop_refuses_existing_user_data_before_system_snapshot(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			config = pathlib.Path(directory) / 'testd'
+			config.mkdir()
+			(config / 'config.toml').write_text('existing data', encoding='utf-8')
+			terminal = Mock()
+			terminal.isatty.return_value = True
+			with patch.object(runner, 'SYSTEM', 'Windows'), patch.dict(os.environ, {'APPDATA': directory}), \
+				patch.object(runner.sys, 'stdin', terminal), \
+				patch.object(runner, 'system_snapshot', side_effect=AssertionError('snapshot ran too early')) as snapshot:
+				with self.assertRaisesRegex(RuntimeError, 'existing testd user data'):
+					runner.desktop(run)
+			snapshot.assert_not_called()
+			self.assertEqual((config / 'config.toml').read_text(encoding='utf-8'), 'existing data')
+
+	def test_desktop_requires_a_disposable_host_with_a_persisted_backup(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			terminal = Mock()
+			terminal.isatty.return_value = True
+			with patch.object(runner, 'SYSTEM', 'Windows'), patch.dict(os.environ, {'APPDATA': directory}), \
+				patch.object(runner.sys, 'stdin', terminal), patch.object(runner, 'ask', return_value='n'), \
+				patch.object(runner, 'system_snapshot') as snapshot:
+				with self.assertRaisesRegex(RuntimeError, 'disposable host'):
+					runner.desktop(run)
+			snapshot.assert_not_called()
+
+	def test_desktop_defers_restore_without_shutdown_confirmation(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			terminal = Mock()
+			terminal.isatty.return_value = True
+			with patch.object(runner, 'SYSTEM', 'Windows'), patch.dict(os.environ, {'APPDATA': directory}), \
+				patch.object(runner.sys, 'stdin', terminal), \
+				patch.object(runner, 'system_snapshot', return_value=pathlib.Path(directory) / 'system-before'), \
+				patch.object(runner, 'system_restore') as restore, patch.object(runner.subprocess, 'Popen'), \
+				patch.object(runner, 'checklist_items', return_value=['fixture']), \
+				patch.object(runner, 'ask', side_effect=['y', 'q', 'n']), redirect_stdout(io.StringIO()):
+				runner.desktop(run)
+			restore.assert_not_called()
+			self.assertTrue(run.metadata['incomplete'])
+			deferred = next(result for result in run.results if result['name'] == 'system-restore')
+			self.assertEqual(deferred['status'], 'skip')
+			self.assertIn('--restore-report', deferred['detail'])
 
 
 class BrowserTests(unittest.TestCase):

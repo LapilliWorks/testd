@@ -730,16 +730,45 @@ def browser(run):
 		run.record('browser-results', status, str(report))
 
 
+def desktop_config_dir():
+	if SYSTEM == 'Windows':
+		appdata = os.environ.get('APPDATA')
+		if appdata:
+			return pathlib.Path(appdata) / 'testd'
+		profile = os.environ.get('USERPROFILE')
+		if not profile:
+			raise RuntimeError('USERPROFILE or APPDATA is required for the desktop suite')
+		return pathlib.Path(profile) / 'AppData/Roaming/testd'
+	home = os.environ.get('HOME')
+	if not home:
+		raise RuntimeError('HOME is required for the desktop suite')
+	return pathlib.Path(home) / '.config/testd'
+
+
+def require_fresh_desktop_user():
+	config = desktop_config_dir()
+	try:
+		config.lstat()
+	except FileNotFoundError:
+		return
+	raise RuntimeError(f'existing testd user data at {config}; use a fresh disposable user and retain a backup')
+
+
 def desktop(run):
 	if not run.args.app:
 		raise RuntimeError('provide --app with the candidate .app, .AppImage, or NSIS installer')
 	if not sys.stdin.isatty():
 		raise RuntimeError('the desktop suite needs an interactive terminal; run it directly, '
 			'not through a pipe or with stdin redirected')
+	app = run.args.app.resolve()
+	if not app.exists():
+		raise RuntimeError(f'candidate app does not exist: {app}')
+	require_fresh_desktop_user()
+	if ask('Confirm this is a disposable host with a persisted full-system backup [y/N]: ') != 'y':
+		raise RuntimeError('desktop validation requires a disposable host and persisted full-system backup')
 	snapshot = system_snapshot(run, DESKTOP_TLD, interactive=True)
 	print('This suite requires a real desktop session and actual interaction. '
-		'Integration installed while it runs is restored afterwards.', flush=True)
-	app = run.args.app.resolve()
+		'The scoped integration snapshot is restored after the candidate is stopped.', flush=True)
 	command = ['open', str(app)] if SYSTEM == 'Darwin' else [str(app)]
 	app_log = run.log_path('desktop-app')
 	app_process = None
@@ -781,7 +810,18 @@ def desktop(run):
 				app_process.wait(timeout=5)
 			except subprocess.TimeoutExpired:
 				app_process.kill()
-		system_restore(run, snapshot, DESKTOP_TLD, interactive=True)
+				app_process.wait(timeout=5)
+		try:
+			stopped = ask('Confirm all candidate apps, daemons, and providers are stopped before restore [y/N]: ') == 'y'
+		except (KeyboardInterrupt, RuntimeError):
+			run.metadata['incomplete'] = True
+			run.record('system-restore', 'skip', f'shutdown not confirmed; stop processes and use --restore-report {run.output}')
+			raise
+		if stopped:
+			system_restore(run, snapshot, DESKTOP_TLD, interactive=True)
+		else:
+			run.metadata['incomplete'] = True
+			run.record('system-restore', 'skip', f'shutdown not confirmed; stop processes and use --restore-report {run.output}')
 
 
 def ask(prompt):
