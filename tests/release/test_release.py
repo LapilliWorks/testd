@@ -690,6 +690,34 @@ class HostSystemTests(unittest.TestCase):
 				self.assertEqual(command.call_args.kwargs['terminal'], system)
 
 
+class DesktopRunnerTests(unittest.TestCase):
+	def test_desktop_domain_matches_the_product_tld(self):
+		config = (ROOT / 'crates/testd-core/src/config.rs').read_text(encoding='utf-8')
+		match = re.search(r'pub const TLD: &str = "([^"]+)";', config)
+		self.assertIsNotNone(match)
+		self.assertEqual(runner.DESKTOP_TLD, match.group(1))
+
+	def test_desktop_snapshots_the_wizard_domain_and_clears_the_test_override(self):
+		with tempfile.TemporaryDirectory() as directory:
+			args = SimpleNamespace(report=pathlib.Path(directory) / 'report', suite='desktop', app=pathlib.Path('candidate'))
+			with redirect_stdout(io.StringIO()):
+				run = runner.Run(args)
+			backup = pathlib.Path(directory) / 'system-before'
+			terminal = Mock()
+			terminal.isatty.return_value = True
+			with patch.object(runner, 'SYSTEM', 'Windows'), patch.object(runner, 'HOST_TLD', 'testdcheck'), \
+				patch.dict(os.environ, {'TESTD_HOST_TLD': 'different'}), patch.object(runner.sys, 'stdin', terminal), \
+				patch.object(runner, 'system_snapshot', return_value=backup) as snapshot, \
+				patch.object(runner, 'system_restore') as restore, patch.object(runner.subprocess, 'Popen') as launch, \
+				patch.object(runner, 'checklist_items', return_value=['fixture']), patch.object(runner, 'ask', return_value='q'), \
+				redirect_stdout(io.StringIO()):
+				runner.desktop(run)
+			snapshot.assert_called_once_with(run, 'test', interactive=True)
+			restore.assert_called_once_with(run, backup, 'test', interactive=True)
+			self.assertNotIn('TESTD_HOST_TLD', launch.call_args.kwargs['env'])
+			self.assertTrue(run.metadata['incomplete'])
+
+
 class BrowserTests(unittest.TestCase):
 	def create_run(self, directory, tld='test'):
 		args = SimpleNamespace(report=pathlib.Path(directory) / 'report', suite='browser', tld=tld,

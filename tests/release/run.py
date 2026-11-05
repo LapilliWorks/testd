@@ -35,6 +35,8 @@ SYSTEM = platform.system()
 ENCODING = 'utf-8'
 # Throwaway TLD for the host suite, so it never collides with a real .test setup.
 HOST_TLD = os.environ.get('TESTD_HOST_TLD', 'testdcheck')
+# The desktop setup wizard always configures the product TLD.
+DESKTOP_TLD = 'test'
 
 
 def require(tool):
@@ -734,7 +736,7 @@ def desktop(run):
 	if not sys.stdin.isatty():
 		raise RuntimeError('the desktop suite needs an interactive terminal; run it directly, '
 			'not through a pipe or with stdin redirected')
-	snapshot = system_snapshot(run, HOST_TLD, interactive=True)
+	snapshot = system_snapshot(run, DESKTOP_TLD, interactive=True)
 	print('This suite requires a real desktop session and actual interaction. '
 		'Integration installed while it runs is restored afterwards.', flush=True)
 	app = run.args.app.resolve()
@@ -745,8 +747,10 @@ def desktop(run):
 		# The app must not inherit the checklist's stdin. Its daemon logs belong
 		# in the report, not on top of the next prompt.
 		with app_log.open('xb') as sink:
+			env = dict(os.environ)
+			env.pop('TESTD_HOST_TLD', None)
 			app_process = subprocess.Popen(
-				command, stdin=subprocess.DEVNULL, stdout=sink, stderr=subprocess.STDOUT)
+				command, stdin=subprocess.DEVNULL, stdout=sink, stderr=subprocess.STDOUT, env=env)
 		print(f'Candidate app output: {app_log}', flush=True)
 		if SYSTEM == 'Linux':
 			time.sleep(1.5)
@@ -777,7 +781,7 @@ def desktop(run):
 				app_process.wait(timeout=5)
 			except subprocess.TimeoutExpired:
 				app_process.kill()
-		system_restore(run, snapshot, HOST_TLD, interactive=True)
+		system_restore(run, snapshot, DESKTOP_TLD, interactive=True)
 
 
 def ask(prompt):
