@@ -6,6 +6,9 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
 
+#[cfg(target_os = "linux")]
+mod ownership;
+
 /// Spawn a child without popping a console window from a windowless parent.
 ///
 /// A console child of a GUI process gets a new console window unless
@@ -922,22 +925,43 @@ fn trust_layout() -> TrustLayout<'static> {
 
 #[cfg(target_os = "linux")]
 const TRUST_ANCHOR_CONFLICT: i32 = 17;
+#[cfg(target_os = "linux")]
+const TRUST_OWNERSHIP_UNRECORDED: i32 = 18;
+
+#[cfg(target_os = "linux")]
+fn trust_owner_marker(layout: &TrustLayout<'_>) -> std::path::PathBuf {
+	std::path::PathBuf::from(format!("{}.owner", layout.anchor))
+}
 
 #[cfg(target_os = "linux")]
 fn trust_install_script(layout: &TrustLayout<'_>) -> String {
 	let directory = shell_quote(layout.directory);
 	let anchor = shell_quote(layout.anchor);
+	let marker = shell_quote(&trust_owner_marker(layout).to_string_lossy());
 	let template = shell_quote(&format!("{}/.testd-root.XXXXXX", layout.directory));
+	let owner_template = shell_quote(&format!("{}/.testd-owner.XXXXXX", layout.directory));
 	let reload = layout.reload;
-	// Link a root-owned temporary file without replacing an existing anchor,
-	// including one that appeared while authorization was in progress.
+	// Record ownership only after exclusively linking the new anchor. The ID is
+	// passed on stdin rather than exposing it in the privileged command line.
 	format!(
-		"mkdir -p {directory} || exit 1\n\
+		"PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH\n\
+		IFS= read -r owner || exit 1\n\
+		[ -n \"$owner\" ] || exit 1\n\
+		mkdir -p {directory} || exit 1\n\
 		temporary=$(mktemp {template}) || exit 1\n\
 		trap 'rm -f -- \"$temporary\"' EXIT\n\
+		owner_temporary=$(mktemp {owner_template}) || exit 1\n\
+		trap 'rm -f -- \"$temporary\" \"$owner_temporary\"' EXIT\n\
 		cat > \"$temporary\" || exit 1\n\
 		chmod 0644 \"$temporary\" || exit 1\n\
+		owner_hash=$(printf '%s' \"$owner\" | sha256sum) || exit 1\n\
+		owner_hash=${{owner_hash%% *}}\n\
+		fingerprint=$(stat -c '%d:%i:%u:%g:%a' -- \"$temporary\") || exit 1\n\
+		printf '%s\\n%s\\n' \"$owner_hash\" \"$fingerprint\" > \"$owner_temporary\" || exit 1\n\
+		chmod 0600 \"$owner_temporary\" || exit 1\n\
+		if [ -e {marker} ] || [ -L {marker} ]; then exit {TRUST_ANCHOR_CONFLICT}; fi\n\
 		if ln -T -- \"$temporary\" {anchor} 2>/dev/null; then\n\
+		  ln -T -- \"$owner_temporary\" {marker} 2>/dev/null || exit {TRUST_OWNERSHIP_UNRECORDED}\n\
 		  {reload} || exit 1\n\
 		elif [ -e {anchor} ] || [ -L {anchor} ]; then\n\
 		  exit {TRUST_ANCHOR_CONFLICT}\n\
@@ -951,8 +975,33 @@ fn trust_install_script(layout: &TrustLayout<'_>) -> String {
 fn trust_anchor_conflict(path: &Path) -> io::Error {
 	io::Error::new(
 		io::ErrorKind::AlreadyExists,
-		format!("{} contains different or unverified trust; testd did not overwrite it", path.display()),
+		format!(
+			"{} or its ownership record conflicts with the requested trust; testd did not overwrite it",
+			path.display()
+		),
 	)
+}
+
+#[cfg(target_os = "linux")]
+fn trust_ownership_conflict(path: &Path) -> io::Error {
+	io::Error::new(
+		io::ErrorKind::AlreadyExists,
+		format!("{} is unowned by this installation or has changed; trust was not removed", path.display()),
+	)
+}
+
+#[cfg(target_os = "linux")]
+fn system_entry_present(path: &Path) -> io::Result<bool> {
+	match std::fs::symlink_metadata(path) {
+		Ok(_) => Ok(true),
+		Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+		Err(error) => Err(error),
+	}
+}
+
+#[cfg(target_os = "linux")]
+fn owned_trust_input(owner: &ownership::InstallationId, cert_pem: &str) -> Vec<u8> {
+	format!("{}\n{cert_pem}", owner.as_str()).into_bytes()
 }
 
 #[cfg(target_os = "linux")]
@@ -988,9 +1037,44 @@ fn run_with_stdin(mut command: std::process::Command, input: &[u8]) -> io::Resul
 }
 
 #[cfg(target_os = "linux")]
-fn trust_remove_script() -> String {
-	let layout = trust_layout();
-	format!("rm -f '{}' && {}", layout.anchor, layout.reload)
+fn trust_remove_script(layout: &TrustLayout<'_>) -> String {
+	let anchor = shell_quote(layout.anchor);
+	let marker = shell_quote(&trust_owner_marker(layout).to_string_lossy());
+	let template = shell_quote(&format!("{}/.testd-remove.XXXXXX", layout.directory));
+	let reload = layout.reload;
+	format!(
+		"PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH\n\
+		IFS= read -r owner || exit 1\n\
+		[ -n \"$owner\" ] || exit 1\n\
+		temporary=$(mktemp {template}) || exit 1\n\
+		trap 'rm -f -- \"$temporary\"' EXIT\n\
+		cat > \"$temporary\" || exit 1\n\
+		if [ ! -e {marker} ] && [ ! -L {marker} ]; then\n\
+		  if [ -e {anchor} ] || [ -L {anchor} ]; then exit {TRUST_ANCHOR_CONFLICT}; fi\n\
+		  exit 0\n\
+		fi\n\
+		[ -f {marker} ] && [ ! -L {marker} ] || exit {TRUST_ANCHOR_CONFLICT}\n\
+		marker_access=$(stat -c '%u:%a' -- {marker}) || exit {TRUST_ANCHOR_CONFLICT}\n\
+		[ \"$marker_access\" = \"$(id -u):600\" ] || exit {TRUST_ANCHOR_CONFLICT}\n\
+		{{\n\
+		  IFS= read -r recorded_owner_hash || exit {TRUST_ANCHOR_CONFLICT}\n\
+		  IFS= read -r recorded_fingerprint || exit {TRUST_ANCHOR_CONFLICT}\n\
+		  unexpected=\n\
+		  if IFS= read -r unexpected || [ -n \"$unexpected\" ]; then exit {TRUST_ANCHOR_CONFLICT}; fi\n\
+		}} < {marker}\n\
+		owner_hash=$(printf '%s' \"$owner\" | sha256sum) || exit 1\n\
+		owner_hash=${{owner_hash%% *}}\n\
+		[ \"$owner_hash\" = \"$recorded_owner_hash\" ] || exit {TRUST_ANCHOR_CONFLICT}\n\
+		if [ -e {anchor} ] || [ -L {anchor} ]; then\n\
+		  [ -f {anchor} ] && [ ! -L {anchor} ] || exit {TRUST_ANCHOR_CONFLICT}\n\
+		  fingerprint=$(stat -c '%d:%i:%u:%g:%a' -- {anchor}) || exit {TRUST_ANCHOR_CONFLICT}\n\
+		  [ \"$fingerprint\" = \"$recorded_fingerprint\" ] || exit {TRUST_ANCHOR_CONFLICT}\n\
+		  cmp -s -- \"$temporary\" {anchor} || exit {TRUST_ANCHOR_CONFLICT}\n\
+		  rm -- {anchor} || exit 1\n\
+		fi\n\
+		{reload} || exit 1\n\
+		rm -- {marker} || exit 1"
+	)
 }
 
 #[cfg(target_os = "linux")]
@@ -1140,6 +1224,7 @@ fn trust_root_linux(cert_pem: &str, elevation: Elevation) -> io::Result<()> {
 	if existing_linux_anchor(anchor, cert_pem)? {
 		return Ok(());
 	}
+	let owner = ownership::InstallationId::load_or_create()?;
 	let script = trust_install_script(&layout);
 	let program = match elevation {
 		Elevation::Sudo => "sudo",
@@ -1147,10 +1232,14 @@ fn trust_root_linux(cert_pem: &str, elevation: Elevation) -> io::Result<()> {
 	};
 	let mut command = silent_command(program);
 	command.args(["sh", "-c", &script]);
-	let status = run_with_stdin(command, cert_pem.as_bytes())?;
+	let status = run_with_stdin(command, &owned_trust_input(&owner, cert_pem))?;
 	match status.code() {
 		Some(0) => Ok(()),
 		Some(TRUST_ANCHOR_CONFLICT) => Err(trust_anchor_conflict(anchor)),
+		Some(TRUST_OWNERSHIP_UNRECORDED) => Err(io::Error::other(format!(
+			"{} was created but ownership could not be recorded; inspect the file before retrying",
+			anchor.display()
+		))),
 		_ => Err(io::Error::other("root CA install or trust-store update failed")),
 	}
 }
@@ -1204,7 +1293,7 @@ pub fn untrust_root(cert_pem: &str) -> io::Result<()> {
 	require_root_certificate(cert_pem)?;
 
 	#[cfg(target_os = "linux")]
-	return untrust_root_linux();
+	return untrust_root_linux(cert_pem, Elevation::Sudo);
 
 	#[cfg(target_os = "macos")]
 	return untrust_root_macos();
@@ -1222,15 +1311,7 @@ pub fn untrust_root_gui(cert_pem: &str) -> io::Result<()> {
 
 	#[cfg(target_os = "linux")]
 	{
-		let script = trust_remove_script();
-		let status = silent_command("pkexec").args(["sh", "-c", &script]).status()?;
-		if !status.success() {
-			return Err(io::Error::new(
-				io::ErrorKind::PermissionDenied,
-				"root CA removal failed (cancelled or auth error)",
-			));
-		}
-		Ok(())
+		untrust_root_linux(cert_pem, Elevation::Gui)
 	}
 	#[cfg(target_os = "macos")]
 	{
@@ -1259,13 +1340,33 @@ pub fn untrust_root_gui(cert_pem: &str) -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn untrust_root_linux() -> io::Result<()> {
-	let script = trust_remove_script();
-	let status = silent_command("sudo").args(["sh", "-c", &script]).status()?;
-	if !status.success() {
-		return Err(io::Error::new(io::ErrorKind::PermissionDenied, "root CA removal failed"));
+fn untrust_root_linux(cert_pem: &str, elevation: Elevation) -> io::Result<()> {
+	single_anchor_der(cert_pem)?;
+	let layout = trust_layout();
+	let anchor = Path::new(layout.anchor);
+	let marker = trust_owner_marker(&layout);
+	let has_anchor = system_entry_present(anchor)?;
+	let has_marker = system_entry_present(&marker)?;
+	if !has_anchor && !has_marker {
+		return Ok(());
 	}
-	Ok(())
+	if !has_marker {
+		return Err(trust_ownership_conflict(anchor));
+	}
+	let owner = ownership::InstallationId::load()?.ok_or_else(|| trust_ownership_conflict(anchor))?;
+	let script = trust_remove_script(&layout);
+	let program = match elevation {
+		Elevation::Sudo => "sudo",
+		Elevation::Gui => "pkexec",
+	};
+	let mut command = silent_command(program);
+	command.args(["sh", "-c", &script]);
+	let status = run_with_stdin(command, &owned_trust_input(&owner, cert_pem))?;
+	match status.code() {
+		Some(0) => Ok(()),
+		Some(TRUST_ANCHOR_CONFLICT) => Err(trust_ownership_conflict(anchor)),
+		_ => Err(io::Error::other("root CA removal or trust-store update failed")),
+	}
 }
 
 #[cfg(target_os = "macos")]
@@ -1402,7 +1503,26 @@ mod trust_tests {
 	}
 
 	#[cfg(target_os = "linux")]
+	fn trust_install_fixture_script(anchor: &Path) -> String {
+		let layout = TrustLayout {
+			directory: anchor.parent().unwrap().to_str().unwrap(),
+			anchor: anchor.to_str().unwrap(),
+			reload: "printf '%s\\n' reloaded >> \"$TESTD_TRUST_LOG\"",
+		};
+		trust_install_script(&layout)
+	}
+
+	#[cfg(target_os = "linux")]
 	fn trust_install_fixture(anchor: &Path, reload_log: &Path) -> std::process::Command {
+		let mut command = std::process::Command::new("sh");
+		command
+			.args(["-c", &trust_install_fixture_script(anchor)])
+			.env("TESTD_TRUST_LOG", reload_log);
+		command
+	}
+
+	#[cfg(target_os = "linux")]
+	fn trust_remove_fixture(anchor: &Path, reload_log: &Path) -> std::process::Command {
 		let layout = TrustLayout {
 			directory: anchor.parent().unwrap().to_str().unwrap(),
 			anchor: anchor.to_str().unwrap(),
@@ -1410,9 +1530,156 @@ mod trust_tests {
 		};
 		let mut command = std::process::Command::new("sh");
 		command
-			.args(["-c", &trust_install_script(&layout)])
+			.args(["-c", &trust_remove_script(&layout)])
 			.env("TESTD_TRUST_LOG", reload_log);
 		command
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn trust_removal_does_not_adopt_a_compatible_existing_anchor() {
+		let fixture = tempfile::tempdir().unwrap();
+		let anchor = fixture.path().join("testd-root.crt");
+		std::fs::write(&anchor, "testd certificate").unwrap();
+		let reload_log = fixture.path().join("reload.log");
+		let status =
+			run_with_stdin(trust_remove_fixture(&anchor, &reload_log), b"installation-a\ntestd certificate").unwrap();
+		assert!(!status.success(), "an unowned anchor must be reported");
+		assert_eq!(std::fs::read_to_string(anchor).unwrap(), "testd certificate");
+		assert!(!reload_log.exists());
+	}
+
+	#[cfg(target_os = "linux")]
+	fn install_owned_anchor(anchor: &Path) {
+		let log = anchor.parent().unwrap().join("install.log");
+		let status = run_with_stdin(trust_install_fixture(anchor, &log), b"installation-a\ntestd certificate").unwrap();
+		assert!(status.success());
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn owned_trust_can_be_removed_and_removal_is_repeatable() {
+		let fixture = tempfile::tempdir().unwrap();
+		let anchor = fixture.path().join("testd-root.crt");
+		let marker = fixture.path().join("testd-root.crt.owner");
+		install_owned_anchor(&anchor);
+		let log = fixture.path().join("remove.log");
+		for _ in 0..2 {
+			let status =
+				run_with_stdin(trust_remove_fixture(&anchor, &log), b"installation-a\ntestd certificate").unwrap();
+			assert!(status.success());
+		}
+		assert!(!anchor.exists());
+		assert!(!marker.exists());
+		assert_eq!(std::fs::read_to_string(log).unwrap(), "reloaded\n");
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn another_installation_cannot_remove_owned_trust() {
+		let fixture = tempfile::tempdir().unwrap();
+		let anchor = fixture.path().join("testd-root.crt");
+		let marker = fixture.path().join("testd-root.crt.owner");
+		install_owned_anchor(&anchor);
+		let record = std::fs::read(&marker).unwrap();
+		let log = fixture.path().join("remove.log");
+		let status = run_with_stdin(trust_remove_fixture(&anchor, &log), b"installation-b\ntestd certificate").unwrap();
+		assert_eq!(status.code(), Some(TRUST_ANCHOR_CONFLICT));
+		assert_eq!(std::fs::read_to_string(anchor).unwrap(), "testd certificate");
+		assert_eq!(std::fs::read(marker).unwrap(), record);
+		assert!(!log.exists());
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn trust_removal_preserves_changed_anchors() {
+		use std::os::unix::fs::{PermissionsExt, symlink};
+
+		for change in ["content", "replacement", "permissions", "symlink"] {
+			let fixture = tempfile::tempdir().unwrap();
+			let anchor = fixture.path().join("testd-root.crt");
+			let marker = fixture.path().join("testd-root.crt.owner");
+			let original = fixture.path().join("original.crt");
+			install_owned_anchor(&anchor);
+			let record = std::fs::read(&marker).unwrap();
+			match change {
+				"content" => std::fs::write(&anchor, "changed certificate").unwrap(),
+				"replacement" => {
+					std::fs::rename(&anchor, &original).unwrap();
+					std::fs::write(&anchor, "testd certificate").unwrap();
+				},
+				"permissions" => std::fs::set_permissions(&anchor, std::fs::Permissions::from_mode(0o600)).unwrap(),
+				"symlink" => {
+					std::fs::rename(&anchor, &original).unwrap();
+					symlink(&original, &anchor).unwrap();
+				},
+				_ => unreachable!(),
+			}
+			let before = std::fs::read(&anchor).unwrap();
+			let log = fixture.path().join("remove.log");
+			let status =
+				run_with_stdin(trust_remove_fixture(&anchor, &log), b"installation-a\ntestd certificate").unwrap();
+			assert_eq!(status.code(), Some(TRUST_ANCHOR_CONFLICT), "{change}");
+			assert_eq!(std::fs::read(&anchor).unwrap(), before, "{change}");
+			assert_eq!(std::fs::read(&marker).unwrap(), record, "{change}");
+			assert!(!log.exists(), "{change}");
+		}
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn trust_removal_preserves_changed_ownership_records() {
+		use std::os::unix::fs::{PermissionsExt, symlink};
+
+		for change in ["contents", "permissions", "symlink"] {
+			let fixture = tempfile::tempdir().unwrap();
+			let anchor = fixture.path().join("testd-root.crt");
+			let marker = fixture.path().join("testd-root.crt.owner");
+			install_owned_anchor(&anchor);
+			match change {
+				"contents" => std::fs::write(&marker, "another owner\nchanged\n").unwrap(),
+				"permissions" => std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o644)).unwrap(),
+				"symlink" => {
+					let original = fixture.path().join("original.owner");
+					std::fs::rename(&marker, &original).unwrap();
+					symlink(original, &marker).unwrap();
+				},
+				_ => unreachable!(),
+			}
+			let before = std::fs::read(&marker).unwrap();
+			let log = fixture.path().join("remove.log");
+			let status =
+				run_with_stdin(trust_remove_fixture(&anchor, &log), b"installation-a\ntestd certificate").unwrap();
+			assert_eq!(status.code(), Some(TRUST_ANCHOR_CONFLICT), "{change}");
+			assert_eq!(std::fs::read_to_string(&anchor).unwrap(), "testd certificate", "{change}");
+			assert_eq!(std::fs::read(&marker).unwrap(), before, "{change}");
+			assert!(!log.exists(), "{change}");
+		}
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn trust_removal_retries_a_failed_store_update() {
+		let fixture = tempfile::tempdir().unwrap();
+		let anchor = fixture.path().join("testd-root.crt");
+		let marker = fixture.path().join("testd-root.crt.owner");
+		install_owned_anchor(&anchor);
+		let layout = TrustLayout {
+			directory: fixture.path().to_str().unwrap(),
+			anchor: anchor.to_str().unwrap(),
+			reload: "sh -c 'exit 1'",
+		};
+		let mut command = std::process::Command::new("sh");
+		command.args(["-c", &trust_remove_script(&layout)]);
+		let status = run_with_stdin(command, b"installation-a\ntestd certificate").unwrap();
+		assert!(!status.success());
+		assert!(!anchor.exists());
+		assert!(marker.exists());
+		let log = fixture.path().join("remove.log");
+		let status = run_with_stdin(trust_remove_fixture(&anchor, &log), b"installation-a\ntestd certificate").unwrap();
+		assert!(status.success());
+		assert!(!marker.exists());
+		assert_eq!(std::fs::read_to_string(log).unwrap(), "reloaded\n");
 	}
 
 	#[cfg(target_os = "linux")]
@@ -1423,7 +1690,8 @@ mod trust_tests {
 		std::fs::create_dir_all(anchor.parent().unwrap()).unwrap();
 		std::fs::write(&anchor, "foreign certificate").unwrap();
 		let reload_log = fixture.path().join("reload.log");
-		let status = run_with_stdin(trust_install_fixture(&anchor, &reload_log), b"testd certificate").unwrap();
+		let status =
+			run_with_stdin(trust_install_fixture(&anchor, &reload_log), b"installation-a\ntestd certificate").unwrap();
 		assert!(!status.success(), "a conflicting anchor must be reported");
 		assert_eq!(std::fs::read_to_string(&anchor).unwrap(), "foreign certificate");
 		assert!(!reload_log.exists(), "trust must not be reloaded after a conflict");
@@ -1437,12 +1705,18 @@ mod trust_tests {
 		let fixture = tempfile::tempdir().unwrap();
 		let anchor = fixture.path().join("anchors ' local/testd-root.crt");
 		let reload_log = fixture.path().join("reload.log");
-		let status = run_with_stdin(trust_install_fixture(&anchor, &reload_log), b"testd certificate").unwrap();
+		let status =
+			run_with_stdin(trust_install_fixture(&anchor, &reload_log), b"installation-a\ntestd certificate").unwrap();
 		assert!(status.success());
 		assert_eq!(std::fs::read_to_string(&anchor).unwrap(), "testd certificate");
 		assert_eq!(std::fs::metadata(&anchor).unwrap().permissions().mode() & 0o777, 0o644);
+		let marker = anchor.with_file_name("testd-root.crt.owner");
+		let record = std::fs::read_to_string(&marker).unwrap();
+		assert_eq!(record.lines().next().unwrap().len(), 64);
+		assert!(!record.contains("installation-a"));
+		assert_eq!(std::fs::metadata(marker).unwrap().permissions().mode() & 0o777, 0o600);
 		assert_eq!(std::fs::read_to_string(reload_log).unwrap(), "reloaded\n");
-		assert_eq!(std::fs::read_dir(anchor.parent().unwrap()).unwrap().count(), 1);
+		assert_eq!(std::fs::read_dir(anchor.parent().unwrap()).unwrap().count(), 2);
 	}
 
 	#[cfg(target_os = "linux")]
@@ -1472,7 +1746,8 @@ mod trust_tests {
 		let target = fixture.path().join("missing.crt");
 		symlink(&target, &anchor).unwrap();
 		let reload_log = fixture.path().join("reload.log");
-		let status = run_with_stdin(trust_install_fixture(&anchor, &reload_log), b"testd certificate").unwrap();
+		let status =
+			run_with_stdin(trust_install_fixture(&anchor, &reload_log), b"installation-a\ntestd certificate").unwrap();
 		assert_eq!(status.code(), Some(TRUST_ANCHOR_CONFLICT));
 		assert_eq!(std::fs::read_link(&anchor).unwrap(), target);
 		assert!(!target.exists());
@@ -1486,7 +1761,8 @@ mod trust_tests {
 		let anchor = fixture.path().join("testd-root.crt");
 		std::fs::create_dir(&anchor).unwrap();
 		let reload_log = fixture.path().join("reload.log");
-		let status = run_with_stdin(trust_install_fixture(&anchor, &reload_log), b"testd certificate").unwrap();
+		let status =
+			run_with_stdin(trust_install_fixture(&anchor, &reload_log), b"installation-a\ntestd certificate").unwrap();
 		assert_eq!(status.code(), Some(TRUST_ANCHOR_CONFLICT));
 		assert_eq!(std::fs::read_dir(anchor).unwrap().count(), 0);
 		assert!(!reload_log.exists());
@@ -1513,17 +1789,71 @@ mod trust_tests {
 			)
 			.unwrap();
 			std::fs::set_permissions(&link, std::fs::Permissions::from_mode(0o700)).unwrap();
-			let path = std::env::join_paths(
-				std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())),
-			)
-			.unwrap();
-			let mut command = trust_install_fixture(&anchor, &reload_log);
-			command.env("PATH", path).env("TESTD_RACE_CERTIFICATE", existing);
-			let status = run_with_stdin(command, b"testd certificate").unwrap();
+			let script = trust_install_fixture_script(&anchor)
+				.replace("ln -T --", &format!("{} -T --", shell_quote(&link.to_string_lossy())));
+			let mut command = std::process::Command::new("sh");
+			command
+				.args(["-c", &script])
+				.env("TESTD_TRUST_LOG", &reload_log)
+				.env("TESTD_RACE_CERTIFICATE", existing);
+			let status = run_with_stdin(command, b"installation-a\ntestd certificate").unwrap();
 			assert_eq!(status.code(), Some(TRUST_ANCHOR_CONFLICT));
 			assert_eq!(std::fs::read_to_string(anchor).unwrap(), existing);
 			assert!(!reload_log.exists());
 		}
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn trust_install_preserves_a_preexisting_ownership_record() {
+		let fixture = tempfile::tempdir().unwrap();
+		let anchor = fixture.path().join("testd-root.crt");
+		let marker = fixture.path().join("testd-root.crt.owner");
+		std::fs::write(&marker, "another installation").unwrap();
+		let log = fixture.path().join("reload.log");
+		let status =
+			run_with_stdin(trust_install_fixture(&anchor, &log), b"installation-a\ntestd certificate").unwrap();
+		assert_eq!(status.code(), Some(TRUST_ANCHOR_CONFLICT));
+		assert!(!anchor.exists());
+		assert_eq!(std::fs::read_to_string(marker).unwrap(), "another installation");
+		assert!(!log.exists());
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn trust_install_preserves_an_ownership_record_created_during_authorization() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let fixture = tempfile::tempdir().unwrap();
+		let anchor = fixture.path().join("testd-root.crt");
+		let marker = fixture.path().join("testd-root.crt.owner");
+		let log = fixture.path().join("reload.log");
+		let link = fixture.path().join("fake-ln");
+		std::fs::write(
+			&link,
+			"#!/bin/sh\n\
+			for argument do target=$argument; done\n\
+			case \"$target\" in\n\
+			  *.owner) printf '%s' foreign > \"$target\"; exit 1 ;;\n\
+			  *) exec /usr/bin/ln \"$@\" ;;\n\
+			esac\n",
+		)
+		.unwrap();
+		std::fs::set_permissions(&link, std::fs::Permissions::from_mode(0o700)).unwrap();
+		let script = trust_install_fixture_script(&anchor)
+			.replace("ln -T --", &format!("{} -T --", shell_quote(&link.to_string_lossy())));
+		let mut command = std::process::Command::new("sh");
+		command.args(["-c", &script]).env("TESTD_TRUST_LOG", &log);
+		let status = run_with_stdin(command, b"installation-a\ntestd certificate").unwrap();
+		assert_eq!(status.code(), Some(TRUST_OWNERSHIP_UNRECORDED));
+		assert_eq!(std::fs::read_to_string(&anchor).unwrap(), "testd certificate");
+		assert_eq!(std::fs::read_to_string(&marker).unwrap(), "foreign");
+		assert!(!log.exists());
+		let removal =
+			run_with_stdin(trust_remove_fixture(&anchor, &log), b"installation-a\ntestd certificate").unwrap();
+		assert_eq!(removal.code(), Some(TRUST_ANCHOR_CONFLICT));
+		assert_eq!(std::fs::read_to_string(anchor).unwrap(), "testd certificate");
+		assert_eq!(std::fs::read_to_string(marker).unwrap(), "foreign");
 	}
 
 	#[cfg(target_os = "linux")]
@@ -1538,9 +1868,10 @@ mod trust_tests {
 		};
 		let mut command = std::process::Command::new("sh");
 		command.args(["-c", &trust_install_script(&layout)]);
-		let status = run_with_stdin(command, b"testd certificate").unwrap();
+		let status = run_with_stdin(command, b"installation-a\ntestd certificate").unwrap();
 		assert_eq!(status.code(), Some(1), "an update failure is not an anchor conflict");
-		assert_eq!(std::fs::read_to_string(anchor).unwrap(), "testd certificate");
+		assert_eq!(std::fs::read_to_string(&anchor).unwrap(), "testd certificate");
+		assert!(anchor.with_file_name("testd-root.crt.owner").exists());
 	}
 
 	#[cfg(target_os = "linux")]

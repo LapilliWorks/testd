@@ -378,6 +378,7 @@ class SystemStateTests(unittest.TestCase):
 		for item in artifacts[:2]:
 			self.assertIn(item['path'], setup)
 		self.assertEqual(artifacts[2]['path'], artifacts[1]['path'] + '.owner')
+		self.assertIn('format!("{}.owner", layout.anchor)', setup)
 		macos = state.files(FakeHost('Darwin', 'testdcheck'))[0]['path']
 		self.assertIn(macos.rsplit('/', 1)[0], setup)
 		windows = (ROOT / 'tests/release/windows-system-state.ps1').read_text()

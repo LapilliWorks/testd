@@ -274,3 +274,5 @@ testd uninstall --keep-certificate
 ```
 
 `uninstall` removes the OS resolver route and the trusted root. `--purge` also deletes `~/.config/testd`, including the PKI, tokens, and local state, but only after system cleanup succeeds. `--keep-resolver` and `--keep-certificate` preserve either system change. If the local root certificate is missing, testd skips trust removal and reports incomplete cleanup; restore the certificate before retrying or use `--keep-certificate` to retain trust intentionally.
+
+On Linux, testd leaves an unowned or changed trust anchor in place. Purging with `--keep-certificate` deletes `system-ownership-id` and `pki/root.crt`; back them up first if testd should remove its owned anchor later.
