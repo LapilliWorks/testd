@@ -284,7 +284,8 @@ def core(run):
 	run.command('rust-tests', command, 1200)
 	run.command('release-script-tests', [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests/release'])
 	if shutil.which('bun'):
-		run.command('browser-fixture-tests', ['bun', 'test', 'tests/release/browser.test.ts'])
+		fixture = ROOT / 'tests/release/browser.test.ts'
+		run.command('browser-fixture-tests', ['bun', 'test', str(fixture)])
 	elif run.args.strict:
 		raise RuntimeError('please install Bun to test the browser fixtures')
 	else:

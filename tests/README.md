@@ -39,8 +39,10 @@ cargo +stable fmt --all -- --check
 cargo +stable clippy --workspace --all-targets --exclude testd-gui --locked -- -D warnings
 cargo +1.89.0 nextest run --workspace --exclude testd-gui --locked
 python3 -m unittest discover -s tests/release -p test_release.py
-bun test tests/release/browser.test.ts
+bun test "$(pwd)/tests/release/browser.test.ts"
 ```
+
+Use an absolute fixture path: Bun treats a relative path as a search pattern and can otherwise run matching tests from nested worktrees or build snapshots. On Windows PowerShell, use `bun test "$PWD\tests\release\browser.test.ts"`.
 
 The GUI requires its platform build prerequisites and separate Rust 1.90 checks. Run the full dependency policy against the selected release scope; a non-GUI or CI-scoped pass does not clear a GUI-only advisory. The cross-language browser-report fixture skips without Bun, and PowerShell parser and behavior fixtures skip when PowerShell is unavailable; a PowerShell fixture is not a Windows platform run.
 

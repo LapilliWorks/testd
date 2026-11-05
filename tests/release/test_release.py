@@ -66,6 +66,19 @@ class ReleaseTests(unittest.TestCase):
 				self.assertEqual(commands[name][1], f'+{version}.0')
 				self.assertIn(f"toolchain: '{version}.0'", workflow)
 
+	def test_release_core_uses_the_absolute_browser_fixture_path(self):
+		run = Mock(args=SimpleNamespace(gui=False, strict=True))
+		with patch.object(runner.shutil, 'which', return_value='installed'):
+			runner.core(run)
+		command = next(call.args[1] for call in run.command.call_args_list if call.args[0] == 'browser-fixture-tests')
+		self.assertEqual(command, ['bun', 'test', str(ROOT / 'tests/release/browser.test.ts')])
+
+	def test_ci_uses_the_absolute_browser_fixture_path(self):
+		workflow = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
+		test_job = workflow.split('\n  test:\n', 1)[1].split('\n  site:\n', 1)[0]
+		self.assertIn("str(pathlib.Path('tests/release/browser.test.ts').resolve())", test_job)
+		self.assertNotIn('bun test tests/release/browser.test.ts', test_job)
+
 	def test_release_core_runs_known_contracts_in_both_rust_test_modes(self):
 		for nextest in (True, False):
 			with self.subTest(nextest=nextest):
@@ -963,6 +976,21 @@ class BrowserTests(unittest.TestCase):
 		valid['origin'] = 'https://app.releasecheck.test:8443'
 		self.assertIsNone(runner.browser_report_error(valid, 'fixture-commit', 8443))
 		self.assertIsNotNone(runner.browser_report_error(None, 'fixture-commit', 443))
+
+	@unittest.skipUnless(shutil.which('bun'), 'Bun is not installed')
+	def test_absolute_fixture_path_excludes_nested_checkouts(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = pathlib.Path(directory)
+			for prefix, name in [(root, 'current checkout'), (root / 'worktrees/other', 'nested checkout')]:
+				path = prefix / 'tests/release/browser.test.ts'
+				path.parent.mkdir(parents=True)
+				path.write_text("import { test, expect } from 'bun:test';\n"
+					f"test('{name}', () => expect(true).toBe(true));\n", encoding='utf-8')
+			result = subprocess.run(['bun', 'test', str(root / 'tests/release/browser.test.ts')], cwd=root,
+				capture_output=True, text=True, timeout=15, check=True)
+			output = result.stdout + result.stderr
+			self.assertIn('current checkout', output)
+			self.assertNotIn('nested checkout', output)
 
 	@unittest.skipUnless(shutil.which('bun'), 'Bun is not installed')
 	def test_fixture_reports_match_the_release_runner_contract(self):

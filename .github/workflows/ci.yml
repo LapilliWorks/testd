@@ -64,7 +64,10 @@ jobs:
         run: cargo nextest run --workspace --locked --run-ignored all
       - run: python scripts/release.py verify-version
       - run: python -m unittest discover -s tests/release -p 'test_*.py'
-      - run: bun test tests/release/browser.test.ts
+      - run: >-
+          python -c "import pathlib, subprocess;
+          subprocess.run(['bun', 'test', str(pathlib.Path('tests/release/browser.test.ts').resolve())],
+          check=True, timeout=300)"
 
   site:
     name: site
