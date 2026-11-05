@@ -4337,6 +4337,7 @@ dependencies = [
  "base64 0.22.1",
  "covo",
  "sha1",
+ "tempfile",
  "testd-core",
  "x509-parser",
 ]

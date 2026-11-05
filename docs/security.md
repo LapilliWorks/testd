@@ -86,6 +86,8 @@ The testd root is a local certificate authority. Anything that trusts it accepts
 
 Installing the root on a browser machine is a real trust change. Remove it with `testd uninstall` when the machine no longer uses testd. Removing the desktop app does not remove the root or the resolver route.
 
+On Linux, setup reports a conflict rather than overwriting a different certificate at its system anchor path. Inspect and back up the existing file before making any changes.
+
 Firefox may use its own trust store and need a separate import. That is a browser configuration step, not an additional testd authority.
 
 ## Tunnels and exposure

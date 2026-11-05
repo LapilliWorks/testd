@@ -883,10 +883,10 @@ fn system_root_path() -> std::path::PathBuf {
 /// Where a distro keeps local CA anchors and how it rebuilds the trust bundle.
 #[cfg(target_os = "linux")]
 #[derive(Debug, PartialEq, Eq)]
-struct TrustLayout {
-	directory: &'static str,
-	anchor: &'static str,
-	reload: &'static str,
+struct TrustLayout<'a> {
+	directory: &'a str,
+	anchor: &'a str,
+	reload: &'a str,
 }
 
 /// Debian and Ubuntu ship `update-ca-certificates` and read anchors from the
@@ -894,7 +894,7 @@ struct TrustLayout {
 /// anchors. Pick by the tools that actually have to run, and keep the
 /// long-standing layout where neither is recognised.
 #[cfg(target_os = "linux")]
-fn trust_layout_for(has_update_ca_certificates: bool, has_fedora_anchors: bool) -> TrustLayout {
+fn trust_layout_for(has_update_ca_certificates: bool, has_fedora_anchors: bool) -> TrustLayout<'static> {
 	if has_fedora_anchors && !has_update_ca_certificates {
 		TrustLayout {
 			directory: "/etc/pki/ca-trust/source/anchors",
@@ -911,7 +911,7 @@ fn trust_layout_for(has_update_ca_certificates: bool, has_fedora_anchors: bool) 
 }
 
 #[cfg(target_os = "linux")]
-fn trust_layout() -> TrustLayout {
+fn trust_layout() -> TrustLayout<'static> {
 	let debian = ["/usr/sbin/update-ca-certificates", "/usr/bin/update-ca-certificates"]
 		.iter()
 		.any(|path| std::path::Path::new(path).exists());
@@ -921,11 +921,57 @@ fn trust_layout() -> TrustLayout {
 }
 
 #[cfg(target_os = "linux")]
-fn trust_install_script() -> String {
-	let layout = trust_layout();
-	// The certificate arrives on stdin, so there is no user-writable temp file
-	// for another process to replace between the check and the install.
-	format!("mkdir -p '{}' && cat > '{}' && {}", layout.directory, layout.anchor, layout.reload)
+const TRUST_ANCHOR_CONFLICT: i32 = 17;
+
+#[cfg(target_os = "linux")]
+fn trust_install_script(layout: &TrustLayout<'_>) -> String {
+	let directory = shell_quote(layout.directory);
+	let anchor = shell_quote(layout.anchor);
+	let template = shell_quote(&format!("{}/.testd-root.XXXXXX", layout.directory));
+	let reload = layout.reload;
+	// Link a root-owned temporary file without replacing an existing anchor,
+	// including one that appeared while authorization was in progress.
+	format!(
+		"mkdir -p {directory} || exit 1\n\
+		temporary=$(mktemp {template}) || exit 1\n\
+		trap 'rm -f -- \"$temporary\"' EXIT\n\
+		cat > \"$temporary\" || exit 1\n\
+		chmod 0644 \"$temporary\" || exit 1\n\
+		if ln -T -- \"$temporary\" {anchor} 2>/dev/null; then\n\
+		  {reload} || exit 1\n\
+		elif [ -e {anchor} ] || [ -L {anchor} ]; then\n\
+		  exit {TRUST_ANCHOR_CONFLICT}\n\
+		else\n\
+		  exit 1\n\
+		fi"
+	)
+}
+
+#[cfg(target_os = "linux")]
+fn trust_anchor_conflict(path: &Path) -> io::Error {
+	io::Error::new(
+		io::ErrorKind::AlreadyExists,
+		format!("{} contains different or unverified trust; testd did not overwrite it", path.display()),
+	)
+}
+
+#[cfg(target_os = "linux")]
+fn single_anchor_der(pem: &str) -> io::Result<Vec<u8>> {
+	if pem.matches("-----BEGIN CERTIFICATE-----").count() != 1 {
+		return Err(io::Error::new(io::ErrorKind::InvalidData, "expected one root certificate"));
+	}
+	pem_to_der(pem)
+}
+
+#[cfg(target_os = "linux")]
+fn existing_linux_anchor(path: &Path, cert_pem: &str) -> io::Result<bool> {
+	let expected = single_anchor_der(cert_pem)?;
+	match std::fs::read_to_string(path) {
+		Ok(installed) if single_anchor_der(&installed).is_ok_and(|der| der == expected) => Ok(true),
+		Ok(_) => Err(trust_anchor_conflict(path)),
+		Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+		Err(error) => Err(io::Error::new(error.kind(), format!("cannot inspect {}: {error}", path.display()))),
+	}
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -949,8 +995,7 @@ fn trust_remove_script() -> String {
 
 #[cfg(target_os = "linux")]
 fn is_root_trusted_linux(cert_pem: &str) -> bool {
-	let Ok(installed) = std::fs::read_to_string(system_root_path()) else { return false };
-	normalize_pem(&installed) == normalize_pem(cert_pem)
+	existing_linux_anchor(&system_root_path(), cert_pem).is_ok_and(|installed| installed)
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -1036,7 +1081,7 @@ fn compact_hex(value: &str) -> String {
 /// Install the testd root into the system trust store via `sudo`.
 pub fn trust_root(cert_pem: &str) -> io::Result<()> {
 	#[cfg(target_os = "linux")]
-	return trust_root_linux(cert_pem);
+	return trust_root_linux(cert_pem, Elevation::Sudo);
 
 	#[cfg(target_os = "macos")]
 	return trust_root_macos(cert_pem);
@@ -1052,17 +1097,7 @@ pub fn trust_root(cert_pem: &str) -> io::Result<()> {
 pub fn trust_root_gui(cert_pem: &str) -> io::Result<()> {
 	#[cfg(target_os = "linux")]
 	{
-		let script = trust_install_script();
-		let mut command = silent_command("pkexec");
-		command.args(["sh", "-c", &script]);
-		let status = run_with_stdin(command, cert_pem.as_bytes())?;
-		if !status.success() {
-			return Err(io::Error::new(
-				io::ErrorKind::PermissionDenied,
-				"root CA install failed (cancelled or auth error)",
-			));
-		}
-		Ok(())
+		trust_root_linux(cert_pem, Elevation::Gui)
 	}
 	#[cfg(target_os = "macos")]
 	{
@@ -1099,15 +1134,25 @@ pub fn trust_root_gui(cert_pem: &str) -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn trust_root_linux(cert_pem: &str) -> io::Result<()> {
-	let script = trust_install_script();
-	let mut command = silent_command("sudo");
+fn trust_root_linux(cert_pem: &str, elevation: Elevation) -> io::Result<()> {
+	let layout = trust_layout();
+	let anchor = Path::new(layout.anchor);
+	if existing_linux_anchor(anchor, cert_pem)? {
+		return Ok(());
+	}
+	let script = trust_install_script(&layout);
+	let program = match elevation {
+		Elevation::Sudo => "sudo",
+		Elevation::Gui => "pkexec",
+	};
+	let mut command = silent_command(program);
 	command.args(["sh", "-c", &script]);
 	let status = run_with_stdin(command, cert_pem.as_bytes())?;
-	if !status.success() {
-		return Err(io::Error::new(io::ErrorKind::PermissionDenied, "root CA install failed"));
+	match status.code() {
+		Some(0) => Ok(()),
+		Some(TRUST_ANCHOR_CONFLICT) => Err(trust_anchor_conflict(anchor)),
+		_ => Err(io::Error::other("root CA install or trust-store update failed")),
 	}
-	Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -1241,7 +1286,7 @@ fn untrust_root_windows(cert_pem: &str) -> io::Result<()> {
 }
 
 /// Decode the first CERTIFICATE block in a PEM document to DER.
-#[cfg(any(target_os = "windows", target_os = "macos", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
 fn pem_to_der(pem: &str) -> io::Result<Vec<u8>> {
 	use base64::Engine;
 	use base64::engine::general_purpose::STANDARD;
@@ -1342,7 +1387,7 @@ fn require_helper_success(status: std::process::ExitStatus) -> io::Result<()> {
 }
 
 /// Compare certificates ignoring line-ending and trailing-whitespace noise.
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
+#[cfg(any(target_os = "macos", test))]
 fn normalize_pem(pem: &str) -> String {
 	pem.lines().map(str::trim_end).collect::<Vec<_>>().join("\n")
 }
@@ -1354,6 +1399,148 @@ mod trust_tests {
 	#[test]
 	fn pem_normalization_ignores_line_endings() {
 		assert_eq!(normalize_pem("a\r\nb\r\n"), normalize_pem("a\nb\n"));
+	}
+
+	#[cfg(target_os = "linux")]
+	fn trust_install_fixture(anchor: &Path, reload_log: &Path) -> std::process::Command {
+		let layout = TrustLayout {
+			directory: anchor.parent().unwrap().to_str().unwrap(),
+			anchor: anchor.to_str().unwrap(),
+			reload: "printf '%s\\n' reloaded >> \"$TESTD_TRUST_LOG\"",
+		};
+		let mut command = std::process::Command::new("sh");
+		command
+			.args(["-c", &trust_install_script(&layout)])
+			.env("TESTD_TRUST_LOG", reload_log);
+		command
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn trust_install_does_not_replace_an_unrelated_anchor() {
+		let fixture = tempfile::tempdir().unwrap();
+		let anchor = fixture.path().join("anchors/testd-root.crt");
+		std::fs::create_dir_all(anchor.parent().unwrap()).unwrap();
+		std::fs::write(&anchor, "foreign certificate").unwrap();
+		let reload_log = fixture.path().join("reload.log");
+		let status = run_with_stdin(trust_install_fixture(&anchor, &reload_log), b"testd certificate").unwrap();
+		assert!(!status.success(), "a conflicting anchor must be reported");
+		assert_eq!(std::fs::read_to_string(&anchor).unwrap(), "foreign certificate");
+		assert!(!reload_log.exists(), "trust must not be reloaded after a conflict");
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn trust_install_creates_an_anchor_without_overwriting() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let fixture = tempfile::tempdir().unwrap();
+		let anchor = fixture.path().join("anchors ' local/testd-root.crt");
+		let reload_log = fixture.path().join("reload.log");
+		let status = run_with_stdin(trust_install_fixture(&anchor, &reload_log), b"testd certificate").unwrap();
+		assert!(status.success());
+		assert_eq!(std::fs::read_to_string(&anchor).unwrap(), "testd certificate");
+		assert_eq!(std::fs::metadata(&anchor).unwrap().permissions().mode() & 0o777, 0o644);
+		assert_eq!(std::fs::read_to_string(reload_log).unwrap(), "reloaded\n");
+		assert_eq!(std::fs::read_dir(anchor.parent().unwrap()).unwrap().count(), 1);
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn compatible_existing_anchor_is_used_without_replacement() {
+		const EXPECTED: &str = "-----BEGIN CERTIFICATE-----\nAAECAwQ=\n-----END CERTIFICATE-----\n";
+		const WRAPPED: &str = "-----BEGIN CERTIFICATE-----\r\nAAEC\r\nAwQ=\r\n-----END CERTIFICATE-----\r\n";
+		const FOREIGN: &str = "-----BEGIN CERTIFICATE-----\nAAECAwU=\n-----END CERTIFICATE-----\n";
+
+		let fixture = tempfile::tempdir().unwrap();
+		let anchor = fixture.path().join("testd-root.crt");
+		std::fs::write(&anchor, WRAPPED).unwrap();
+		assert!(existing_linux_anchor(&anchor, EXPECTED).unwrap());
+		assert_eq!(std::fs::read_to_string(&anchor).unwrap(), WRAPPED);
+		assert_eq!(existing_linux_anchor(&anchor, FOREIGN).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+		std::fs::write(&anchor, format!("{WRAPPED}{WRAPPED}")).unwrap();
+		assert_eq!(existing_linux_anchor(&anchor, EXPECTED).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn trust_install_preserves_a_dangling_anchor_symlink() {
+		use std::os::unix::fs::symlink;
+
+		let fixture = tempfile::tempdir().unwrap();
+		let anchor = fixture.path().join("testd-root.crt");
+		let target = fixture.path().join("missing.crt");
+		symlink(&target, &anchor).unwrap();
+		let reload_log = fixture.path().join("reload.log");
+		let status = run_with_stdin(trust_install_fixture(&anchor, &reload_log), b"testd certificate").unwrap();
+		assert_eq!(status.code(), Some(TRUST_ANCHOR_CONFLICT));
+		assert_eq!(std::fs::read_link(&anchor).unwrap(), target);
+		assert!(!target.exists());
+		assert!(!reload_log.exists());
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn trust_install_preserves_a_directory_at_the_anchor_path() {
+		let fixture = tempfile::tempdir().unwrap();
+		let anchor = fixture.path().join("testd-root.crt");
+		std::fs::create_dir(&anchor).unwrap();
+		let reload_log = fixture.path().join("reload.log");
+		let status = run_with_stdin(trust_install_fixture(&anchor, &reload_log), b"testd certificate").unwrap();
+		assert_eq!(status.code(), Some(TRUST_ANCHOR_CONFLICT));
+		assert_eq!(std::fs::read_dir(anchor).unwrap().count(), 0);
+		assert!(!reload_log.exists());
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn trust_install_preserves_an_anchor_created_during_authorization() {
+		use std::os::unix::fs::PermissionsExt;
+
+		for existing in ["foreign", "testd certificate"] {
+			let fixture = tempfile::tempdir().unwrap();
+			let anchor = fixture.path().join("testd-root.crt");
+			let reload_log = fixture.path().join("reload.log");
+			let bin = fixture.path().join("bin");
+			std::fs::create_dir(&bin).unwrap();
+			let link = bin.join("ln");
+			std::fs::write(
+				&link,
+				"#!/bin/sh\n\
+				for argument do target=$argument; done\n\
+				printf '%s' \"$TESTD_RACE_CERTIFICATE\" > \"$target\"\n\
+				exit 1\n",
+			)
+			.unwrap();
+			std::fs::set_permissions(&link, std::fs::Permissions::from_mode(0o700)).unwrap();
+			let path = std::env::join_paths(
+				std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())),
+			)
+			.unwrap();
+			let mut command = trust_install_fixture(&anchor, &reload_log);
+			command.env("PATH", path).env("TESTD_RACE_CERTIFICATE", existing);
+			let status = run_with_stdin(command, b"testd certificate").unwrap();
+			assert_eq!(status.code(), Some(TRUST_ANCHOR_CONFLICT));
+			assert_eq!(std::fs::read_to_string(anchor).unwrap(), existing);
+			assert!(!reload_log.exists());
+		}
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn trust_install_reports_a_failed_trust_store_update() {
+		let fixture = tempfile::tempdir().unwrap();
+		let anchor = fixture.path().join("testd-root.crt");
+		let layout = TrustLayout {
+			directory: fixture.path().to_str().unwrap(),
+			anchor: anchor.to_str().unwrap(),
+			reload: "sh -c 'exit 17'",
+		};
+		let mut command = std::process::Command::new("sh");
+		command.args(["-c", &trust_install_script(&layout)]);
+		let status = run_with_stdin(command, b"testd certificate").unwrap();
+		assert_eq!(status.code(), Some(1), "an update failure is not an anchor conflict");
+		assert_eq!(std::fs::read_to_string(anchor).unwrap(), "testd certificate");
 	}
 
 	#[cfg(target_os = "linux")]
