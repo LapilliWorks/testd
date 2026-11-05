@@ -1,207 +1,61 @@
-# GUI checklist
+# Desktop manual contracts
 
-These are the checks that need a desktop session and the Tauri bundle. Run them
-against a build from the same commit as the CLI/daemon. `python3 tests/release/run.py desktop --app <candidate>` launches the candidate and records each checkbox below as pass, fail, or not applicable, with evidence. The runner snapshots the system integration first and restores it when the checklist ends.
+These checks require the actual candidate app, an interactive desktop, and the candidate CLI from the same source revision. They do not replace the real-browser, system-ownership, or artifact checks in `tests/manual/`.
 
-## Build
+## Safety and evidence
 
-macOS (from the repository root):
+Use a clean disposable VM with a persisted, restorable full-system snapshot. Do not use an existing workstation, real credentials, production projects, or a real tunnel provider. Record the source commit, dirty state, candidate paths and hashes, OS and desktop versions, architecture, and evidence for each check; do not record secrets, tokens, private keys, or unreviewed report directories.
 
-```sh
-cargo tauri build
-open target/release/bundle/macos/Testd.app
-```
+The desktop runner requires a fresh user without a testd config directory and asks for confirmation of the VM backup. It snapshots selected `.test` integration, not the entire OS, user profile, package installation, login items, browser stores, or shared CA-store effects. It clears `TESTD_HOST_TLD` in the launched process environment; use a clean desktop session without that test-only override in its inherited environment. The runner restores its scoped snapshot only after you confirm every candidate app, daemon, and provider has stopped. If restoration is deferred or interrupted, stop those processes and use the report's `--restore-report` recovery command; restore the VM snapshot if necessary.
 
-Linux:
+On Linux, verify that the actual tray binary can bind port 443 before testing first-run setup. A failure to bind is a failed setup result, not a passed browser or tray check. On Windows, run the runner in an elevated PowerShell so it can snapshot the machine store and NRPT rules. macOS and Windows resolver and trust ownership protections remain incomplete; do not treat these checks as proof that either platform is safe for release.
 
 ```sh
-# Fedora/RHEL: qtpaths from qt5-qttools is required by the AppImage bundler
-sudo dnf install qt5-qttools
-cargo tauri build
-./target/release/bundle/appimage/*.AppImage
+python3 tests/release/run.py desktop --app /path/to/candidate --report /path/to/new-persisted-report
 ```
 
-The tray must bind port 443. Grant `CAP_NET_BIND_SERVICE` to the actual tray
-binary or set `[host] edge_addr` to a high port before the daemon starts;
-otherwise **Finish** reports the bind error, setup stays open, and the config is
-moved aside so a restart resumes setup.
+Answer each item `p`, `f`, `n`, or `q`. Give a reason for every failure or inapplicable item. A skipped item is not a pass; review every skip against the selected release scope. A zero exit from this runner alone is not release approval.
 
-Windows (elevated shell not required for the app itself):
+## First run and setup
 
-```powershell
-cargo tauri build
-target\release\bundle\nsis\Testd_0.1.0-alpha_x64-setup.exe
-```
+- [ ] GUI-01: On a fresh user, launch the candidate. One setup dialog opens on an ephemeral loopback address, not the normal intake port or `testd.test`.
+- [ ] GUI-02: Before resolver and certificate setup are complete, Finish is unavailable. Each setup card reports its actual success or failure.
+- [ ] GUI-03: The operator secret is generated, can be regenerated and copied, and a value shorter than 16 characters cannot finish setup. Do not include the secret in evidence.
+- [ ] GUI-04: Interrupt and reopen setup before finishing. The pending secret is retained unless Generate is selected.
+- [ ] GUI-05: Temporarily occupy the edge port with a controlled loopback listener and select Finish. Setup reports the bind failure and the next launch resumes setup rather than claiming success.
+- [ ] GUI-06: Release the test listener and complete setup. The config and local root are created for this user, the daemon starts once, the dialog closes, and the dashboard opens.
 
-Run `tests/release/run.py desktop` from an elevated PowerShell on Windows so
-its system snapshot and restore can read the NRPT rules and machine root store.
+## Local workflow and lifecycle
 
-The GUI imports the same daemon library as `testd host`. Only one daemon may
-run at a time; the instance lock must reject a second tray or headless host.
+- [ ] GUI-07: After setup there is one tray or menu-bar icon. The local dashboard and `https://testd.test/` on this machine show the same current state.
+- [ ] GUI-08: Inspect the fresh configuration and listeners. Registration and HTTPS listen on loopback by default; DNS is loopback-only.
+- [ ] GUI-09: Start a controlled local HTTP server and `testd run app.example:3000`. The name and target appear in the tray and dashboard, and opening it reaches the server over trusted HTTPS.
+- [ ] GUI-10: Stop the leaf normally. Its name disappears from the tray, dashboard, and DNS, and the browser no longer reaches that application.
+- [ ] GUI-11: Start an approved leaf again and stop it through the tray. Its names disappear and its grant remains available for a later run.
+- [ ] GUI-12: While the tray is running, try another tray and `testd host`. Neither starts a second daemon or takes over the first daemon's listeners.
+- [ ] GUI-13: Request a token from a separate controlled client. The pending request is visible, approval permits the requested name, and denial does not publish a name.
+- [ ] GUI-14: Revoke an issued token with a live client. The connection closes, its names disappear, and the old credential is refused on reconnect.
 
-## Setup
+## Dashboard, launches, and repair
 
-- [ ] First launch opens one setup dialog, not the tray. Its URL is an
-      ephemeral `127.0.0.1` port, not `7737` and not `testd.test`.
-- [ ] The resolver card reports either an existing route or configures it, and
-      **Finish setup** stays disabled until it is configured.
-- [ ] The certificate card shows the root summary, installs trust, and marks
-      itself done; **Finish setup** stays disabled until trust is installed.
-- [ ] The secret card shows a generated secret, and **Generate** replaces it;
-      **Copy** copies the current value.
-- [ ] Editing the secret to a value shorter than 16 characters keeps **Finish
-      setup** disabled.
-- [ ] **Finish** writes `~/.config/testd/config.toml`
-      (`%APPDATA%\testd\config.toml` on Windows), starts the daemon, closes
-      the setup dialog, and opens the dashboard window.
-- [ ] Resuming an interrupted setup keeps the pending operator secret unless
-      **Generate** is pressed.
-- [ ] The dashboard window is served at `http://127.0.0.1:7737/`, and typing
-      `https://testd.test/` in a browser on the same machine reaches the same
-      page.
-- [ ] First launch after setup shows exactly one tray/menu-bar icon.
+- [ ] GUI-15: The dashboard lists live names, targets, saved launches, shares, and access requests consistently with the CLI and tray.
+- [ ] GUI-16: Save and start a controlled quick launch. Its child starts, its registered name reaches the child, and stopping it removes the name and terminates the child.
+- [ ] GUI-17: A quick launch whose child exits reports that exit and withdraws its name. A failed launch does not leave a child running or a false live name.
+- [ ] GUI-18: Restart the tray after stopping a saved launch. The definition remains available, but the child does not start without an explicit action.
+- [ ] GUI-19: The certificate view shows the local root fingerprint. Explicit removal changes trust and page state; a restart does not silently reinstall it, and explicit installation restores trust.
+- [ ] GUI-20: A mutation without the required request header and a request with a non-loopback Host are refused. This check does not establish authentication against another local user.
+- [ ] GUI-21: A missing resolver or certificate produces a useful notification or logged notice. Dismissing an authorization request reports failure rather than claiming repair succeeded.
+- [ ] GUI-22: With the tray running, a supported `testd://fix/resolver` action reaches the existing instance; an unknown action is rejected.
 
-## Core
+## Platform and package observations
 
-- [ ] Windows: the installer raises no UAC prompt, and the uninstall entry is
-      `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Testd` with
-      `InstallLocation` under `%LOCALAPPDATA%\Testd`.
-- [ ] Windows: certificate install from the wizard raises one UAC prompt;
-      later launches raise none when trust is already installed.
-- [ ] macOS: after setup the app has no dock icon (activation policy Accessory).
-- [ ] Tray menu shows the live domain list, each name with open and stop.
-- [ ] Start `testd run app.example:3000` in a project; the domain appears in the
-      tray within two seconds.
-- [ ] Open the domain's stop action: the leaf stops and the name disappears, but
-      its grant is kept, so the next run publishes it without asking.
-- [ ] Click the domain's open action: the default browser opens
-      `https://app.example.test` and the dev server responds.
-- [ ] Stop `testd run`; the domain disappears from the tray.
-- [ ] The last row of the name list is `testd.test → dashboard`; it opens the
-      dashboard window, and clicking it again focuses the same window.
-- [ ] Dashboard shows the same domains, shares, and quick launches as the CLI.
-- [ ] Quit from the tray exits the process, removes `control.json`, releases the instance lock, and stops the DNS and HTTPS listeners. The lock file may remain; another instance can acquire it.
-- [ ] Launch a second instance while the first runs: the second must not start a
-      second daemon. The same holds for `testd host` next to the tray.
-- [ ] Launch-at-login (where configured) starts the tray after logout/login.
+- [ ] GUI-23: Where launch at login is supported, toggle it off and on; the OS entry and tray state agree, and the tray remains responsive.
+- [ ] GUI-24: If launch at login is included in the release claim, reference a separate persisted logout/login run showing the actual tray starts once. Otherwise record why this platform is out of scope.
+- [ ] GUI-25: On Windows, observe the per-user installer and the UAC prompts for privileged setup. On macOS, observe the menu-bar and dock behavior. Record the actual platform and prompt count.
+- [ ] GUI-26: Install the candidate package, complete a trusted name, and verify any claimed upgrade preserves the expected secret, root, launch definitions, and login preference.
+- [ ] GUI-27: Stop launches and shares, disable the login item, uninstall the product integration, then remove the package. Verify the claimed cleanup and retain any reported conflicts.
+- [ ] GUI-28: Quit the tray and verify the candidate app, daemon, provider children, DNS and HTTPS listeners are stopped and the instance lock can be acquired again before confirming restoration.
 
-## Operator secret
+## Coverage limits
 
-- [ ] Setup shows an editable operator secret and a Generate button.
-- [ ] A secret shorter than 16 characters keeps **Finish setup** disabled.
-
-## Certificate commands
-
-- [ ] Setup installs trust through its certificate card; removal is available in the dashboard's Certificate section.
-
-## Notifications
-
-- [ ] Fresh host, no resolver route: the tray posts one "DNS routing is not set up" notification, not one per probe.
-- [ ] Activate the notification action: the resolver is configured, the menu item disappears, and no further notice appears.
-- [ ] Remove trust from the dashboard's certificate section (which records the
-      removal), then restart the tray: one "Certificate is not trusted"
-      notification appears and trust is not silently reinstalled.
-- [ ] Dismiss the repair prompt or UAC: a "Setup repair failed" notification appears with a retry action.
-- [ ] On a desktop session, `testd host` posts the same notifications; in a session without D-Bus they are logged as `[notice]` and no notification is attempted.
-- [ ] A leaf without a token requests access: one "Token request from <label>" notification appears and the tray icon turns light blue until the request is approved, denied, or expires.
-
-## Token requests
-
-- [ ] A leaf without a token shows a notification and a light-blue tray icon until approved or denied.
-
-## Dashboard
-
-- [ ] **Active domains** lists registered names and targets; **Stop** ends the leaf and removes all its names while keeping grants.
-- [ ] **Delete** removes only the selected name's grant; its leaf keeps publishing other granted names and must request that name again.
-- [ ] **Shares** lists the URL, exposure, and provider; **Stop** removes the
-      share but leaves the name registered.
-- [ ] **Access** lists waiting requests and issued tokens; approving a request lets its leaf connect, and revoking a token closes all its current connections, releases names, and refuses its next connection.
-- [ ] **Quick launches** lists saved definitions and their live state.
-- [ ] **Certificate** shows the root summary and fingerprint; **Install** and
-      **Remove** update the OS trust store and the page state. The tray menu has no certificate entry.
-- [ ] After **Remove**, restarting the tray does not reinstall trust; **Install**
-      or setup is needed to trust it again.
-- [ ] A mutation from a cross-site page is refused: the dashboard requires the
-      custom request header, and a non-loopback `Host` header gets 403.
-
-## Quick launches
-
-- [ ] Tray: **Quick launches** is a disabled heading, each saved launch is a
-      submenu with `label :port`, and its action starts or stops the launch.
-- [ ] Save a launch with a program, arguments, one name, and no target. Start it: the name shows `configured`, then `probing`, then `confirmed`; the browser reaches the process.
-- [ ] Stop it: the process exits, the name disappears, and the state returns to `configured`.
-- [ ] Save a launch with an explicit `127.0.0.1:<port>` target and start it; it registers without detection.
-- [ ] While running, rebind to another listening address; the old target stays until the new one confirms.
-- [ ] A launch that exits by itself removes its names and reports `exited`.
-- [ ] A launch with an unreachable target reports `configured` plus an error and does not leave the child running when no name confirmed.
-- [ ] Delete a stopped launch; it disappears from the table and from
-      `~/.config/testd/launches.json`.
-- [ ] Quit the tray while a launch runs: the child and its names are gone.
-- [ ] Restart the tray: definitions are still listed but nothing is running.
-
-## URL actions
-
-- [ ] Release build: the scheme is registered. Linux: `xdg-mime query default x-scheme-handler/testd` prints the handler. Windows: `reg query HKCU\Software\Classes\testd`. macOS: `plutil -p target/release/bundle/macos/Testd.app/Contents/Info.plist | grep -A3 CFBundleURL`.
-- [ ] With the tray running, open `testd://fix/resolver`: the repair runs in the existing instance and no second instance starts.
-- [ ] With the tray closed, open `testd://fix/certificate`: the app launches, starts the daemon, and runs the repair.
-- [ ] `testd url testd://fix/resolver` forwards to the running daemon; after stopping the daemon it repairs directly.
-- [ ] `testd url testd://fix/unknown` is refused with "unknown testd action".
-- [ ] A dev build does not overwrite the release handler unless `TESTD_REGISTER_SCHEME=1` is set.
-
-## Launch at login
-
-- [ ] First start after setup creates the login item; the artifact paths are in
-      `DEVELOPING.md` ("Launch at login").
-- [ ] The tray menu shows **Launch at login**, ticked.
-- [ ] Untick it: the login item disappears from the OS, and it is still absent
-      after restarting the tray.
-- [ ] Tick it again: the login item is back, matching the OS listing.
-- [ ] Remove the login item in the OS settings while the tray runs: within five
-      seconds the checkbox reflects the change.
-- [ ] Tick and untick "Launch at login": the tray stays responsive and the menu
-      opens again every time. A click now only posts a message; doing OS or menu
-      work inside the menu event froze the whole UI on Windows.
-- [ ] `testd uninstall` does not remove the login item; untick it first, or remove
-      it by hand.
-
-## Browser
-
-- [ ] Run the browser validation checks in `DEVELOPING.md` with Chrome,
-      Firefox, Safari, and Edge on the target OS versions.
-
-## Not implemented yet
-
-Tray attach/detach of an already-running process by PID or port is deferred and is not a release gate. Quick launches wrap a child command instead.
-
-## Packaging and signing
-
-macOS:
-
-```sh
-codesign --verify --deep --strict --verbose=2 target/release/bundle/macos/Testd.app
-spctl -a -vv -t exec target/release/bundle/macos/Testd.app
-xcrun stapler validate target/release/bundle/macos/Testd.app
-```
-
-Windows:
-
-```powershell
-Get-AuthenticodeSignature target\release\bundle\nsis\*.exe | Format-List
-```
-
-Linux:
-
-```sh
-dpkg-deb -I target/release/bundle/deb/*.deb
-dpkg-deb -c target/release/bundle/deb/*.deb | head
-```
-
-Signing credentials are supplied by the operator, not stored here. Public CI builds unsigned artifacts. Signing observations apply only to artifacts advertised as signed; record unsigned ones as not applicable with a reason.
-
-## Install, upgrade, and removal
-
-- [ ] Install the actual candidate package in a fresh desktop session and reach a trusted HTTPS name using the documented setup and Linux port-privilege instructions.
-- [ ] Upgrade a previous install without changing the operator secret, root trust, saved launches, or the launch-at-login preference.
-- [ ] Untick launch at login, stop the daemon, and run `testd uninstall`; DNS routing and the exact installed trust root are removed.
-- [ ] Remove the app through the platform uninstaller; no tray process or listeners remain.
-- [ ] Reinstall and confirm the documented setup path works again.
+Browser behavior requires `tests/manual/browser.md`; resolver and trust coexistence require `tests/manual/system-integration.md`. Conditional network and share contracts are in `tests/manual/network-and-sharing.md`. A passing desktop checklist does not establish local operator authentication, safe non-loopback exposure, provider crash recovery, platform signing, or preservation of unowned system state.

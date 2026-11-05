@@ -278,9 +278,9 @@ def core(run):
 	packages = ['--workspace'] + ([] if run.args.gui else ['--exclude', 'testd-gui'])
 	run.command('clippy', ['cargo', 'clippy', *packages, '--all-targets', '--locked', '--', '-D', 'warnings'], 1200)
 	if shutil.which('cargo-nextest'):
-		command = ['cargo', 'nextest', 'run', *packages, '--locked']
+		command = ['cargo', 'nextest', 'run', *packages, '--locked', '--run-ignored', 'all']
 	else:
-		command = ['cargo', 'test', *packages, '--locked']
+		command = ['cargo', 'test', *packages, '--locked', '--', '--include-ignored']
 	run.command('rust-tests', command, 1200)
 	run.command('release-script-tests', [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests/release'])
 	if shutil.which('bun'):
@@ -688,7 +688,7 @@ BROWSER_CHECKS = frozenset({
 	'HTTPS and secure context',
 	'WebSocket, including 60 seconds idle',
 	'Streaming SSE and 100 MiB upload',
-	'Cookie scope across app and api',
+	'Cookie sharing and project isolation',
 })
 
 
@@ -735,7 +735,8 @@ def browser(run):
 			TESTD_BROWSER_TLD='test', TESTD_BROWSER_EDGE_PORT=str(run.args.edge_port))
 		command = [str(cli), 'run', '--host', f'127.0.0.1:{run.args.intake_port}',
 			f'app.releasecheck:{run.args.port}', f'api.releasecheck:{run.args.port}',
-			f'dead.releasecheck:{run.args.port + 1}', '--', 'bun', 'tests/release/browser-server.ts']
+			f'app.othercheck:{run.args.port}', f'dead.releasecheck:{run.args.port + 1}',
+			'--', 'bun', 'tests/release/browser-server.ts']
 		stop = threading.Event()
 		errors = []
 		watcher = threading.Thread(target=watch_restart_requests, args=(run, host, stop, errors), daemon=True)
@@ -796,6 +797,9 @@ def desktop(run):
 	if not app.exists():
 		raise RuntimeError(f'candidate app does not exist: {app}')
 	require_fresh_desktop_user()
+	items = checklist_items((ROOT / 'tests/host/gui-checklist.md').read_text(encoding=ENCODING))
+	if not items:
+		raise RuntimeError('no desktop checklist items were found')
 	if ask('Confirm this is a disposable host with a persisted full-system backup [y/N]: ') != 'y':
 		raise RuntimeError('desktop validation requires a disposable host and persisted full-system backup')
 	snapshot = system_snapshot(run, DESKTOP_TLD, interactive=True)
@@ -821,7 +825,6 @@ def desktop(run):
 					'Check display/port privileges before rerunning the checklist')
 			watch = threading.Thread(target=note_app_exit, args=(app_process, app_log), daemon=True)
 			watch.start()
-		items = checklist_items((ROOT / 'tests/host/gui-checklist.md').read_text(encoding=ENCODING))
 		for item in items:
 			print(f'\n{item}')
 			answer = ask('[p]ass / [f]ail / [n]ot applicable / [q]uit: ')

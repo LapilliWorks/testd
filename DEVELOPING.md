@@ -66,6 +66,8 @@ bun run check:links
 
 ## Test
 
+See [tests/README.md](tests/README.md) for the contract matrix, test layers, known gaps, and manual validation.
+
 ```sh
 cargo nextest run --workspace
 cargo clippy --workspace --all-targets -- -D warnings
@@ -101,15 +103,17 @@ python3 tests/release/run.py desktop --app /Applications/Testd.app
 # desktop VM, not a headless CI runner.
 ```
 
+The `core` release suite runs ignored Rust contracts as well as ordinary tests; known failing contracts therefore block it until they are resolved or the relevant feature is explicitly excluded. See [tests/README.md](tests/README.md) for the current gaps.
+
 Reports contain local PKI and test credentials and are private by default. Do not attach the entire report directory to a public issue; share only reviewed logs/JSON, never private keys or credentials.
 
 The browser suite uses Bun fixtures and publishes `app.releasecheck`, `api.releasecheck`, and a dead-upstream name. It checks HTTPS, WebSocket idle survival, streamed SSE, a 100 MiB upload, and project-cookie scope. It starts a headless host when none is listening and stops only a host it started; initialize the host with `testd init` first. It checks `testd doctor --json` first, so a missing OS resolver route fails before the browser opens. When the suite started the host, the page's restart button replaces the manual daemon restart for the renewal check; a pre-started host is left alone and must be restarted manually. Run it in every supported browser, complete the certificate and error-response observations, and save the JSON report from the page. A failed run can still be saved with the observations unchecked; the report records it as a failure. Ctrl+C removes only the fixture processes and registrations. For a high edge port, pass `--edge-port 8443`. The suite does not install trust or change the resolver.
 
 The `service` suite (also available as `host --service` or `artifacts --service`) exercises the real launchd/systemd user-session supervisor: start, TLS, forced-crash restart, and stop. It stages a uniquely named service with an isolated home and high ports, retains the generated unit/plist in the report, and removes only that new service when done. Run in a real user session with a working `systemctl --user` or launchd GUI domain; Windows CLI services are not shipped, so Windows supervision is covered by the tray login checks.
 
-The desktop suite launches the supplied app/installer and records each existing GUI checklist item as pass, fail, or not applicable with evidence. It requires a real interactive terminal and a real desktop session; the app runs with stdin detached and its output goes to a `desktop-app.log` file in the report. Use a clean disposable machine for first-install, setup, actual login, upgrade, and uninstall checks; the runner restores any integration the session installs, but not a pre-existing installation. Padlocks, UAC, tray behavior, and login cannot be proven by an HTTP-only script. On Linux, grant `CAP_NET_BIND_SERVICE` to the actual tray binary or set a high `[host] edge_addr`; without port privileges the daemon exits after setup. Skips and unanswered checks remain visible in `report.json`; they are not counted as passes. An interrupted desktop checklist or browser run without a saved report exits `2` (incomplete); failed checks exit `1`.
+The desktop suite launches the supplied app/installer and records each GUI checklist item as pass, fail, or not applicable with evidence. It requires a real interactive terminal, a real desktop session, a fresh user without testd data, and confirmation that a disposable host has a persisted full-system backup. It snapshots the `.test` integration, clears the test-only TLD override from the app environment, and asks for confirmation that all candidate processes have stopped before restoring. The scoped snapshot does not cover every installer, login item, browser store, or shared CA-store effect. If shutdown is not confirmed, restoration is deferred and the report gives the recovery command. Padlocks, UAC, tray behavior, and login cannot be proven by an HTTP-only script. On Linux, grant `CAP_NET_BIND_SERVICE` to the actual tray binary or set a high `[host] edge_addr`; without port privileges the daemon exits after setup. Skips and unanswered checks remain visible in `report.json`; they are not counted as passes. An interrupted desktop checklist or browser run without a saved report exits `2` (incomplete); failed checks exit `1`.
 
-`host --system` snapshots the integration `doctor --fix` will change, runs the checks, then restores and verifies that snapshot. Nothing outside the throwaway TLD and the `testd root` and `testd root testing` names is touched, so the suite does not require a clean machine; it requires that no testd daemon is running. See [System integration](#system-integration) for the recorded artifacts and the recovery path. Plain `host` does not change system integration. `--bin /path/to/testd` runs a candidate CLI without rebuilding it.
+`host --system` requires a clean disposable host, no testd daemon, and a persisted full-system backup. It snapshots selected integration, refuses pre-existing testd integration, runs the checks, then restores and verifies that scoped snapshot. System trust-store rebuilds and hooks can affect shared generated state beyond the selected paths. See [System integration](#system-integration) for the recorded artifacts and recovery path. Plain `host` does not change system integration. `--bin /path/to/testd` runs a candidate CLI without rebuilding it.
 
 ## Contents
 

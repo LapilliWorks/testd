@@ -64,6 +64,21 @@ class ReleaseTests(unittest.TestCase):
 				self.assertEqual(commands[name][1], f'+{version}.0')
 				self.assertIn(f"toolchain: '{version}.0'", workflow)
 
+	def test_release_core_runs_known_contracts_in_both_rust_test_modes(self):
+		for nextest in (True, False):
+			with self.subTest(nextest=nextest):
+				run = Mock(args=SimpleNamespace(gui=False, strict=True))
+				def which(name):
+					return None if name == 'cargo-nextest' and not nextest else 'installed'
+				with patch.object(runner.shutil, 'which', side_effect=which):
+					runner.core(run)
+				command = next(call.args[1] for call in run.command.call_args_list if call.args[0] == 'rust-tests')
+				if nextest:
+					self.assertIn('--run-ignored', command)
+					self.assertEqual(command[command.index('--run-ignored') + 1], 'all')
+				else:
+					self.assertIn('--include-ignored', command)
+
 	def test_notification_dependency_is_not_downgraded_to_4_17(self):
 		manifest = release.tomllib.loads((ROOT / 'crates/testd-daemon/Cargo.toml').read_text())
 		self.assertEqual(manifest['dependencies']['notify-rust'], '4.18')
@@ -690,6 +705,30 @@ class HostSystemTests(unittest.TestCase):
 				self.assertEqual(command.call_args.kwargs['terminal'], system)
 
 
+class ManualContractTests(unittest.TestCase):
+	def test_test_matrix_links_resolve(self):
+		readme = ROOT / 'tests/README.md'
+		links = re.findall(r'\]\(([^)#]+)(?:#[^)]*)?\)', readme.read_text(encoding='utf-8'))
+		self.assertTrue(links)
+		for link in links:
+			with self.subTest(link=link):
+				self.assertTrue((readme.parent / link).is_file())
+
+	def test_manual_checklists_have_unique_traceable_ids(self):
+		paths = [ROOT / 'tests/host/gui-checklist.md', *sorted((ROOT / 'tests/manual').glob('*.md'))]
+		self.assertGreaterEqual(len(paths), 5)
+		ids = []
+		for path in paths:
+			with self.subTest(path=path.name):
+				items = runner.checklist_items(path.read_text(encoding='utf-8'))
+				self.assertTrue(items, f'{path.name} has no manual contracts')
+				for item in items:
+					match = re.match(r'^([A-Z]+-\d{2}):', item)
+					self.assertIsNotNone(match, f'{path.name}: {item}')
+					ids.append(match.group(1))
+		self.assertEqual(len(ids), len(set(ids)), 'manual contract ids must be unique')
+
+
 @unittest.skipUnless(os.name != 'nt' and shutil.which('bash'), 'Unix bash host checks are unavailable')
 class UnixHostContractTests(unittest.TestCase):
 	def test_system_trust_requires_a_successful_dashboard_response(self):
@@ -738,6 +777,27 @@ class DesktopRunnerTests(unittest.TestCase):
 				with self.assertRaisesRegex(RuntimeError, 'existing testd user data'):
 					runner.require_fresh_desktop_user()
 			self.assertTrue((config / 'testd').is_symlink())
+
+	def test_desktop_checklist_has_unique_contract_ids(self):
+		text = (ROOT / 'tests/host/gui-checklist.md').read_text(encoding='utf-8')
+		items = runner.checklist_items(text)
+		ids = [re.match(r'^(GUI-\d{2}):', item) for item in items]
+		self.assertGreaterEqual(len(items), 20)
+		self.assertTrue(all(ids), 'every desktop item needs a contract id')
+		self.assertEqual(len({match.group(1) for match in ids}), len(items))
+
+	def test_desktop_refuses_an_empty_checklist_before_system_snapshot(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			terminal = Mock()
+			terminal.isatty.return_value = True
+			with patch.object(runner, 'SYSTEM', 'Windows'), patch.dict(os.environ, {'APPDATA': directory}), \
+				patch.object(runner.sys, 'stdin', terminal), patch.object(runner, 'checklist_items', return_value=[]), \
+				patch.object(runner, 'ask', return_value='y'), \
+				patch.object(runner, 'system_snapshot', side_effect=AssertionError('snapshot ran too early')) as snapshot:
+				with self.assertRaisesRegex(RuntimeError, 'no desktop checklist items'):
+					runner.desktop(run)
+			snapshot.assert_not_called()
 
 	def test_desktop_domain_matches_the_product_tld(self):
 		config = (ROOT / 'crates/testd-core/src/config.rs').read_text(encoding='utf-8')
@@ -984,6 +1044,7 @@ class BrowserTests(unittest.TestCase):
 				runner.browser(run)
 			serve.assert_not_called()
 			command.assert_called_once()
+			self.assertIn('app.othercheck:19080', command.call_args.args[1])
 			self.assertTrue(run.metadata['incomplete'])
 
 	def test_a_missing_os_resolver_fails_before_the_browser_opens(self):
