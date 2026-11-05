@@ -296,6 +296,23 @@ async fn exercise_authentication_and_ownership() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registered_names_accept_case_insensitive_tls_server_names() {
+	tokio::time::timeout(TEST_TIMEOUT, async {
+		let mut host = Host::start().await;
+		let upstream = host.add_upstream("first").await;
+		let (mut owner, authentication) = Client::connect(host.intake, SECRET).await;
+		assert!(matches!(authentication, Response::Ok));
+		assert!(matches!(owner.register(upstream).await, Response::Ok));
+		let uppercase_name = host.name().to_ascii_uppercase();
+		let response = https_request(&host, &uppercase_name).await;
+		assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+		assert!(response.contains(&format!("first GET /health?source=contract {uppercase_name}:")));
+	})
+	.await
+	.expect("case-insensitive TLS contract timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn registration_drives_dns_trusted_https_and_disconnect_cleanup() {
 	tokio::time::timeout(TEST_TIMEOUT, exercise_lifecycle())
 		.await
