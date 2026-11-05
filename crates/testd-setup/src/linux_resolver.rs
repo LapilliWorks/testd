@@ -340,8 +340,14 @@ mod tests {
 		assert_eq!(lines[3], TLD);
 		assert!(!record.contains("installation-a"));
 		assert_eq!(std::fs::metadata(fixture.marker()).unwrap().permissions().mode() & 0o777, 0o600);
+		let unowned_dns = "Global:\nLink 1 (lo): 192.0.2.1\n";
+		let unowned_domains = "Global:\nLink 1 (lo): ~foreign\n";
+		std::fs::write(&fixture.dns, unowned_dns).unwrap();
+		std::fs::write(&fixture.domains, unowned_domains).unwrap();
 		assert!(fixture.remove(OWNER_A, TLD).success());
 		assert!(fixture.remove(OWNER_A, TLD).success());
+		assert_eq!(std::fs::read_to_string(&fixture.dns).unwrap(), unowned_dns);
+		assert_eq!(std::fs::read_to_string(&fixture.domains).unwrap(), unowned_domains);
 		assert!(!fixture.dropin.exists());
 		assert!(!fixture.marker().exists());
 		assert_eq!(std::fs::read_to_string(&fixture.log).unwrap(), "reloaded\nreloaded\n");
