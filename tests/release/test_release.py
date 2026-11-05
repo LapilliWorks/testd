@@ -328,6 +328,45 @@ class PlatformSequenceTests(unittest.TestCase):
 				self.assertEqual(run.command.call_args.args[1], ['cargo', '+stable', 'build', '--release',
 					'--bin', 'testd', '--locked'])
 
+	@unittest.skipIf(os.name == 'nt', 'the synthetic cargo fixture uses a Unix shell')
+	def test_build_sequence_runs_with_a_real_child_and_retains_the_backup(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = pathlib.Path(directory).resolve()
+			target = root / 'target'
+			candidate = target / 'release/testd'
+			candidate.parent.mkdir(parents=True)
+			candidate.write_bytes(b'old executable')
+			fake_bin = root / 'bin'
+			fake_bin.mkdir()
+			fake_cargo = fake_bin / 'cargo'
+			fake_cargo.write_text('#!/bin/sh\nprintf "new executable" > "$CARGO_TARGET_DIR/release/testd"\n'
+				'printf "%s" "$RUSTFLAGS" > "$CARGO_TARGET_DIR/flags"\n', encoding='utf-8')
+			fake_cargo.chmod(0o700)
+			args = SimpleNamespace(report=root / 'report', suite='fixture', bin=None)
+			with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+				run = runner.Run(args)
+				with patch.dict(os.environ, {'PATH': f'{fake_bin}{os.pathsep}{os.environ.get("PATH", "")}',
+					'CARGO_TARGET_DIR': str(target)}):
+					os.environ.pop('CARGO_BUILD_TARGET', None)
+					os.environ.pop('CARGO_ENCODED_RUSTFLAGS', None)
+					self.assertEqual(runner.binary(run), candidate)
+			self.assertEqual((run.output / 'pre-build-testd').read_bytes(), b'old executable')
+			self.assertEqual(candidate.read_bytes(), b'new executable')
+			self.assertIn('metadata=testd-check-', (target / 'flags').read_text(encoding='utf-8'))
+			self.assertEqual(run.metadata['binaries'][str(candidate)], runner.file_digest(candidate))
+
+	def test_repeated_builds_keep_each_prior_candidate(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = pathlib.Path(directory)
+			candidate = root / 'testd'
+			run = Mock(output=root)
+			candidate.write_bytes(b'first')
+			runner.backup_build_candidate(run, candidate)
+			candidate.write_bytes(b'second')
+			runner.backup_build_candidate(run, candidate)
+			self.assertEqual((root / 'pre-build-testd').read_bytes(), b'first')
+			self.assertEqual((root / 'pre-build-2-testd').read_bytes(), b'second')
+
 	def test_build_refuses_an_unverified_backup_before_compiling(self):
 		with tempfile.TemporaryDirectory() as directory:
 			root = pathlib.Path(directory)
