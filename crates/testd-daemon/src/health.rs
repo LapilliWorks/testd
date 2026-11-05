@@ -20,12 +20,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use testd_core::config::{DEFAULT_DNS_PORT, ResolverBackend, load_host_config};
+use testd_core::config::{DEFAULT_DNS_PORT, load_host_config};
 use testd_setup::Elevation;
 use tokio::sync::{broadcast, watch};
 
 use crate::resolver::Resolver;
-use crate::resolver::hosts::HostsResolver;
 
 /// How often the daemon re-checks the resolver route and the root CA.
 const PROBE_INTERVAL: Duration = Duration::from_secs(10);
@@ -246,10 +245,7 @@ impl Resolver for OsResolver {
 pub fn repair_once(action: Action, elevation: Elevation) -> Result<(), String> {
 	let config = load_host_config().map_err(|e| e.to_string())?;
 	let tld = testd_core::config::host_tld().to_owned();
-	let resolver: Arc<dyn Resolver> = match config.resolver {
-		ResolverBackend::Dns => Arc::new(OsResolver { tld: tld.clone(), elevation }),
-		ResolverBackend::Hosts => Arc::new(HostsResolver::new(&tld, &config.hosts_helper_path, &config.hosts_path)),
-	};
+	let resolver: Arc<dyn Resolver> = Arc::new(OsResolver { tld: tld.clone(), elevation });
 	let root = config
 		.edge_enabled
 		.then(|| Arc::new(PkiRoot::new(config.pki_dir.clone())) as Arc<dyn RootAuthority>);

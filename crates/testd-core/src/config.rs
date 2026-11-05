@@ -35,23 +35,9 @@ pub fn host_tld() -> &'static str {
 /// Default plain HTTP routing port for an external front.
 pub const DEFAULT_HTTP_PORT: u16 = 7740;
 
-/// DNS resolution backend for registered domains.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ResolverBackend {
-	/// Built-in UDP DNS server (no root required).
-	#[default]
-	Dns,
-	/// Managed block in `/etc/hosts` (requires write access to hosts file).
-	Hosts,
-}
-
 /// Host daemon configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostConfig {
-	/// DNS resolution backend.
-	#[serde(default)]
-	pub resolver: ResolverBackend,
 	/// Address to listen on for client connections.
 	#[serde(default = "defaults::listen_addr")]
 	pub listen_addr: SocketAddr,
@@ -61,12 +47,6 @@ pub struct HostConfig {
 	/// Path to the global Caddyfile (for `caddy reload`).
 	#[serde(default = "defaults::caddy_config_path")]
 	pub caddy_config_path: PathBuf,
-	/// Path to the hosts file.
-	#[serde(default = "defaults::hosts_path")]
-	pub hosts_path: PathBuf,
-	/// Path to the hosts helper script (invoked via sudo).
-	#[serde(default = "defaults::hosts_helper_path")]
-	pub hosts_helper_path: PathBuf,
 	/// Local CA and host intermediate.
 	#[serde(default = "defaults::pki_dir")]
 	pub pki_dir: PathBuf,
@@ -210,6 +190,16 @@ mod tests {
 	use super::*;
 
 	#[test]
+	fn host_config_has_no_hosts_backend_settings() {
+		let config: HostConfig = toml::from_str("").unwrap();
+		let table = toml::Value::try_from(config).unwrap();
+		let table = table.as_table().unwrap();
+		for key in ["resolver", "hosts_path", "hosts_helper_path"] {
+			assert!(!table.contains_key(key), "obsolete backend setting remains: {key}");
+		}
+	}
+
+	#[test]
 	fn default_registration_listener_is_loopback() {
 		let config: HostConfig = toml::from_str("").unwrap();
 		assert_eq!(config.listen_addr, SocketAddr::from(([127, 0, 0, 1], DEFAULT_PORT)));
@@ -308,14 +298,14 @@ mod tests {
 	#[test]
 	fn updating_a_config_preserves_user_settings() {
 		let table: toml::Table = toml::from_str(
-			"[host]\nlisten_addr = \"127.0.0.1:7737\"\nedge_addr = \"127.0.0.1:8443\"\nresolver = \"hosts\"\nsecret = \"old\"\n",
+			"[host]\nlisten_addr = \"127.0.0.1:7737\"\nedge_addr = \"127.0.0.1:8443\"\nanswer_addr = \"192.0.2.42\"\nsecret = \"old\"\n",
 		)
 		.unwrap();
 		let merged = merge_host_config(table, "/tmp/Caddyfile", Some("new")).unwrap();
 		let host = merged["host"].as_table().unwrap();
 		assert_eq!(host["listen_addr"].as_str(), Some("127.0.0.1:7737"));
 		assert_eq!(host["edge_addr"].as_str(), Some("127.0.0.1:8443"));
-		assert_eq!(host["resolver"].as_str(), Some("hosts"));
+		assert_eq!(host["answer_addr"].as_str(), Some("192.0.2.42"));
 		assert_eq!(host["caddy_config_path"].as_str(), Some("/tmp/Caddyfile"));
 		assert_eq!(host["secret"].as_str(), Some("new"));
 	}
@@ -906,14 +896,6 @@ mod defaults {
 			.into_iter()
 			.next()
 			.unwrap_or_else(|| "/etc/caddy/Caddyfile".into())
-	}
-
-	pub fn hosts_path() -> PathBuf {
-		"/etc/hosts".into()
-	}
-
-	pub fn hosts_helper_path() -> PathBuf {
-		"/usr/local/libexec/testd-hosts-helper".into()
 	}
 
 	pub fn pki_dir() -> PathBuf {

@@ -1,13 +1,6 @@
-//! DNS resolution backends for registered domains.
-//!
-//! Two strategies:
-//! - [`dns::DnsResolver`]: runs a minimal DNS server, configured via OS resolver
-//! - [`hosts::HostsResolver`]: writes a managed block in `/etc/hosts`
-//!
-//! Both backends are local to the host and serve the same name table.
+//! DNS resolution for registered domains through a local DNS server.
 
 pub mod dns;
-pub mod hosts;
 
 use std::io;
 use std::net::Ipv4Addr;
@@ -42,6 +35,6 @@ pub trait Resolver: Send + Sync {
 		true
 	}
 
-	/// Clean up any state (remove hosts entries, stop DNS server, etc.).
+	/// Clear the registered names when the daemon stops.
 	fn cleanup(&self) -> io::Result<()>;
 }

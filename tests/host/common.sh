@@ -472,40 +472,6 @@ check_url_actions() {
 	fi
 }
 
-check_hosts_helper() {
-	section 'hosts helper'
-	local script='scripts/testd-hosts-helper'
-	if sh -n "$script"; then pass 'helper syntax'; else fail 'helper syntax'; fi
-
-	# A fixed file, not the system one: the result must not depend on whatever
-	# /etc/hosts already holds, and copying it keeps nothing of the host in the run.
-	local hosts="$TEST_HOME/hosts"
-	printf '127.0.0.1\tlocalhost\n::1\tlocalhost\n' > "$hosts"
-	if printf '"app.testdproj.%s"\n' "$TLD" | sh "$script" --tld "$TLD" --hosts-path "$hosts" >/dev/null 2>&1 \
-		&& grep -q "^127.0.0.1 app.testdproj.$TLD$" "$hosts" \
-		&& grep -q "^127.0.0.1 testd.$TLD$" "$hosts" \
-		&& grep -q "^127.0.0.1[[:space:]]*localhost$" "$hosts"; then
-		pass 'helper writes the managed block'
-	else
-		fail 'helper writes the managed block'
-		sed -n '1,40p' "$hosts" >&2
-	fi
-	if printf '"bad..name.%s"\n' "$TLD" | sh "$script" --tld "$TLD" --hosts-path "$hosts" >/dev/null 2>&1; then
-		fail 'helper rejects invalid names'
-	else
-		pass 'helper rejects invalid names'
-	fi
-	if printf '"app.testdproj.%s"\n' "$TLD" | sh "$script" --tld "$TLD" --hosts-path "$hosts" >/dev/null 2>&1 \
-		&& : | sh "$script" --tld "$TLD" --hosts-path "$hosts" >/dev/null 2>&1 \
-		&& ! grep -q "app.testdproj.$TLD" "$hosts" \
-		&& grep -q "^127.0.0.1 testd.$TLD$" "$hosts"; then
-		pass 'empty input leaves only the dashboard name'
-	else
-		fail 'empty input leaves only the dashboard name'
-		sed -n '1,40p' "$hosts" >&2
-	fi
-}
-
 check_launch_at_login() {
 	section 'launch at login'
 	local artifact

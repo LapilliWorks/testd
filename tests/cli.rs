@@ -63,6 +63,16 @@ fn operator_secret(home: &Path) -> String {
 }
 
 #[test]
+fn cli_does_not_offer_a_hosts_helper_command() {
+	let home = TempDir::new().unwrap();
+	let help = testd(home.path(), &["--help"]);
+	assert!(help.status.success());
+	assert!(!String::from_utf8_lossy(&help.stdout).contains("setup-hosts-helper"));
+	let removed = testd(home.path(), &["setup-hosts-helper", "--help"]);
+	assert!(!removed.status.success(), "the removed command must not be accepted");
+}
+
+#[test]
 fn init_is_idempotent() {
 	let home = TempDir::new().unwrap();
 

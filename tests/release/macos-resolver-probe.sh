@@ -63,17 +63,6 @@ case "$DNS_PORT" in
 	''|*[!0-9]*) fail "invalid DNS port: $DNS_PORT" ;;
 esac
 
-config_backend=$(python3 - "$CONFIG" <<'PY'
-import sys
-import tomllib
-
-with open(sys.argv[1], 'rb') as source:
-	host = tomllib.load(source)['host']
-print(host.get('resolver', 'dns'))
-PY
-)
-[ "$config_backend" = 'dns' ] || fail "this probe needs resolver = \"dns\"; config uses $config_backend"
-
 case "$TLD" in
 	''|*/*|*[!A-Za-z0-9.-]*) fail "unsafe TLD: $TLD" ;;
 esac

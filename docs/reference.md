@@ -43,7 +43,6 @@ testd <command> [options]
 | `tokens` | List issued tokens, or revoke one |
 | `export-caddyfile` | Write the managed Caddyfile for an external front |
 | `uninstall` | Remove the OS resolver route and trusted root |
-| `setup-hosts-helper` | Install the hosts resolver helper and sudoers rule |
 
 Global options: `--help`, `--version`.
 
@@ -187,14 +186,6 @@ Stop the daemon first. `--purge` proceeds only when system cleanup succeeds. If 
 
 On Linux, testd leaves unowned or changed resolver and trust state in place. If the root remains trusted through another source, cleanup reports it. Purging with either `--keep-resolver` or `--keep-certificate` deletes `system-ownership-id`; back it up first if testd should remove its owned system state later. For retained trust, also back up `pki/root.crt`.
 
-### setup-hosts-helper
-
-```text
-testd setup-hosts-helper [--prefix <path>]
-```
-
-Installs `{prefix}/libexec/testd-hosts-helper` and `/etc/sudoers.d/testd-hosts-helper` for the invoking user, then validates the rule. Default prefix: `/usr/local`. Not supported on Windows.
-
 ## Environment variables
 
 | Variable | Used by | Meaning |
@@ -216,7 +207,6 @@ Path: `~/.config/testd/config.toml`; on Windows, `%APPDATA%\testd\config.toml`. 
 
 | Key | Default | Meaning |
 |---|---|---|
-| `resolver` | `dns` | `dns` for the built-in server or `hosts` for a managed hosts block |
 | `listen_addr` | `127.0.0.1:7737` | Leaf intake |
 | `edge_addr` | `127.0.0.1:443` | HTTPS edge when `edge_enabled` is true |
 | `edge_enabled` | `true` | Start the built-in TLS listener; the plain listener always runs |
@@ -228,8 +218,6 @@ Path: `~/.config/testd/config.toml`; on Windows, `%APPDATA%\testd\config.toml`. 
 | `pki_dir` | `~/.config/testd/pki` | Root CA, intermediate, and backups |
 | `caddyfile_path` | `~/.config/testd/Caddyfile` | Managed Caddyfile |
 | `caddy_config_path` | detected | Global Caddyfile to inspect and reload |
-| `hosts_path` | platform hosts file | File edited by the hosts resolver |
-| `hosts_helper_path` | `/usr/local/libexec/testd-hosts-helper` | Privileged hosts helper |
 
 The DNS server always binds loopback and answers `testd.test` plus every registered name. It is not a LAN DNS service. From another machine, reach a name through `testd share`, not by pointing its resolver at the host.
 
@@ -381,7 +369,7 @@ A provider has 30 seconds to report its URL. `tailscale` requires the plain HTTP
 
 - Linux: DNS on UDP 7753; port 443 needs `CAP_NET_BIND_SERVICE` or a high `edge_addr`. Use `packaging/systemd/testd@.service` for the capability, or `packaging/systemd/testd.service` with a high port.
 - macOS: DNS on UDP 7753; launchd template in `packaging/launchd/`. The root is installed in the system keychain through the setup helper.
-- Windows: DNS on UDP 53; config under `%APPDATA%\testd`. NRPT rules route `.test` to the local server. The hosts resolver is not supported. A stale answer may need `ipconfig /flushdns`.
+- Windows: DNS on UDP 53; config under `%APPDATA%\testd`. NRPT rules route `.test` to the local server. A stale answer may need `ipconfig /flushdns`.
 - Firefox: may use its own trust store; import the root separately if Chromium-based browsers and the system store accept it but Firefox does not.
 - Caddy: optional. The built-in edge needs no external front.
 

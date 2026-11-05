@@ -108,15 +108,9 @@ The provider binary is spawned from `PATH` or `TESTD_TUNNEL`. A compromised bina
 
 An external front that terminates TLS has its own trust anchor and certificate lifecycle. The testd root is not involved unless the front proxies to the testd TLS edge.
 
-## Hosts resolver
+## DNS resolution
 
-The hosts backend edits a managed block in the system hosts file through a helper invoked with `sudo`. `testd setup-hosts-helper` installs the helper and a `NOPASSWD` rule scoped to that helper for the invoking user, then validates the rule with `visudo -c`.
-
-- Keep the helper path root-owned and not writable by unprivileged users.
-- Review the sudoers drop-in before relying on it.
-- The helper is not supported on Windows; use the DNS backend there.
-
-The DNS backend does not need root at runtime and listens on loopback only. It is the safer default.
+The DNS server does not need root at runtime and listens on loopback only. Configuring the OS resolver may require privileges.
 
 ## Resource limits
 

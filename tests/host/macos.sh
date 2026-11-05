@@ -26,7 +26,6 @@ check_registration
 check_sharing
 check_quick_launch
 check_url_actions
-check_hosts_helper
 
 section 'resolver and trust'
 if [ "${TESTD_HOST_TEST_SYSTEM:-0}" != '1' ] || ! sudo -n true 2>/dev/null; then

@@ -1,12 +1,6 @@
 # testd host configuration
 
 [host]
-# DNS resolution backend: "dns" (built-in DNS server) or "hosts" (/etc/hosts).
-# resolver = "dns"
-
-# Path to the hosts helper script (invoked via sudo when resolver = "hosts").
-# hosts_helper_path = "/usr/local/libexec/testd-hosts-helper"
-
 # Address the daemon listens on for client connections.
 # listen_addr = "127.0.0.1:7737"
 

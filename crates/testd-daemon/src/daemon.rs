@@ -8,7 +8,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
-use testd_core::config::{DEFAULT_DNS_PORT, ResolverBackend, config_dir, load_host_config};
+use testd_core::config::{DEFAULT_DNS_PORT, config_dir, load_host_config};
 use testd_setup::Elevation;
 
 use crate::access::{Access, PendingView};
@@ -19,7 +19,6 @@ use crate::health::{Action, Health, HealthMonitor, Notice, PkiRoot, RootAuthorit
 use crate::launch::LaunchBook;
 use crate::resolver::Resolver;
 use crate::resolver::dns::DnsResolver;
-use crate::resolver::hosts::HostsResolver;
 
 /// A configured, ready-to-run host daemon.
 pub struct Daemon {
@@ -63,28 +62,11 @@ impl Daemon {
 			);
 		}
 
-		let resolver: Arc<dyn Resolver> = match config.resolver {
-			ResolverBackend::Dns => {
-				let dns = DnsResolver::start(&tld, config.answer_addr, elevation)
-					.await
-					.map_err(|e| format!("failed to start the DNS server on 127.0.0.1:{DEFAULT_DNS_PORT}: {e}"))?;
-				eprintln!("DNS server listening on {}", dns.listen_addr());
-				Arc::new(dns)
-			},
-			ResolverBackend::Hosts => {
-				if cfg!(windows) {
-					return Err("the hosts resolver is not supported on Windows; use resolver = \"dns\"".into());
-				}
-				if !config.hosts_helper_path.exists() {
-					return Err(format!(
-						"hosts helper not found: {}\nrun `testd setup-hosts-helper` to install it",
-						config.hosts_helper_path.display()
-					)
-					.into());
-				}
-				Arc::new(HostsResolver::new(&tld, &config.hosts_helper_path, &config.hosts_path))
-			},
-		};
+		let dns = DnsResolver::start(&tld, config.answer_addr, elevation)
+			.await
+			.map_err(|e| format!("failed to start the DNS server on 127.0.0.1:{DEFAULT_DNS_PORT}: {e}"))?;
+		eprintln!("DNS server listening on {}", dns.listen_addr());
+		let resolver: Arc<dyn Resolver> = Arc::new(dns);
 
 		// Prime resolution with testd.{tld} before any client connects.
 		resolver.apply(&[])?;

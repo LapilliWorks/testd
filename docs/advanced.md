@@ -167,25 +167,9 @@ The plain listener always runs. `edge_enabled` controls only the built-in TLS li
 
 The generated Caddyfile terminates TLS with Caddy's internal CA and proxies to `http_addr`. Browsers trust that CA, not the testd root. With `edge_enabled = false`, `doctor` skips the testd PKI and root checks and requires the external front's certificate to be trusted by the system. `trust_forwarded_for` must stay off unless a front you control sets the header; otherwise a client can spoof its source address. On the plain listener the dashboard name is served only with this on and a loopback first hop.
 
-## Hosts resolver
+## DNS resolution
 
-The default resolver is a built-in DNS server on loopback. On Linux, setup uses a compatible existing global route without adopting it and reports conflicting global settings or per-link routes instead of changing them. The alternative edits the hosts file:
-
-```toml
-[host]
-resolver = 'hosts'
-hosts_helper_path = '/usr/local/libexec/testd-hosts-helper'
-```
-
-Install the helper and its sudoers rule:
-
-```sh
-testd setup-hosts-helper
-```
-
-For a non-default prefix, pass `--prefix`. The command installs a script and a `NOPASSWD` sudoers drop-in for the invoking user, then validates the rule with `visudo -c`. The hosts backend is not supported on Windows, and it fits a single host better than a network: every change rewrites a managed block in the hosts file.
-
-Use the DNS backend unless the OS resolver route is impractical on the machine.
+The resolver is a built-in DNS server on loopback. On Linux, setup uses a compatible existing global route without adopting it and reports conflicting global settings or per-link routes instead of changing them.
 
 ## Privileged ports
 

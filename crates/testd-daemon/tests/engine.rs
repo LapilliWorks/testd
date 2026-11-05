@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -11,7 +10,7 @@ use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
-use testd_core::config::{ClientConfig, HostConfig, ResolverBackend};
+use testd_core::config::{ClientConfig, HostConfig};
 use testd_core::protocol::{Auth, ErrorDisposition, Request, Response, TokenRequest, recv, send};
 use testd_daemon::access::{Access, Approved};
 use testd_daemon::engine::{HostEngine, OperatorAction};
@@ -92,12 +91,9 @@ async fn start_with_dashboard(_dashboard_addr: Option<SocketAddr>) -> Harness {
 		gate: Mutex::new(None),
 	});
 	let config = HostConfig {
-		resolver: ResolverBackend::Dns,
 		listen_addr: "127.0.0.1:0".parse().unwrap(),
 		caddyfile_path: dir.join("Caddyfile"),
 		caddy_config_path: dir.join("global-Caddyfile"),
-		hosts_path: PathBuf::from("/etc/hosts"),
-		hosts_helper_path: dir.join("helper"),
 		pki_dir: dir.join("pki"),
 		edge_addr: "127.0.0.1:0".parse().unwrap(),
 		edge_enabled: false,

@@ -125,7 +125,7 @@ testd doctor --fix
 | `2` | Resolver route or name resolution is wrong |
 | `3` | Certificate trust, PKI, or the HTTPS edge is not ready |
 
-`--fix` applies privileged repairs: configure the OS resolver, write a missing operator secret, add the Caddyfile import, reload Caddy, and install or reinstall the root. It cannot repair a missing hosts helper; use `testd setup-hosts-helper` for that.
+`--fix` applies privileged repairs: configure the OS resolver, write a missing operator secret, add the Caddyfile import, reload Caddy, and install or reinstall the root.
 
 While the daemon runs, it re-checks the resolver every 10 seconds and root trust every 60 seconds, with an immediate check after a repair. On a desktop session, a failure is posted as a notification whose activation runs the repair. Without a notification service, the same notices are logged as `[notice]`.
 

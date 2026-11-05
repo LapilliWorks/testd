@@ -152,12 +152,6 @@ enum Command {
 		#[arg(long)]
 		keep_certificate: bool,
 	},
-	/// Install the hosts helper and sudoers rule for the hosts resolver.
-	SetupHostsHelper {
-		/// Installation prefix. Script installs to {prefix}/libexec/testd-hosts-helper.
-		#[arg(long, default_value = "/usr/local")]
-		prefix: std::path::PathBuf,
-	},
 }
 
 /// Infer domain from the current directory name.
@@ -242,7 +236,6 @@ async fn main() -> anyhow::Result<()> {
 		Command::Uninstall { purge, keep_resolver, keep_certificate } => {
 			uninstall(purge, keep_resolver, keep_certificate)
 		},
-		Command::SetupHostsHelper { prefix } => setup_hosts_helper(prefix),
 	}
 }
 
@@ -526,9 +519,7 @@ fn init_show_dev_commands() {
 async fn doctor(fix: bool, json: bool) -> anyhow::Result<i32> {
 	use std::net::SocketAddr;
 
-	use testd_core::config::{
-		DEFAULT_DNS_PORT, ResolverBackend, config_dir, config_path, find_caddy_binary, load_host_config,
-	};
+	use testd_core::config::{DEFAULT_DNS_PORT, config_dir, config_path, find_caddy_binary, load_host_config};
 	use testd_daemon::caddy::{self, EdgeStatus};
 
 	let mut checks: Vec<Check> = Vec::new();
@@ -580,63 +571,40 @@ async fn doctor(fix: bool, json: bool) -> anyhow::Result<i32> {
 
 	{
 		let dns_addr = SocketAddr::from(([127, 0, 0, 1], DEFAULT_DNS_PORT));
-		match config.resolver {
-			ResolverBackend::Dns => {
-				if testd_setup::is_os_resolver_configured(tld, dns_addr) {
+		if testd_setup::is_os_resolver_configured(tld, dns_addr) {
+			checks.push(Check::ok("resolver", format!("configured (DNS server on {dns_addr})")));
+		} else if fix {
+			match testd_setup::setup_os_resolver(tld, dns_addr) {
+				Ok(()) if testd_setup::is_os_resolver_configured(tld, dns_addr) => {
 					checks.push(Check::ok("resolver", format!("configured (DNS server on {dns_addr})")));
-				} else if fix {
-					match testd_setup::setup_os_resolver(tld, dns_addr) {
-						Ok(()) if testd_setup::is_os_resolver_configured(tld, dns_addr) => {
-							checks.push(Check::ok("resolver", format!("configured (DNS server on {dns_addr})")));
-						},
-						Ok(()) => checks.push(Check::fail(
-							"resolver",
-							"setup ran but the route is not reported".into(),
-							"check `resolvectl status lo`",
-						)),
-						Err(e) => checks.push(Check::fail("resolver", e.to_string(), "run as a user with sudo")),
-					}
-				} else {
-					exit = 2;
-					checks.push(Check::fail(
-						"resolver",
-						"not configured".into(),
-						"run `testd doctor --fix` or `testd init --resolver-now`",
-					));
-				}
-			},
-			ResolverBackend::Hosts => {
-				if config.hosts_helper_path.exists() {
-					checks.push(Check::ok(
-						"resolver",
-						format!("hosts helper present: {}", config.hosts_helper_path.display()),
-					));
-				} else {
-					checks.push(Check::fail(
-						"resolver",
-						"hosts helper missing".into(),
-						"run `testd setup-hosts-helper`",
-					));
-				}
-			},
+				},
+				Ok(()) => checks.push(Check::fail(
+					"resolver",
+					"setup ran but the route is not reported".into(),
+					"check `resolvectl status lo`",
+				)),
+				Err(e) => checks.push(Check::fail("resolver", e.to_string(), "run as a user with sudo")),
+			}
+		} else {
+			exit = 2;
+			checks.push(Check::fail(
+				"resolver",
+				"not configured".into(),
+				"run `testd doctor --fix` or `testd init --resolver-now`",
+			));
 		}
 
 		// `is_os_resolver_configured` only proves the route exists. Resolve the
 		// dashboard name the way a browser does, through the OS resolver.
 		let dashboard = format!("testd.{tld}");
-		let expected = match config.resolver {
-			ResolverBackend::Dns => std::net::IpAddr::V4(config.answer_addr),
-			ResolverBackend::Hosts => std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-		};
+		let expected = std::net::IpAddr::V4(config.answer_addr);
 		let mut resolved = resolve_via_os(&dashboard);
 		// The route can be correct while the host is not running yet. Answer the
 		// dashboard name from a one-shot server so this checks the OS route
 		// instead of requiring `testd host`. `false` means the port is taken,
 		// usually by the running host.
 		let mut probe_error = None;
-		if matches!(config.resolver, ResolverBackend::Dns)
-			&& !matches!(&resolved, Some(addrs) if addrs.contains(&expected))
-		{
+		if !matches!(&resolved, Some(addrs) if addrs.contains(&expected)) {
 			match start_resolution_probe(tld, config.answer_addr).await {
 				Ok(true) => {
 					resolved = resolve_via_os_until(&dashboard, expected, std::time::Duration::from_secs(2)).await;
@@ -647,10 +615,7 @@ async fn doctor(fix: bool, json: bool) -> anyhow::Result<i32> {
 		}
 		// A route can exist while mDNSResponder or systemd-resolved still answers
 		// from a stale cache. Rewriting the route also refreshes that cache.
-		let resolved = if fix
-			&& matches!(config.resolver, ResolverBackend::Dns)
-			&& !matches!(&resolved, Some(addrs) if addrs.contains(&expected))
-		{
+		let resolved = if fix && !matches!(&resolved, Some(addrs) if addrs.contains(&expected)) {
 			match testd_setup::setup_os_resolver(tld, dns_addr) {
 				Ok(()) => resolve_via_os_until(&dashboard, expected, std::time::Duration::from_secs(5)).await,
 				Err(_) => resolved,
@@ -1112,8 +1077,6 @@ fn export_caddyfile() -> anyhow::Result<()> {
 	Ok(())
 }
 
-const HOSTS_HELPER_SCRIPT: &str = include_str!("../scripts/testd-hosts-helper");
-
 fn uninstall(purge: bool, keep_resolver: bool, keep_certificate: bool) -> anyhow::Result<()> {
 	let config = testd_core::config::load_host_config().ok();
 	let tld = testd_core::config::host_tld();
@@ -1187,90 +1150,4 @@ fn remove_local_data(errors: &mut Vec<String>) {
 	if let Err(e) = std::fs::remove_dir_all(&dir) {
 		errors.push(format!("local data: {e}"));
 	}
-}
-
-fn setup_hosts_helper(prefix: std::path::PathBuf) -> anyhow::Result<()> {
-	use std::process::Command;
-
-	if cfg!(windows) {
-		anyhow::bail!("the hosts helper is not supported on Windows; use the built-in DNS resolver");
-	}
-
-	let libexec = prefix.join("libexec");
-	let helper_path = libexec.join("testd-hosts-helper");
-
-	eprintln!("installing hosts helper to {}", helper_path.display());
-
-	// Create the libexec directory.
-	let status = Command::new("sudo").args(["mkdir", "-p"]).arg(&libexec).status()?;
-	if !status.success() {
-		anyhow::bail!("failed to create {}", libexec.display());
-	}
-
-	// Write the script via sudo tee.
-	let mut child = Command::new("sudo")
-		.arg("tee")
-		.arg(&helper_path)
-		.stdin(std::process::Stdio::piped())
-		.stdout(std::process::Stdio::null())
-		.spawn()?;
-	if let Some(mut stdin) = child.stdin.take() {
-		use std::io::Write;
-		stdin.write_all(HOSTS_HELPER_SCRIPT.as_bytes())?;
-	}
-	let status = child.wait()?;
-	if !status.success() {
-		anyhow::bail!("failed to write helper script");
-	}
-
-	// Make executable.
-	let status = Command::new("sudo").args(["chmod", "755"]).arg(&helper_path).status()?;
-	if !status.success() {
-		anyhow::bail!("failed to chmod helper script");
-	}
-
-	// Install sudoers drop-in.
-	let user = std::env::var("SUDO_USER")
-		.or_else(|_| std::env::var("USER"))
-		.or_else(|_| std::env::var("LOGNAME"))?;
-	if user.is_empty() || !user.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
-		anyhow::bail!("refusing to write a sudoers rule for an invalid user name: {user:?}");
-	}
-	let sudoers_line = format!("{user} ALL=(root) NOPASSWD: {}\n", helper_path.display());
-	let sudoers_path = "/etc/sudoers.d/testd-hosts-helper";
-
-	eprintln!("installing sudoers rule to {sudoers_path}");
-
-	let mut child = Command::new("sudo")
-		.arg("tee")
-		.arg(sudoers_path)
-		.stdin(std::process::Stdio::piped())
-		.stdout(std::process::Stdio::null())
-		.spawn()?;
-	if let Some(mut stdin) = child.stdin.take() {
-		use std::io::Write;
-		stdin.write_all(sudoers_line.as_bytes())?;
-	}
-	let status = child.wait()?;
-	if !status.success() {
-		anyhow::bail!("failed to write sudoers rule");
-	}
-
-	let status = Command::new("sudo").args(["chmod", "440", sudoers_path]).status()?;
-	if !status.success() {
-		anyhow::bail!("failed to chmod sudoers file");
-	}
-
-	// Verify the sudoers file is valid.
-	let status = Command::new("sudo").args(["visudo", "-c", "-f", sudoers_path]).status()?;
-	if !status.success() {
-		eprintln!("warning: sudoers validation failed; you may need to fix {sudoers_path} manually");
-	}
-
-	eprintln!("\nHosts helper installed successfully.");
-	eprintln!("Add this to your [host] config if it is not already set:");
-	eprintln!("  resolver = \"hosts\"");
-	eprintln!("  hosts_helper_path = \"{}\"", helper_path.display());
-
-	Ok(())
 }

@@ -130,7 +130,7 @@ Run them on real machines, not inside the dev container. A macOS, Linux, and Win
 
 | Script | Checks |
 |---|---|
-| `tests/host/linux.sh` | resolver route, CA trust, edge TLS, loopback dashboard, DNS A records, token requests, issued tokens, local registration, sharing, quick launches, URL actions, doctor state checks, launch-at-login entry, hosts helper, systemd unit |
+| `tests/host/linux.sh` | resolver route, CA trust, edge TLS, loopback dashboard, DNS A records, token requests, issued tokens, local registration, sharing, quick launches, URL actions, doctor state checks, launch-at-login entry, systemd unit |
 | `tests/host/macos.sh` | resolver file, CA trust, edge, loopback dashboard, DNS, token requests, issued tokens, local registration, sharing, quick launches, URL actions, doctor state checks, launch-at-login entry, launchd plist |
 | `tests/host/windows.ps1` | edge and proxy without system trust, loopback dashboard, NRPT and root trust when elevated, DNS on port 53, token requests, issued tokens, local registration, sharing, quick launches, URL actions, launch-at-login entry |
 | `tests/host/gui-checklist.md` | setup dialog, tray, dashboard window, click-to-open, single instance, quick launches, certificate controls, URL actions, packaging/signing |

@@ -19,7 +19,7 @@ days. Credit is given unless you ask otherwise.
 ## Design boundaries
 
 - The daemon never needs root at runtime; privileged setup is limited to the OS
-  resolver, the root CA trust store, and `/etc/hosts`.
+  resolver and the root CA trust store.
 - The root CA key stays in the host config directory and is never copied to a dev environment.
 - Leaf certificates live 24 hours; the local intermediate lives one year and renews near expiry without replacing the root. Renewal requires the root key and backs up the previous intermediate first.
 - Leaf tokens are approved only over the node's loopback dashboard or control channel, stored with mode `0600`, and revocable. A token request never receives the operator secret. Dashboard mutations and `/api/local/*` require the per-run control token from `control.json`; a bare dashboard URL is read-only.
