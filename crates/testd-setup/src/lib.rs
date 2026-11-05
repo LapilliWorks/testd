@@ -689,6 +689,14 @@ mod tests {
 	}
 
 	#[test]
+	fn trust_removal_requires_a_certificate_before_elevation() {
+		for pem in ["", " \t\n"] {
+			assert_eq!(untrust_root(pem).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+			assert_eq!(untrust_root_gui(pem).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+		}
+	}
+
+	#[test]
 	fn macos_root_list_parses_every_certificate() {
 		let output = "keychain: \"/Library/Keychains/System.keychain\"\n\
 		-----BEGIN CERTIFICATE-----\nAAEC\n-----END CERTIFICATE-----\n\
@@ -1136,11 +1144,20 @@ fn trust_root_windows(cert_pem: &str) -> io::Result<()> {
 	result
 }
 
+fn require_root_certificate(cert_pem: &str) -> io::Result<()> {
+	if cert_pem.trim().is_empty() {
+		return Err(io::Error::new(io::ErrorKind::InvalidInput, "root certificate is required to identify trust"));
+	}
+	Ok(())
+}
+
 /// Remove the testd root from the system trust store via `sudo`.
 ///
 /// Removal is safe to repeat: a certificate that is already gone is not an
 /// error, so an uninstall can run after a partial failure.
-pub fn untrust_root(_cert_pem: &str) -> io::Result<()> {
+pub fn untrust_root(cert_pem: &str) -> io::Result<()> {
+	require_root_certificate(cert_pem)?;
+
 	#[cfg(target_os = "linux")]
 	return untrust_root_linux();
 
@@ -1148,14 +1165,16 @@ pub fn untrust_root(_cert_pem: &str) -> io::Result<()> {
 	return untrust_root_macos();
 
 	#[cfg(target_os = "windows")]
-	return untrust_root_windows(_cert_pem);
+	return untrust_root_windows(cert_pem);
 
 	#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 	Err(io::Error::new(io::ErrorKind::Unsupported, "unsupported platform for trust removal"))
 }
 
 /// Remove the testd root via a native GUI authorization dialog.
-pub fn untrust_root_gui(_cert_pem: &str) -> io::Result<()> {
+pub fn untrust_root_gui(cert_pem: &str) -> io::Result<()> {
+	require_root_certificate(cert_pem)?;
+
 	#[cfg(target_os = "linux")]
 	{
 		let script = trust_remove_script();
@@ -1188,7 +1207,7 @@ pub fn untrust_root_gui(_cert_pem: &str) -> io::Result<()> {
 	}
 	#[cfg(target_os = "windows")]
 	{
-		untrust_root_windows(_cert_pem)
+		untrust_root_windows(cert_pem)
 	}
 	#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 	Err(io::Error::new(io::ErrorKind::Unsupported, "unsupported platform for trust removal"))

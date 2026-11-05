@@ -1165,25 +1165,10 @@ fn remove_trusted_root(config: Option<&testd_core::config::HostConfig>, errors: 
 				Err(e) => errors.push(format!("certificate: {e}")),
 			}
 		},
-		Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-			// Linux and macOS can remove their known anchors without the local
-			// certificate. Windows needs it to derive the thumbprint.
-			#[cfg(not(target_os = "windows"))]
-			{
-				match testd_setup::untrust_root("") {
-					Ok(()) => {
-						eprintln!("no root certificate at {}; removed the known anchors", path.display());
-						removed = true;
-					},
-					Err(e) => errors.push(format!("certificate: {e}")),
-				}
-			}
-			#[cfg(target_os = "windows")]
-			errors.push(format!(
-				"certificate: {} is missing; cannot identify the trusted root thumbprint, so trust was not removed",
-				path.display()
-			));
-		},
+		Err(e) if e.kind() == std::io::ErrorKind::NotFound => errors.push(format!(
+			"certificate: {} is missing; cannot identify the trusted root, so trust was not removed",
+			path.display()
+		)),
 		Err(e) => errors.push(format!("certificate: read {}: {e}", path.display())),
 	}
 
