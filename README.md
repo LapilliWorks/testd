@@ -213,7 +213,6 @@ Useful `[host]` keys:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `resolver` | `dns` | `dns` (built-in server) or `hosts` (single-node only) |
 | `listen_addr` | `127.0.0.1:7737` | Dev-environment intake |
 | `edge_addr` | `127.0.0.1:443` | HTTPS edge; use a high port if the binary lacks `CAP_NET_BIND_SERVICE` |
 | `allow_remote_targets` | `false` | Permit a remote leaf to name a target other than its own address |

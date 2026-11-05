@@ -86,6 +86,27 @@ fn init_is_idempotent() {
 }
 
 #[test]
+fn readme_host_configuration_uses_supported_keys() {
+	let config: testd_core::config::HostConfig = toml::from_str("").unwrap();
+	let value = toml::Value::try_from(config).unwrap();
+	let host = value.as_table().unwrap();
+	let section = include_str!("../README.md")
+		.split_once("Useful `[host]` keys:")
+		.expect("host configuration table exists")
+		.1
+		.split_once("\n\nClient state")
+		.expect("host configuration table ends before client state")
+		.0;
+	let mut keys = 0;
+	for line in section.lines().filter(|line| line.starts_with("| `")) {
+		let key = line.split('`').nth(1).unwrap();
+		assert!(host.contains_key(key), "README documents unsupported host setting {key}");
+		keys += 1;
+	}
+	assert!(keys > 0, "host configuration table is empty");
+}
+
+#[test]
 fn init_defaults_to_loopback_listeners() {
 	let home = TempDir::new().unwrap();
 	assert!(init(home.path()).status.success());
