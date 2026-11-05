@@ -23,8 +23,9 @@
 		leaf expires within 24 hours</label>
 	<label>Leaf SHA-256 fingerprint from the browser certificate viewer:
 		<input id="fingerprint" size="68" placeholder="64 hex digits; colons allowed"></label>
-	<label><input type="checkbox" id="errors"> Opened the links below and saw actual HTTP 404 and 502 responses</label>
-	<p><a id="unknown" target="_blank" rel="noopener">Reserved, unregistered name: expect 404</a> |
+	<label><input type="checkbox" id="errors"> Opened all three links and observed the expected dashboard, failure, and 502</label>
+	<p><a id="dashboard" target="_blank" rel="noopener">Dashboard: expect 200</a> |
+		<a id="unknown" target="_blank" rel="noopener">Unregistered name: expect a DNS or TLS failure</a> |
 		<a id="dead" target="_blank" rel="noopener">Registered, dead upstream: expect 502</a></p>
 	<label><input type="checkbox" id="renewal"> Restarted the daemon, reloaded, and confirmed the newly minted certificate
 		is still trusted (rerun automatic checks after restarting)</label>
@@ -36,7 +37,8 @@
 <script type="module">
 const metadata = await (await fetch('/meta')).json();
 document.querySelector('#metadata').textContent = `${location.origin}; ${metadata.commit}; ${navigator.userAgent}`;
-document.querySelector('#unknown').href = `https://testd.${metadata.tld}:${metadata.edgePort}/`;
+document.querySelector('#dashboard').href = `https://testd.${metadata.tld}:${metadata.edgePort}/`;
+document.querySelector('#unknown').href = `https://unregistered.releasecheck.${metadata.tld}:${metadata.edgePort}/`;
 document.querySelector('#dead').href = `https://dead.releasecheck.${metadata.tld}:${metadata.edgePort}/`;
 const results = [];
 const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));

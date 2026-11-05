@@ -75,6 +75,15 @@ test('serves the harness and metadata', async () => {
 		commit: 'fixture-commit', hostManaged: true });
 });
 
+test('asks the operator to check the dashboard, an unregistered name, and a dead upstream', async () => {
+	const page = await (await fetch(`${origin}/`)).text();
+	expect(page).toContain('Dashboard: expect 200');
+	expect(page).toContain('unregistered.releasecheck.${metadata.tld}');
+	expect(page).toContain('Unregistered name: expect a DNS or TLS failure');
+	expect(page).toContain('Registered, dead upstream: expect 502');
+	expect(page).not.toContain('expect 404');
+});
+
 test('streams SSE and counts uploaded bytes', async () => {
 	const response = await fetch(`${origin}/events`);
 	const reader = response.body!.getReader();
