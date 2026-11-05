@@ -30,9 +30,39 @@ Never count an ignored, skipped, inapplicable, or unrun check as a pass. A succe
 
 `crates/testd-daemon/tests/product_flow.rs` composes the real registration engine, DNS server, and TLS edge on ephemeral loopback sockets. Its root is trusted only by the test client, and a resolver wrapper forbids system integration. It is not a full daemon process, OS trust test, browser test, or GUI test.
 
+## Platform scripts
+
+Run the matching script on the actual platform, with Python 3.12 or newer, Rust toolchains 1.89 and stable, `cargo-nextest`, and Bun installed. The scripts do not install dependencies. With no arguments they run the non-GUI automated sequence and save a private report.
+
+```sh
+python3 scripts/test-linux.py
+python3 scripts/test-macos.py
+```
+
+```powershell
+python scripts\test-windows.py
+```
+
+Use the Linux script in WSL. Each entry point rejects a different operating system. Run `--help` to see the available suites and options. The same options work on all three platforms:
+
+| Invocation | Checks |
+|---|---|
+| `automated --gui` | Default automated checks plus the Rust 1.90 tray check and full-workspace tests; requires platform GUI prerequisites |
+| `contracts` | Release contracts including ignored cases; currently fails on known blockers |
+| `audit` | Full-workspace cargo-deny audit; requires `cargo-deny` |
+| `host --bin <candidate> --report <new-report>` | Unprivileged candidate CLI and daemon checks |
+| `host --build --report <new-report>` | Build a candidate, then run the unprivileged host checks |
+| `host --bin <candidate> --report <new-report> --system` | Privileged resolver and trust checks; requires a disposable, backed-up host and interactive confirmation |
+| `browser --bin <candidate> --report <new-report>` | Launch the browser fixture; complete the real-browser checklist yourself |
+| `desktop --app <candidate> --report <new-report>` | Launch the candidate and record the interactive desktop checklist |
+
+For example, `python3 scripts/test-linux.py host --build --report "$HOME/testd-reports/linux-host"` builds and tests on Linux. On Windows, use `python scripts\test-windows.py host --bin target\release\testd.exe --report C:\testd-reports\windows-host`. Report paths must not exist already; build, system, and desktop reports must be outside temporary directories. The build preserves an existing target binary in the report and uses a checkout-specific compiler fingerprint. It assumes Cargo's native target and standard output layout; it does not by itself establish release-artifact provenance. Automatic builds reject `CARGO_BUILD_TARGET`; use `--bin` for a separately built candidate or custom Cargo target configuration.
+
+System, desktop, browser-trust, and installation checks require a clean disposable machine and a persisted full-system snapshot. On Linux and macOS, validate sudo in the same terminal before `host --system`; on Windows, use an elevated PowerShell. The runner's scoped snapshot is not a full machine backup. Desktop and browser suites need actual operator interaction; they are not covered by the automated fixtures.
+
 ## Routine automated checks
 
-From the repository root, with the project toolchains and Bun installed:
+The scripts above run these commands. To run them individually from the repository root:
 
 ```sh
 cargo +stable fmt --all -- --check
