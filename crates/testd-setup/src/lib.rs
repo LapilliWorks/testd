@@ -115,13 +115,12 @@ Domains=~{tld}\n",
 	)
 }
 
-/// `DNS=` and `Domains=` as systemd-resolved merges them: the last assignment
-/// wins, an empty assignment clears the list, and only `[Resolve]` counts.
-/// Returns `None` for a key that is unset or cleared.
+/// `DNS=` and `Domains=` accumulate across systemd-resolved configuration;
+/// an empty assignment clears the list, and only `[Resolve]` counts.
 #[cfg(any(target_os = "linux", test))]
 fn resolved_global_values(files: &[String]) -> (Option<String>, Option<String>) {
-	let mut dns = None;
-	let mut domains = None;
+	let mut dns = Vec::new();
+	let mut domains = Vec::new();
 	for content in files {
 		let mut in_resolve = false;
 		for line in content.lines() {
@@ -137,16 +136,21 @@ fn resolved_global_values(files: &[String]) -> (Option<String>, Option<String>) 
 				continue;
 			}
 			let Some((key, value)) = line.split_once('=') else { continue };
+			let values = match key.trim() {
+				"DNS" => &mut dns,
+				"Domains" => &mut domains,
+				_ => continue,
+			};
 			let value = value.trim();
-			let value = (!value.is_empty()).then(|| value.to_owned());
-			match key.trim() {
-				"DNS" => dns = value,
-				"Domains" => domains = value,
-				_ => {},
+			if value.is_empty() {
+				values.clear();
+			} else {
+				values.push(value);
 			}
 		}
 	}
-	(dns, domains)
+	let joined = |values: Vec<&str>| (!values.is_empty()).then(|| values.join(" "));
+	(joined(dns), joined(domains))
 }
 
 /// resolved.conf plus its drop-ins, except testd's own file.
@@ -751,7 +755,7 @@ mod tests {
 	}
 
 	#[test]
-	fn resolved_global_values_follow_the_last_assignment() {
+	fn resolved_global_values_clear_lists_on_empty_assignment() {
 		let files = vec![
 			"[Resolve]\nDNS=1.1.1.1\nDomains=~corp\n".to_owned(),
 			"[Resolve]\nDNS=10.0.0.1\n".to_owned(),
@@ -760,6 +764,17 @@ mod tests {
 		let (dns, domains) = resolved_global_values(&files);
 		assert_eq!(dns, None, "an empty assignment clears the list");
 		assert_eq!(domains.as_deref(), Some("~corp"));
+	}
+
+	#[test]
+	fn resolved_global_values_accumulate_lists_until_reset() {
+		let files = vec![
+			"[Resolve]\nDNS=1.1.1.1\nDomains=~corp\n".to_owned(),
+			"[Resolve]\nDNS=9.9.9.9\nDomains=~dev\n".to_owned(),
+		];
+		let (dns, domains) = resolved_global_values(&files);
+		assert_eq!(dns.as_deref(), Some("1.1.1.1 9.9.9.9"));
+		assert_eq!(domains.as_deref(), Some("~corp ~dev"));
 	}
 
 	#[test]
