@@ -279,24 +279,28 @@ if ($secondDaemon.ExitCode -ne 0 -and $lockText -match 'another testd daemon is 
 }
 
 Section 'edge'
-if ((Curl-Status "testd.$Tld" '/ok.svg') -eq '404') {
+# The dashboard name is served through the edge only to loopback clients.
+if ((Curl-Status "testd.$Tld" '/ok.svg') -eq '200') {
 	Pass "edge terminates TLS for testd.$Tld"
 } else {
 	Fail "edge terminates TLS for testd.$Tld"
 }
-# The dashboard is loopback-only, so the edge answers 404 for its name. Check the
-# status rather than letting --fail write to stderr: PowerShell 5.1 turns native
-# stderr into a terminating error while the error preference is Stop.
-if ((Curl-Status "testd.$Tld" '/') -eq '404') {
-	Pass 'the dashboard is not served through the edge'
-} else {
-	Fail 'the dashboard is not served through the edge'
-}
-if ((Curl-Status "testd.$Tld" '/api/status') -eq '404') {
-	Pass 'the dashboard is not proxied through the edge'
-} else {
-	Fail 'the dashboard is not proxied through the edge'
-}
+try {
+	$page = Curl-Get "testd.$Tld" '/'
+	if ($page -match 'Active domains') {
+		Pass 'loopback dashboard is served through the edge'
+	} else {
+		Fail 'loopback dashboard is served through the edge'
+	}
+} catch { Fail "loopback dashboard is served through the edge: $_" }
+try {
+	$status = (Curl-Get "testd.$Tld" '/api/status') | ConvertFrom-Json
+	if ($status.tld -and ($status.domains -is [array]) -and ($status.shares -is [array])) {
+		Pass 'loopback dashboard status is proxied through the edge'
+	} else {
+		Fail 'loopback dashboard status is proxied through the edge'
+	}
+} catch { Fail "loopback dashboard status is proxied through the edge: $_" }
 
 Section 'local dashboard'
 try {
@@ -659,12 +663,12 @@ if ($env:TESTD_HOST_TEST_SYSTEM -eq '1' -and $isAdmin -and $daemonUp) {
 			Format-Table Namespace, NameServers, Name | Out-String | Write-Host
 	}
 	if ((certutil -store Root) -match 'testd root') { Pass 'root trust store' } else { Fail 'root trust store' }
-	# No --insecure here: any HTTP status means Schannel accepted the chain from
-	# the machine trust store.
-	if ((System-Status "testd.$Tld" '/ok.svg') -eq '404') {
+	# No --insecure here: a 200 response confirms Schannel accepted the chain.
+	$systemStatus = System-Status "testd.$Tld" '/ok.svg'
+	if ($systemStatus -eq '200') {
 		Pass 'system trust (TLS accepted without --insecure)'
 	} else {
-		Fail "system trust (TLS accepted without --insecure): $((System-Status "testd.$Tld" '/ok.svg'))"
+		Fail "system trust (TLS accepted without --insecure): $systemStatus"
 	}
 	$resolverUrl = Invoke-Captured $TestdBin 'url', 'testd://fix/resolver'
 	if ($resolverUrl.ExitCode -eq 0) {
