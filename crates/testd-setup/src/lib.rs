@@ -66,24 +66,82 @@ fn is_os_resolver_configured_macos(tld: &str, addr: SocketAddr) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn is_os_resolver_configured_linux(tld: &str, addr: SocketAddr) -> bool {
-	let Ok(output) = silent_command("resolvectl").args(["status"]).output() else {
-		return false;
-	};
-	if !output.status.success() {
-		return false;
+#[derive(Debug, PartialEq, Eq)]
+struct GlobalResolverState {
+	dns: Vec<String>,
+	domains: Vec<String>,
+}
+
+#[cfg(target_os = "linux")]
+impl GlobalResolverState {
+	fn is_compatible(&self, tld: &str, addr: SocketAddr) -> bool {
+		if self.dns.len() != 1 || self.domains.len() != 1 {
+			return false;
+		}
+		let server = self.dns[0]
+			.parse::<SocketAddr>()
+			.ok()
+			.or_else(|| self.dns[0].parse::<std::net::IpAddr>().ok().map(|ip| SocketAddr::new(ip, 53)));
+		let domain = self.domains[0].strip_prefix('~').map(|domain| domain.trim_end_matches('.'));
+		server == Some(addr) && domain.is_some_and(|domain| domain.eq_ignore_ascii_case(tld))
 	}
-	let stdout = String::from_utf8_lossy(&output.stdout);
-	// `resolvectl status` prints the global section first, then one block per
-	// link; the route lives in the global section because it comes from a
-	// `[Resolve]` drop-in rather than from per-link configuration.
-	let global = stdout.split("\nLink ").next().unwrap_or_default();
-	global.contains(&dns_server_value(addr)) && global.contains(&format!("~{tld}"))
+}
+
+#[cfg(target_os = "linux")]
+fn resolvectl_global_values(output: &str) -> io::Result<Vec<String>> {
+	let mut lines = output.lines();
+	let global = lines
+		.next()
+		.and_then(|line| line.strip_prefix("Global:"))
+		.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "resolvectl did not report global settings"))?;
+	let mut values: Vec<String> = global.split_whitespace().map(str::to_owned).collect();
+	for line in lines {
+		if !line.starts_with(char::is_whitespace) {
+			break;
+		}
+		values.extend(line.split_whitespace().map(str::to_owned));
+	}
+	Ok(values)
+}
+
+#[cfg(target_os = "linux")]
+fn global_resolver_state(dns: &str, domains: &str) -> io::Result<GlobalResolverState> {
+	Ok(GlobalResolverState { dns: resolvectl_global_values(dns)?, domains: resolvectl_global_values(domains)? })
+}
+
+#[cfg(target_os = "linux")]
+fn systemd_probe(program: &str, args: &[&str]) -> io::Result<String> {
+	let output = silent_command(program)
+		.args(args)
+		.env("LC_ALL", "C")
+		.env("SYSTEMD_COLORS", "0")
+		.env("SYSTEMD_PAGER", "cat")
+		.env("COLUMNS", "10000")
+		.output()?;
+	if !output.status.success() {
+		return Err(io::Error::other(format!("{program} {} failed", args.join(" "))));
+	}
+	let text = String::from_utf8(output.stdout).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+	if text.contains('\0') {
+		return Err(io::Error::new(io::ErrorKind::InvalidData, "systemd probe returned a NUL byte"));
+	}
+	Ok(text.trim_end_matches('\n').to_owned())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_resolver_outputs() -> io::Result<(String, String)> {
+	Ok((systemd_probe("resolvectl", &["dns"])?, systemd_probe("resolvectl", &["domain"])?))
+}
+
+#[cfg(target_os = "linux")]
+fn is_os_resolver_configured_linux(tld: &str, addr: SocketAddr) -> bool {
+	let Ok((dns, domains)) = linux_resolver_outputs() else { return false };
+	global_resolver_state(&dns, &domains).is_ok_and(|state| state.is_compatible(tld, addr))
 }
 
 #[cfg(any(target_os = "linux", test))]
 fn dns_server_value(addr: SocketAddr) -> String {
-	format!("{}:{}", addr.ip(), addr.port())
+	addr.to_string()
 }
 
 /// Path where the Linux resolver route is written.
@@ -720,6 +778,29 @@ mod tests {
 	#[test]
 	fn sha1_hex_matches_a_known_digest() {
 		assert_eq!(sha1_hex(b"abc"), "a9993e364706816aba3e25717850c26c9cd0d89d");
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn linux_resolver_requires_an_exact_compatible_global_scope() {
+		let addr: SocketAddr = "127.0.0.1:7753".parse().unwrap();
+		let dns = "Global: 127.0.0.1:7753\nLink 2 (eth0): 1.1.1.1\n";
+		let domains = "Global: ~test\nLink 2 (eth0): ~corp\n";
+		let state = global_resolver_state(dns, domains).unwrap();
+		assert!(state.is_compatible("test", addr));
+		let extra_dns = global_resolver_state("Global: 127.0.0.1:7753\n        1.1.1.1\n", domains).unwrap();
+		assert!(!extra_dns.is_compatible("test", addr));
+		let extra_domain = global_resolver_state(dns, "Global: ~test ~corp\n").unwrap();
+		assert!(!extra_domain.is_compatible("test", addr));
+		let similar_domain = global_resolver_state(dns, "Global: ~testing\n").unwrap();
+		assert!(!similar_domain.is_compatible("test", addr));
+		let equivalent = global_resolver_state(dns, "Global: ~TEST.\n").unwrap();
+		assert!(equivalent.is_compatible("test", addr));
+		let ipv6: SocketAddr = "[::1]:7753".parse().unwrap();
+		let ipv6_state = global_resolver_state("Global: [0:0:0:0:0:0:0:1]:7753\n", domains).unwrap();
+		assert!(ipv6_state.is_compatible("test", ipv6));
+		assert_eq!(dns_server_value(ipv6), "[::1]:7753");
+		assert!(global_resolver_state("Link 2 (eth0): 1.1.1.1\n", domains).is_err());
 	}
 
 	#[cfg(target_os = "linux")]

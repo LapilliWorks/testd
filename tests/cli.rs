@@ -132,7 +132,10 @@ fn init_reports_an_already_configured_resolver() {
 	let resolvectl = bin.join("resolvectl");
 	std::fs::write(
 		&resolvectl,
-		format!("#!/bin/sh\nprintf 'DNS Servers: 127.0.0.1:{DEFAULT_DNS_PORT}\\nDNS Domain: ~test\\n'\n"),
+		format!(
+			"#!/bin/sh\ncase \"$1\" in\n  dns) printf 'Global: 127.0.0.1:{DEFAULT_DNS_PORT}\\n' ;;\n\
+			  domain) printf 'Global: ~test\\n' ;;\n  *) exit 1 ;;\nesac\n"
+		),
 	)
 	.unwrap();
 	std::fs::set_permissions(&resolvectl, std::fs::Permissions::from_mode(0o755)).unwrap();
