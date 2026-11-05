@@ -89,22 +89,28 @@ check_daemon() {
 
 check_edge() {
 	section 'edge'
-	# The certificate is minted on demand; the name itself has no registration.
-	if [ "$(http_status "testd.$TLD" /ok.svg)" = '404' ]; then
+	# The dashboard name is served through the edge only to loopback clients.
+	if [ "$(http_status "testd.$TLD" /ok.svg)" = '200' ]; then
 		pass "edge terminates TLS for testd.$TLD"
 	else
 		fail "edge terminates TLS for testd.$TLD"
 	fi
-	# The dashboard is loopback-only, not a proxied testd name.
-	if http_get "testd.$TLD" / >/dev/null 2>&1; then
-		fail 'the dashboard is not served through the edge'
+	local page
+	if page="$(http_get "testd.$TLD" /)" && grep -q 'Active domains' <<<"$page"; then
+		pass 'loopback dashboard is served through the edge'
 	else
-		pass 'the dashboard is not served through the edge'
+		fail 'loopback dashboard is served through the edge'
 	fi
-	if http_get "testd.$TLD" /api/status >/dev/null 2>&1; then
-		fail 'the dashboard is not proxied through the edge'
+	if http_get "testd.$TLD" /api/status | python3 -c '
+import json, sys
+value = json.load(sys.stdin)
+assert value["tld"]
+assert isinstance(value["domains"], list)
+assert isinstance(value["shares"], list)
+' 2>/dev/null; then
+		pass 'loopback dashboard status is proxied through the edge'
 	else
-		pass 'the dashboard is not proxied through the edge'
+		fail 'loopback dashboard status is proxied through the edge'
 	fi
 }
 
