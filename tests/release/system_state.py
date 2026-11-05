@@ -1,11 +1,9 @@
 """Snapshot and restore the OS integration that `testd doctor --fix` installs.
 
-The host suite assumes no testd daemon is running while it holds this state, and
-that the pre-run integration comes back afterwards. Every artifact `doctor --fix`
-writes is either a plain file or a store entry scoped to the throwaway TLD or to
-the `testd root` prefix and the separate `testd root testing` fixture name, so a
-byte-exact backup plus a manifest restores a host exactly. Restores are idempotent, so a report can be restored again after a hard
-kill.
+The host suite requires a clean disposable host and records each integration
+path before privileged checks. Restores are idempotent and can be retried after
+a hard kill. A changed pre-existing owned file cannot be restored automatically
+because replacing its bytes would not preserve the ownership-bound inode.
 
 Unix files and the macOS keychain are handled here. Windows NRPT rules and the
 machine root store are delegated to `windows-system-state.ps1`, which keeps the
@@ -165,6 +163,7 @@ def files(host):
 				'reload': ['systemctl', 'reload', 'systemd-resolved']},
 			{'path': anchor, 'reload': reload},
 			{'path': f'{anchor}.owner'},
+			{'path': '/etc/systemd/resolved.conf.d/90-testd.conf.owner'},
 		]
 	if host.system == 'Darwin':
 		return [{'path': f'/etc/resolver/{host.tld}'}]
@@ -240,8 +239,9 @@ def snapshot(host, directory, artifacts=None):
 	if host.system == 'Linux':
 		anchor, _ = linux_trust()
 		entries = {entry['path']: entry for entry in manifest['files']}
-		if entries.get(anchor, {}).get('exists') and entries.get(f'{anchor}.owner', {}).get('exists'):
-			entries[anchor]['identity'] = host.identity(anchor)
+		for path in ('/etc/systemd/resolved.conf.d/90-testd.conf', anchor):
+			if entries.get(path, {}).get('exists') and entries.get(f'{path}.owner', {}).get('exists'):
+				entries[path]['identity'] = host.identity(path)
 	if host.system == 'Darwin':
 		for index, (sha1, der) in enumerate(keychain_certificates(host).items()):
 			blob = f'{BLOBS}/cert-{index}.der'
@@ -308,7 +308,7 @@ def restore(host, directory):
 		path = entry['path']
 		if (not host.exists(path) or host.identity(path) != entry['identity']
 				or digest(host.read(path)) != entry['sha256'] or host.mode(path) != entry.get('mode', 0o644)):
-			return [f'{path}: the owned anchor changed; automatic restore cannot preserve its identity']
+			return [f'{path}: the owned system file changed; automatic restore cannot preserve its identity']
 	problems = []
 	for entry in manifest['files']:
 		problems += restore_file(host, directory, entry)

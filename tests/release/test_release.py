@@ -336,7 +336,7 @@ class SystemStateTests(unittest.TestCase):
 			backup = pathlib.Path(temporary) / 'system-before'
 			state.snapshot(host, backup, [{'path': '/tmp/self-test-only'}])
 			self.assertEqual([entry['path'] for entry in state.load(backup)['files']], ['/tmp/self-test-only'])
-			self.assertEqual(len(state.files(host)), 3)
+			self.assertEqual(len(state.files(host)), 4)
 
 	def test_self_test_artifacts_keep_the_paths_but_drop_the_resolver_reload(self):
 		host = FakeHost()
@@ -379,6 +379,9 @@ class SystemStateTests(unittest.TestCase):
 			self.assertIn(item['path'], setup)
 		self.assertEqual(artifacts[2]['path'], artifacts[1]['path'] + '.owner')
 		self.assertIn('format!("{}.owner", layout.anchor)', setup)
+		self.assertEqual(artifacts[3]['path'], artifacts[0]['path'] + '.owner')
+		resolver = (ROOT / 'crates/testd-setup/src/linux_resolver.rs').read_text()
+		self.assertIn('format!("{}.owner", layout.dropin)', resolver)
 		macos = state.files(FakeHost('Darwin', 'testdcheck'))[0]['path']
 		self.assertIn(macos.rsplit('/', 1)[0], setup)
 		windows = (ROOT / 'tests/release/windows-system-state.ps1').read_text()
@@ -448,7 +451,7 @@ class SystemStateTests(unittest.TestCase):
 	def test_restore_does_not_replace_an_unchanged_owned_anchor(self):
 		with tempfile.TemporaryDirectory() as temporary:
 			host = FakeHost()
-			anchor, marker = (item['path'] for item in state.files(host)[1:])
+			anchor, marker = (item['path'] for item in state.files(host)[1:3])
 			host.files = {anchor: b'original root', marker: b'original ownership'}
 			backup = pathlib.Path(temporary) / 'system-before'
 			state.snapshot(host, backup)
@@ -459,7 +462,7 @@ class SystemStateTests(unittest.TestCase):
 		for change in ('content', 'identity', 'mode'):
 			with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
 				host = FakeHost()
-				anchor, marker = (item['path'] for item in state.files(host)[1:])
+				anchor, marker = (item['path'] for item in state.files(host)[1:3])
 				host.files = {anchor: b'original root', marker: b'original ownership'}
 				backup = pathlib.Path(temporary) / 'system-before'
 				state.snapshot(host, backup)
@@ -471,9 +474,24 @@ class SystemStateTests(unittest.TestCase):
 					host.modes[anchor] = 0o600
 				before = dict(host.files)
 				problems = state.restore(host, backup)
-				self.assertTrue(any('owned anchor changed' in problem for problem in problems), problems)
+				self.assertTrue(any('owned system file changed' in problem for problem in problems), problems)
 				self.assertEqual(host.files, before)
 				self.assertEqual(host.commands, [])
+
+	def test_restore_refuses_a_replaced_owned_resolver(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			host = FakeHost()
+			artifacts = state.files(host)
+			resolver, marker = artifacts[0]['path'], artifacts[3]['path']
+			host.files = {resolver: b'original route', marker: b'original ownership'}
+			backup = pathlib.Path(temporary) / 'system-before'
+			state.snapshot(host, backup)
+			host.identities[resolver] = 'replacement inode'
+			problems = state.restore(host, backup)
+			self.assertTrue(any('owned system file changed' in problem for problem in problems), problems)
+			self.assertEqual(host.files[resolver], b'original route')
+			self.assertEqual(host.files[marker], b'original ownership')
+			self.assertEqual(host.commands, [])
 
 	def test_restore_is_idempotent(self):
 		with tempfile.TemporaryDirectory() as temporary:

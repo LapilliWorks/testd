@@ -5,8 +5,8 @@
 #   cargo build --release -p testd
 #   tests/host/linux.sh
 #
-# Resolver and trust checks need a snapshot, so they only run through the runner,
-# which restores the integration afterwards:
+# Resolver and trust checks need a clean disposable host and a snapshot. They
+# only run through the runner, which restores the integration afterwards:
 #   sudo -v && python3 tests/release/run.py host --system
 
 set -euo pipefail

@@ -169,7 +169,7 @@ The generated Caddyfile terminates TLS with Caddy's internal CA and proxies to `
 
 ## Hosts resolver
 
-The default resolver is a built-in DNS server on loopback. The alternative edits the hosts file:
+The default resolver is a built-in DNS server on loopback. On Linux, setup uses a compatible existing global route without adopting it and reports conflicting global settings or per-link routes instead of changing them. The alternative edits the hosts file:
 
 ```toml
 [host]
@@ -275,4 +275,4 @@ testd uninstall --keep-certificate
 
 `uninstall` removes the OS resolver route and the trusted root. `--purge` also deletes `~/.config/testd`, including the PKI, tokens, and local state, but only after system cleanup succeeds. `--keep-resolver` and `--keep-certificate` preserve either system change. If the local root certificate is missing, testd skips trust removal and reports incomplete cleanup; restore the certificate before retrying or use `--keep-certificate` to retain trust intentionally.
 
-On Linux, testd leaves an unowned or changed trust anchor in place. Purging with `--keep-certificate` deletes `system-ownership-id` and `pki/root.crt`; back them up first if testd should remove its owned anchor later.
+On Linux, testd leaves unowned or changed resolver and trust state in place. Purging with either `--keep-resolver` or `--keep-certificate` deletes `system-ownership-id`; back it up first if testd should remove its owned system state later. For retained trust, also back up `pki/root.crt`.

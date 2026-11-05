@@ -316,7 +316,7 @@ def binary(run):
 
 
 def system_snapshot(run, tld, interactive=False):
-	"""Record the OS integration `doctor --fix` will change, so the run can restore it."""
+	"""Snapshot OS integration and refuse pre-existing state before system checks."""
 	state = helper('system_state')
 	if SYSTEM != 'Windows' and not interactive:
 		require('sudo')

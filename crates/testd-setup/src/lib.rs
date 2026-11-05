@@ -7,6 +7,8 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 #[cfg(target_os = "linux")]
+mod linux_resolver;
+#[cfg(target_os = "linux")]
 mod ownership;
 
 /// Spawn a child without popping a console window from a windowless parent.
@@ -70,12 +72,19 @@ fn is_os_resolver_configured_macos(tld: &str, addr: SocketAddr) -> bool {
 struct GlobalResolverState {
 	dns: Vec<String>,
 	domains: Vec<String>,
+	link_domains: Vec<String>,
 }
 
 #[cfg(target_os = "linux")]
 impl GlobalResolverState {
+	fn has_link_route(&self, tld: &str) -> bool {
+		self.link_domains
+			.iter()
+			.any(|domain| domain.trim_start_matches('~').trim_end_matches('.').eq_ignore_ascii_case(tld))
+	}
+
 	fn is_compatible(&self, tld: &str, addr: SocketAddr) -> bool {
-		if self.dns.len() != 1 || self.domains.len() != 1 {
+		if self.dns.len() != 1 || self.domains.len() != 1 || self.has_link_route(tld) {
 			return false;
 		}
 		let server = self.dns[0]
@@ -105,8 +114,38 @@ fn resolvectl_global_values(output: &str) -> io::Result<Vec<String>> {
 }
 
 #[cfg(target_os = "linux")]
+fn resolvectl_link_domains(output: &str) -> io::Result<Vec<String>> {
+	let mut lines = output.lines();
+	if !lines.next().is_some_and(|line| line.starts_with("Global:")) {
+		return Err(io::Error::new(io::ErrorKind::InvalidData, "resolvectl did not report global settings"));
+	}
+	let mut domains = Vec::new();
+	let mut in_link = false;
+	for line in lines {
+		if line.starts_with("Link ") {
+			let (_, values) = line
+				.rsplit_once("):")
+				.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid resolvectl link output"))?;
+			in_link = true;
+			domains.extend(values.split_whitespace().map(str::to_owned));
+		} else if line.starts_with(char::is_whitespace) {
+			if in_link {
+				domains.extend(line.split_whitespace().map(str::to_owned));
+			}
+		} else if !line.is_empty() {
+			return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid resolvectl link output"));
+		}
+	}
+	Ok(domains)
+}
+
+#[cfg(target_os = "linux")]
 fn global_resolver_state(dns: &str, domains: &str) -> io::Result<GlobalResolverState> {
-	Ok(GlobalResolverState { dns: resolvectl_global_values(dns)?, domains: resolvectl_global_values(domains)? })
+	Ok(GlobalResolverState {
+		dns: resolvectl_global_values(dns)?,
+		domains: resolvectl_global_values(domains)?,
+		link_domains: resolvectl_link_domains(domains)?,
+	})
 }
 
 #[cfg(target_os = "linux")]
@@ -223,7 +262,7 @@ fn resolved_active() -> bool {
 #[derive(Debug, PartialEq, Eq)]
 enum LinuxResolverPreflight {
 	Compatible,
-	Ready,
+	Ready { snapshot: String },
 }
 
 #[cfg(target_os = "linux")]
@@ -237,6 +276,12 @@ fn assess_linux_resolver(
 	let state = global_resolver_state(dns_output, domain_output)?;
 	if state.is_compatible(tld, addr) {
 		return Ok(LinuxResolverPreflight::Compatible);
+	}
+	if state.has_link_route(tld) {
+		return Err(io::Error::new(
+			io::ErrorKind::AlreadyExists,
+			format!("systemd-resolved already has a per-link route for .{tld}; testd will not change it"),
+		));
 	}
 	if !state.dns.is_empty() || !state.domains.is_empty() {
 		return Err(io::Error::new(
@@ -258,7 +303,9 @@ fn assess_linux_resolver(
 			format!("systemd-resolved configuration contains global {}; testd will not change it", existing.join(" ")),
 		));
 	}
-	Ok(LinuxResolverPreflight::Ready)
+	Ok(LinuxResolverPreflight::Ready {
+		snapshot: linux_resolver::snapshot_hash(dns_output, domain_output, configuration),
+	})
 }
 
 /// Inspect the live global scope and systemd's merged configuration before
@@ -317,15 +364,6 @@ fn resolver_commands(tld: &str, addr: SocketAddr) -> Vec<String> {
 	]
 }
 
-#[cfg(target_os = "linux")]
-fn resolver_commands(tld: &str, addr: SocketAddr) -> Vec<String> {
-	let content = shell_quote(&resolved_dropin(tld, addr));
-	vec![format!(
-		"mkdir -p {RESOLVED_DROPIN_DIR} && printf '%s' {content} > {RESOLVED_DROPIN} \
-		 && systemctl reload systemd-resolved"
-	)]
-}
-
 /// How to obtain the privileges for a one-time system change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Elevation {
@@ -336,6 +374,14 @@ pub enum Elevation {
 }
 
 impl Elevation {
+	#[cfg(target_os = "linux")]
+	fn linux_authorizer(self) -> &'static str {
+		match self {
+			Self::Sudo => "sudo",
+			Self::Gui => "pkexec",
+		}
+	}
+
 	/// Configure the OS resolver using this strategy.
 	pub fn setup_os_resolver(self, tld: &str, addr: SocketAddr) -> io::Result<()> {
 		match self {
@@ -354,12 +400,7 @@ pub fn setup_os_resolver(tld: &str, addr: SocketAddr) -> io::Result<()> {
 	return setup_sudo_unix(tld, addr);
 
 	#[cfg(target_os = "linux")]
-	{
-		match linux_resolver_preflight(tld, addr)? {
-			LinuxResolverPreflight::Compatible => Ok(()),
-			LinuxResolverPreflight::Ready => setup_sudo_unix(tld, addr),
-		}
-	}
+	return linux_resolver::setup(tld, addr, Elevation::Sudo);
 
 	#[cfg(target_os = "windows")]
 	return setup_gui_windows(tld, addr);
@@ -369,7 +410,7 @@ pub fn setup_os_resolver(tld: &str, addr: SocketAddr) -> io::Result<()> {
 }
 
 /// Run each resolver command individually with `sudo`.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "macos")]
 fn setup_sudo_unix(tld: &str, addr: SocketAddr) -> io::Result<()> {
 	for cmd in resolver_commands(tld, addr) {
 		let status = silent_command("sudo").args(["sh", "-c", &cmd]).status()?;
@@ -389,7 +430,7 @@ pub fn setup_os_resolver_gui(tld: &str, addr: SocketAddr) -> io::Result<()> {
 	return setup_gui_macos(tld, addr);
 
 	#[cfg(target_os = "linux")]
-	return setup_gui_linux(tld, addr);
+	return linux_resolver::setup(tld, addr, Elevation::Gui);
 
 	#[cfg(target_os = "windows")]
 	return setup_gui_windows(tld, addr);
@@ -405,24 +446,6 @@ fn setup_gui_macos(tld: &str, addr: SocketAddr) -> io::Result<()> {
 	let osascript = format!("do shell script \"{script}\" with administrator privileges");
 
 	let status = silent_command("osascript").args(["-e", &osascript]).status()?;
-	if !status.success() {
-		return Err(io::Error::new(
-			io::ErrorKind::PermissionDenied,
-			"resolver setup failed (user cancelled or auth error)",
-		));
-	}
-	Ok(())
-}
-
-/// Linux: use `pkexec` (polkit) for a native auth dialog.
-#[cfg(target_os = "linux")]
-fn setup_gui_linux(tld: &str, addr: SocketAddr) -> io::Result<()> {
-	if linux_resolver_preflight(tld, addr)? == LinuxResolverPreflight::Compatible {
-		return Ok(());
-	}
-	let script = resolver_commands(tld, addr).join(" && ");
-
-	let status = silent_command("pkexec").args(["sh", "-c", &script]).status()?;
 	if !status.success() {
 		return Err(io::Error::new(
 			io::ErrorKind::PermissionDenied,
@@ -536,7 +559,7 @@ pub fn teardown_os_resolver(tld: &str) -> io::Result<()> {
 	return teardown_macos(tld);
 
 	#[cfg(target_os = "linux")]
-	return teardown_linux(tld);
+	return linux_resolver::teardown(tld, Elevation::Sudo);
 
 	#[cfg(target_os = "windows")]
 	return teardown_windows(tld);
@@ -559,16 +582,6 @@ fn teardown_macos(tld: &str) -> io::Result<()> {
 	let status = silent_command("sudo").args(["killall", "-HUP", "mDNSResponder"]).status()?;
 	if !status.success() {
 		return Err(io::Error::other("sudo killall -HUP mDNSResponder failed"));
-	}
-	Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn teardown_linux(_tld: &str) -> io::Result<()> {
-	let script = format!("rm -f {RESOLVED_DROPIN} && systemctl reload systemd-resolved");
-	let status = silent_command("sudo").args(["sh", "-c", &script]).status()?;
-	if !status.success() {
-		return Err(io::Error::new(io::ErrorKind::PermissionDenied, "removing the resolver drop-in failed"));
 	}
 	Ok(())
 }
@@ -810,6 +823,8 @@ mod tests {
 		assert!(!extra_domain.is_compatible("test", addr));
 		let similar_domain = global_resolver_state(dns, "Global: ~testing\n").unwrap();
 		assert!(!similar_domain.is_compatible("test", addr));
+		let link_conflict = global_resolver_state(dns, "Global: ~test\nLink 2 (eth0): ~TEST.\n").unwrap();
+		assert!(!link_conflict.is_compatible("test", addr));
 		let equivalent = global_resolver_state(dns, "Global: ~TEST.\n").unwrap();
 		assert!(equivalent.is_compatible("test", addr));
 		let ipv6: SocketAddr = "[::1]:7753".parse().unwrap();
@@ -824,10 +839,10 @@ mod tests {
 	fn linux_resolver_preflight_refuses_existing_or_pending_global_settings() {
 		let addr: SocketAddr = "127.0.0.1:7753".parse().unwrap();
 		let empty = "Global:";
-		assert_eq!(
+		assert!(matches!(
 			assess_linux_resolver("test", addr, empty, empty, "# no global settings\n").unwrap(),
-			LinuxResolverPreflight::Ready
-		);
+			LinuxResolverPreflight::Ready { .. }
+		));
 		assert_eq!(
 			assess_linux_resolver("test", addr, "Global: 127.0.0.1:7753", "Global: ~test", "DNS=1.1.1.1").unwrap(),
 			LinuxResolverPreflight::Compatible
@@ -835,6 +850,7 @@ mod tests {
 		for (dns, domains, config) in [
 			("Global: 1.1.1.1", empty, ""),
 			(empty, "Global: ~corp", ""),
+			(empty, "Global:\nLink 2 (eth0):\n        TEST.\n", ""),
 			(empty, empty, "# /usr/lib/systemd/resolved.conf.d/40-vendor.conf\n[Resolve]\nDNS=9.9.9.9\n"),
 			(empty, empty, "# /run/systemd/resolved.conf.d/70-corp.conf\n[Resolve]\nDomains=~corp\n"),
 		] {
@@ -842,18 +858,10 @@ mod tests {
 			assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
 		}
 		let reset = "[Resolve]\nDNS=1.1.1.1\nDomains=~corp\n[Resolve]\nDNS=\nDomains=\n";
-		assert_eq!(assess_linux_resolver("test", addr, empty, empty, reset).unwrap(), LinuxResolverPreflight::Ready);
-	}
-
-	#[cfg(target_os = "linux")]
-	#[test]
-	fn linux_resolver_writes_a_dropin_instead_of_per_link_config() {
-		let addr: SocketAddr = "127.0.0.1:7753".parse().unwrap();
-		let commands = resolver_commands("test", addr);
-		assert_eq!(commands.len(), 1);
-		assert!(commands[0].contains("90-testd.conf"));
-		assert!(commands[0].contains("systemctl reload systemd-resolved"));
-		assert!(!commands[0].contains("resolvectl"));
+		assert!(matches!(
+			assess_linux_resolver("test", addr, empty, empty, reset).unwrap(),
+			LinuxResolverPreflight::Ready { .. }
+		));
 	}
 
 	#[cfg(target_os = "macos")]
@@ -1364,11 +1372,7 @@ fn trust_root_linux(cert_pem: &str, elevation: Elevation) -> io::Result<()> {
 	}
 	let owner = ownership::InstallationId::load_or_create()?;
 	let script = trust_install_script(&layout);
-	let program = match elevation {
-		Elevation::Sudo => "sudo",
-		Elevation::Gui => "pkexec",
-	};
-	let mut command = silent_command(program);
+	let mut command = silent_command(elevation.linux_authorizer());
 	command.args(["sh", "-c", &script]);
 	let status = run_with_stdin(command, &owned_trust_input(&owner, cert_pem))?;
 	match status.code() {
@@ -1493,11 +1497,7 @@ fn untrust_root_linux(cert_pem: &str, elevation: Elevation) -> io::Result<()> {
 	}
 	let owner = ownership::InstallationId::load()?.ok_or_else(|| trust_ownership_conflict(anchor))?;
 	let script = trust_remove_script(&layout);
-	let program = match elevation {
-		Elevation::Sudo => "sudo",
-		Elevation::Gui => "pkexec",
-	};
-	let mut command = silent_command(program);
+	let mut command = silent_command(elevation.linux_authorizer());
 	command.args(["sh", "-c", &script]);
 	let status = run_with_stdin(command, &owned_trust_input(&owner, cert_pem))?;
 	match status.code() {
