@@ -736,6 +736,23 @@ class ManualContractTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name != 'nt' and shutil.which('bash'), 'Unix bash host checks are unavailable')
 class UnixHostContractTests(unittest.TestCase):
+	def test_test_contract_documents_trigger_the_ci_test_job(self):
+		with tempfile.TemporaryDirectory() as directory:
+			fake_git = pathlib.Path(directory) / 'git'
+			fake_git.write_text("#!/bin/sh\ncase \"$1\" in\n"
+				"  cat-file) exit 0 ;;\n  diff) printf '%s\\n' \"$CHANGED_FILE\" ;;\n  *) exit 1 ;;\nesac\n",
+				encoding='utf-8')
+			fake_git.chmod(0o700)
+			for index, path in enumerate(['README.md', 'tests/README.md', 'tests/manual/browser.md',
+				'tests/host/gui-checklist.md']):
+				with self.subTest(path=path):
+					output = pathlib.Path(directory) / f'output-{index}'
+					env = {**os.environ, 'PATH': f'{directory}{os.pathsep}{os.environ.get("PATH", "")}',
+						'EVENT': 'push', 'BASE': 'fixture', 'GITHUB_REF': 'refs/heads/master',
+						'GITHUB_OUTPUT': str(output), 'CHANGED_FILE': path}
+					subprocess.run(['bash', 'scripts/ci-changes.sh'], cwd=ROOT, env=env, timeout=5, check=True)
+					self.assertEqual(output.read_text(), 'rust=true\nrelease=false\nsite=false\n')
+
 	def test_system_trust_requires_a_successful_dashboard_response(self):
 		script = '''
 set -eu

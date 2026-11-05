@@ -18,8 +18,8 @@ rust=(
 	'.github/**'
 	'Cargo.toml' 'Cargo.lock' 'rust-toolchain.toml' 'rustfmt.toml' 'deny.toml'
 	'src/**' 'crates/**' 'src-tauri/**' 'frontend/**'
-	'tests/cli.rs' 'tests/host/**'
-	'config.example.toml' 'scripts/testd-elevated.ps1'
+	'tests/cli.rs' 'tests/host/**' 'tests/manual/**' 'tests/README.md'
+	'README.md' 'config.example.toml' 'scripts/testd-elevated.ps1'
 )
 release=( '.github/**' 'scripts/**' 'tests/release/**' 'packaging/**' )
 site=(
