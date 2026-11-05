@@ -302,6 +302,15 @@ class PlatformSequenceTests(unittest.TestCase):
 			encoded = runner.candidate_build_environment(run)
 		self.assertIn('-C\x1fdebuginfo=0\x1f-C\x1fmetadata=testd-check-', encoded['CARGO_ENCODED_RUSTFLAGS'])
 
+	def test_native_target_is_read_from_the_stable_toolchain(self):
+		run = Mock()
+		run.command.return_value = 'rustc 1.99.0\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\n'
+		self.assertEqual(runner.native_build_target(run, {}), 'x86_64-unknown-linux-gnu')
+		run.command.assert_called_once_with('rustc-host', ['rustc', '+stable', '-vV'], 60, env={})
+		run.command.return_value = 'rustc 1.99.0\nhost: ../../outside\n'
+		with self.assertRaisesRegex(RuntimeError, 'native Rust target'):
+			runner.native_build_target(run, {})
+
 	def test_automatic_build_refuses_an_explicit_cross_target(self):
 		run = Mock(args=SimpleNamespace(bin=None), metadata={'commit': 'fixture'})
 		with patch.dict(os.environ, {'CARGO_BUILD_TARGET': 'another-target'}):
@@ -310,36 +319,42 @@ class PlatformSequenceTests(unittest.TestCase):
 		run.command.assert_not_called()
 
 	def test_build_keeps_a_verified_backup_of_an_existing_candidate(self):
-		for system, name in [('Linux', 'testd'), ('Windows', 'testd.exe')]:
+		for system, name, triple in [('Linux', 'testd', 'x86_64-unknown-linux-gnu'),
+			('Windows', 'testd.exe', 'x86_64-pc-windows-msvc')]:
 			with self.subTest(system=system), tempfile.TemporaryDirectory() as directory:
-				root = pathlib.Path(directory)
-				candidate = root / 'target/release' / name
+				root = pathlib.Path(directory).resolve()
+				candidate = root / 'target' / triple / 'release' / name
 				candidate.parent.mkdir(parents=True)
 				candidate.write_bytes(b'previous candidate')
 				report = root / 'report'
 				report.mkdir()
 				run = Mock(args=SimpleNamespace(bin=None), output=report, metadata={})
 				run.command.side_effect = lambda *args, **kwargs: candidate.write_bytes(b'new candidate')
-				with patch.object(runner, 'SYSTEM', system), patch.dict(os.environ, {'CARGO_TARGET_DIR': str(root / 'target')}):
+				with patch.object(runner, 'SYSTEM', system), patch.dict(os.environ, {'CARGO_TARGET_DIR': str(root / 'target')}), \
+					patch.object(runner, 'native_build_target', return_value=triple):
 					self.assertEqual(runner.binary(run), candidate)
 				self.assertEqual((report / f'pre-build-{name}').read_bytes(), b'previous candidate')
 				self.assertEqual(candidate.read_bytes(), b'new candidate')
 				self.assertEqual(run.metadata['binaries'][str(candidate)], runner.file_digest(candidate))
 				self.assertEqual(run.command.call_args.args[1], ['cargo', '+stable', 'build', '--release',
-					'--bin', 'testd', '--locked'])
+					'--bin', 'testd', '--locked', '--target', triple])
 
 	@unittest.skipIf(os.name == 'nt', 'the synthetic cargo fixture uses a Unix shell')
 	def test_build_sequence_runs_with_a_real_child_and_retains_the_backup(self):
 		with tempfile.TemporaryDirectory() as directory:
 			root = pathlib.Path(directory).resolve()
 			target = root / 'target'
-			candidate = target / 'release/testd'
+			triple = 'x86_64-unknown-linux-gnu'
+			candidate = target / triple / 'release/testd'
 			candidate.parent.mkdir(parents=True)
 			candidate.write_bytes(b'old executable')
 			fake_bin = root / 'bin'
 			fake_bin.mkdir()
+			fake_rustc = fake_bin / 'rustc'
+			fake_rustc.write_text(f'#!/bin/sh\nprintf "host: {triple}\\n"\n', encoding='utf-8')
+			fake_rustc.chmod(0o700)
 			fake_cargo = fake_bin / 'cargo'
-			fake_cargo.write_text('#!/bin/sh\nprintf "new executable" > "$CARGO_TARGET_DIR/release/testd"\n'
+			fake_cargo.write_text(f'#!/bin/sh\nprintf "new executable" > "$CARGO_TARGET_DIR/{triple}/release/testd"\n'
 				'printf "%s" "$RUSTFLAGS" > "$CARGO_TARGET_DIR/flags"\n', encoding='utf-8')
 			fake_cargo.chmod(0o700)
 			args = SimpleNamespace(report=root / 'report', suite='fixture', bin=None)
@@ -370,13 +385,15 @@ class PlatformSequenceTests(unittest.TestCase):
 	def test_build_refuses_an_unverified_backup_before_compiling(self):
 		with tempfile.TemporaryDirectory() as directory:
 			root = pathlib.Path(directory)
-			candidate = root / 'target/release/testd'
+			triple = 'x86_64-unknown-linux-gnu'
+			candidate = root / 'target' / triple / 'release/testd'
 			candidate.parent.mkdir(parents=True)
 			candidate.write_bytes(b'previous candidate')
 			run = Mock(args=SimpleNamespace(bin=None), output=root, metadata={})
 			def corrupt_copy(source, destination):
 				destination.write_bytes(b'corrupt backup')
 			with patch.object(runner, 'SYSTEM', 'Linux'), patch.dict(os.environ, {'CARGO_TARGET_DIR': str(root / 'target')}), \
+				patch.object(runner, 'native_build_target', return_value=triple), \
 				patch.object(runner.shutil, 'copy2', side_effect=corrupt_copy):
 				with self.assertRaisesRegex(RuntimeError, 'verify the pre-build candidate backup'):
 					runner.binary(run)
@@ -389,11 +406,13 @@ class PlatformSequenceTests(unittest.TestCase):
 			root = pathlib.Path(directory)
 			target = root / 'unrelated'
 			target.write_bytes(b'keep')
-			candidate = root / 'target/release/testd'
+			triple = 'x86_64-unknown-linux-gnu'
+			candidate = root / 'target' / triple / 'release/testd'
 			candidate.parent.mkdir(parents=True)
 			candidate.symlink_to(target)
 			run = Mock(args=SimpleNamespace(bin=None), output=root, metadata={})
-			with patch.object(runner, 'SYSTEM', 'Linux'), patch.dict(os.environ, {'CARGO_TARGET_DIR': str(root / 'target')}):
+			with patch.object(runner, 'SYSTEM', 'Linux'), patch.dict(os.environ, {'CARGO_TARGET_DIR': str(root / 'target')}), \
+				patch.object(runner, 'native_build_target', return_value=triple):
 				with self.assertRaisesRegex(RuntimeError, 'candidate.*symlink'):
 					runner.binary(run)
 			run.command.assert_not_called()

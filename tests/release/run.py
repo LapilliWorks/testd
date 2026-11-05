@@ -353,6 +353,16 @@ def candidate_build_environment(run):
 	return env
 
 
+def native_build_target(run, env):
+	output = run.command('rustc-host', ['rustc', '+stable', '-vV'], 60, env=env)
+	for line in output.splitlines():
+		if line.startswith('host: '):
+			target = line.removeprefix('host: ').strip()
+			if re.fullmatch(r'[A-Za-z0-9_.-]+', target):
+				return target
+	raise RuntimeError('could not determine the native Rust target from rustc')
+
+
 def backup_build_candidate(run, path):
 	if path.is_symlink():
 		raise RuntimeError(f'existing build candidate is a symlink: {path}')
@@ -379,10 +389,15 @@ def binary(run):
 		base = pathlib.Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'target'))
 		if not base.is_absolute():
 			base = ROOT / base
-		path = base / 'release' / ('testd.exe' if SYSTEM == 'Windows' else 'testd')
+		base = base.resolve()
 		env = candidate_build_environment(run)
+		env['CARGO_TARGET_DIR'] = str(base)
+		target = native_build_target(run, env)
+		run.metadata['build_target'] = target
+		path = base / target / 'release' / ('testd.exe' if SYSTEM == 'Windows' else 'testd')
 		backup_build_candidate(run, path)
-		run.command('build-cli', ['cargo', '+stable', 'build', '--release', '--bin', 'testd', '--locked'], 1200, env=env)
+		run.command('build-cli', ['cargo', '+stable', 'build', '--release', '--bin', 'testd', '--locked',
+			'--target', target], 1200, env=env)
 		path = path.resolve()
 	run.metadata.setdefault('binaries', {})[str(path)] = file_digest(path)
 	run.save()
