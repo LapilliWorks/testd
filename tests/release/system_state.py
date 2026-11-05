@@ -72,10 +72,15 @@ class Host:
 			return self._run(self.argv(['cat', str(path)], True))
 
 	def exists(self, path):
-		return pathlib.Path(path).exists()
+		path = pathlib.Path(path)
+		return path.exists() or path.is_symlink()
 
 	def mode(self, path):
 		return stat.S_IMODE(pathlib.Path(path).stat().st_mode)
+
+	def identity(self, path):
+		metadata = pathlib.Path(path).lstat()
+		return [metadata.st_dev, metadata.st_ino]
 
 	def write(self, path, data, mode=0o644):
 		"""Replace a path through a staged copy, so a failure cannot truncate it."""
@@ -159,6 +164,7 @@ def files(host):
 			{'path': '/etc/systemd/resolved.conf.d/90-testd.conf',
 				'reload': ['systemctl', 'reload', 'systemd-resolved']},
 			{'path': anchor, 'reload': reload},
+			{'path': f'{anchor}.owner'},
 		]
 	if host.system == 'Darwin':
 		return [{'path': f'/etc/resolver/{host.tld}'}]
@@ -231,6 +237,11 @@ def snapshot(host, directory, artifacts=None):
 			entry['sha256'] = digest(data)
 			(directory / entry['blob']).write_bytes(data)
 		manifest['files'].append(entry)
+	if host.system == 'Linux':
+		anchor, _ = linux_trust()
+		entries = {entry['path']: entry for entry in manifest['files']}
+		if entries.get(anchor, {}).get('exists') and entries.get(f'{anchor}.owner', {}).get('exists'):
+			entries[anchor]['identity'] = host.identity(anchor)
 	if host.system == 'Darwin':
 		for index, (sha1, der) in enumerate(keychain_certificates(host).items()):
 			blob = f'{BLOBS}/cert-{index}.der'
@@ -291,6 +302,13 @@ def restore(host, directory):
 	# reloads; a drifted host does, so the record is not a licence to skip checks.
 	if record.is_file() and not verify(host, directory, manifest):
 		return []
+	for entry in manifest['files']:
+		if 'identity' not in entry:
+			continue
+		path = entry['path']
+		if (not host.exists(path) or host.identity(path) != entry['identity']
+				or digest(host.read(path)) != entry['sha256'] or host.mode(path) != entry.get('mode', 0o644)):
+			return [f'{path}: the owned anchor changed; automatic restore cannot preserve its identity']
 	problems = []
 	for entry in manifest['files']:
 		problems += restore_file(host, directory, entry)
@@ -316,8 +334,10 @@ def restore_file(host, directory, entry):
 			data = (directory / entry['blob']).read_bytes()
 			if digest(data) != entry['sha256']:
 				return [f'{path}: the backed-up copy was modified']
-			host.write(path, data, entry.get('mode', 0o644))
-			changed = True
+			mode = entry.get('mode', 0o644)
+			if not host.exists(path) or digest(host.read(path)) != entry['sha256'] or host.mode(path) != mode:
+				host.write(path, data, mode)
+				changed = True
 		elif host.exists(path):
 			host.remove(path)
 			changed = True
@@ -367,6 +387,10 @@ def verify(host, directory, manifest=None):
 			problems.append(f'{path}: {condition} after restore')
 		elif entry['exists'] and digest(host.read(path)) != entry['sha256']:
 			problems.append(f'{path}: content differs from the snapshot')
+		elif entry['exists'] and host.mode(path) != entry.get('mode', 0o644):
+			problems.append(f'{path}: mode differs from the snapshot')
+		elif entry.get('identity') is not None and host.identity(path) != entry['identity']:
+			problems.append(f'{path}: ownership identity differs from the snapshot')
 	if manifest['system'] == 'Darwin':
 		expected = {entry['sha1'] for entry in manifest['certificates']}
 		current = set(keychain_certificates(host))
@@ -432,7 +456,8 @@ def install_fixture(host, directory, workdir):
 	for entry in load(directory)['files']:
 		is_certificate = entry['path'].endswith('.crt')
 		try:
-			host.write(entry['path'], certificate.read_bytes() if is_certificate else SELF_TEST_RESOLVER, 0o644)
+			mode = 0o600 if entry['path'].endswith('.owner') else 0o644
+			host.write(entry['path'], certificate.read_bytes() if is_certificate else SELF_TEST_RESOLVER, mode)
 			if entry.get('reload'):
 				host.command(entry['reload'], privileged=True)
 		except HostError as error:

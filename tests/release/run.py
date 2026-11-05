@@ -330,6 +330,11 @@ def system_snapshot(run, tld, interactive=False):
 		index += 1
 	backup.mkdir(mode=0o700)
 	manifest = state.snapshot(state.Host(SYSTEM, tld, interactive), backup)
+	occupied = state.occupied(backup)
+	if occupied:
+		detail = f'pre-existing integration: {", ".join(occupied)}; snapshot kept at {backup}'
+		run.record('system-snapshot', 'fail', detail)
+		raise RuntimeError(f'system checks require a clean disposable host; {detail}')
 	run.record('system-snapshot', 'pass', str(manifest))
 	return backup
 

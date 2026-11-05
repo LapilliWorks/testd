@@ -282,6 +282,8 @@ class FakeHost(state.Host):
 	def __init__(self, system='Linux', tld='testdcheck'):
 		super().__init__(system, tld)
 		self.files = {}
+		self.modes = {}
+		self.identities = {}
 		self.certificates = {}
 		self.certificate_names = {}
 		self.commands = []
@@ -291,8 +293,10 @@ class FakeHost(state.Host):
 		self.commands.append((argv, privileged))
 		if argv[0] == 'install':
 			self.files[argv[-1]] = pathlib.Path(argv[-2]).read_bytes()
+			self.modes[argv[-1]] = int(argv[2], 8)
 		elif argv[0] == 'rm':
 			self.files.pop(argv[-1], None)
+			self.modes.pop(argv[-1], None)
 		elif argv[:2] == ['security', 'find-certificate']:
 			return ''.join(state.encode_pem(der) for der in self.certificates.values())
 		elif argv[:2] == ['security', 'delete-certificate']:
@@ -312,17 +316,27 @@ class FakeHost(state.Host):
 		return self.files[str(path)]
 
 	def mode(self, path):
-		return 0o644
+		return self.modes.get(str(path), 0o644)
+
+	def identity(self, path):
+		return self.identities.get(str(path), str(path))
 
 
 class SystemStateTests(unittest.TestCase):
+	@unittest.skipIf(os.name == 'nt', 'creating symlinks may require Windows privileges')
+	def test_dangling_symlinks_count_as_existing_integration(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			path = pathlib.Path(temporary) / 'anchor'
+			path.symlink_to(pathlib.Path(temporary) / 'missing')
+			self.assertTrue(state.Host('Linux', 'testdcheck').exists(path))
+
 	def test_snapshot_accepts_an_artifact_override(self):
 		with tempfile.TemporaryDirectory() as temporary:
 			host = FakeHost()
 			backup = pathlib.Path(temporary) / 'system-before'
 			state.snapshot(host, backup, [{'path': '/tmp/self-test-only'}])
 			self.assertEqual([entry['path'] for entry in state.load(backup)['files']], ['/tmp/self-test-only'])
-			self.assertEqual(len(state.files(host)), 2)
+			self.assertEqual(len(state.files(host)), 3)
 
 	def test_self_test_artifacts_keep_the_paths_but_drop_the_resolver_reload(self):
 		host = FakeHost()
@@ -360,8 +374,10 @@ class SystemStateTests(unittest.TestCase):
 	def test_restore_targets_match_the_product(self):
 		"""The suite must restore the paths testd-setup writes, not a copy of them."""
 		setup = (ROOT / 'crates/testd-setup/src/lib.rs').read_text()
-		for item in state.files(FakeHost()):
+		artifacts = state.files(FakeHost())
+		for item in artifacts[:2]:
 			self.assertIn(item['path'], setup)
+		self.assertEqual(artifacts[2]['path'], artifacts[1]['path'] + '.owner')
 		macos = state.files(FakeHost('Darwin', 'testdcheck'))[0]['path']
 		self.assertIn(macos.rsplit('/', 1)[0], setup)
 		windows = (ROOT / 'tests/release/windows-system-state.ps1').read_text()
@@ -408,7 +424,7 @@ class SystemStateTests(unittest.TestCase):
 				host.files[item['path']] = b'installed by doctor --fix'
 			self.assertEqual(state.restore(host, backup), [])
 			self.assertEqual(host.files, {})
-			expected = [item['reload'] for item in state.files(host)]
+			expected = [item['reload'] for item in state.files(host) if item.get('reload')]
 			reloads = [argv for argv, _ in host.commands if argv in expected]
 			self.assertEqual(reloads, expected)
 
@@ -427,6 +443,36 @@ class SystemStateTests(unittest.TestCase):
 			state.snapshot(host, backup)
 			self.assertEqual(state.restore(host, backup), [])
 			self.assertEqual(host.commands, [], 'nothing changed, so nothing needs a privileged reload')
+
+	def test_restore_does_not_replace_an_unchanged_owned_anchor(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			host = FakeHost()
+			anchor, marker = (item['path'] for item in state.files(host)[1:])
+			host.files = {anchor: b'original root', marker: b'original ownership'}
+			backup = pathlib.Path(temporary) / 'system-before'
+			state.snapshot(host, backup)
+			self.assertEqual(state.restore(host, backup), [])
+			self.assertEqual(host.commands, [], 'unchanged files must retain their inode')
+
+	def test_restore_refuses_a_changed_owned_anchor(self):
+		for change in ('content', 'identity', 'mode'):
+			with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+				host = FakeHost()
+				anchor, marker = (item['path'] for item in state.files(host)[1:])
+				host.files = {anchor: b'original root', marker: b'original ownership'}
+				backup = pathlib.Path(temporary) / 'system-before'
+				state.snapshot(host, backup)
+				if change == 'content':
+					host.files[anchor] = b'later change'
+				elif change == 'identity':
+					host.identities[anchor] = 'replacement inode'
+				else:
+					host.modes[anchor] = 0o600
+				before = dict(host.files)
+				problems = state.restore(host, backup)
+				self.assertTrue(any('owned anchor changed' in problem for problem in problems), problems)
+				self.assertEqual(host.files, before)
+				self.assertEqual(host.commands, [])
 
 	def test_restore_is_idempotent(self):
 		with tempfile.TemporaryDirectory() as temporary:
@@ -586,13 +632,29 @@ class HostSystemTests(unittest.TestCase):
 		with tempfile.TemporaryDirectory() as directory:
 			run = self.create_run(directory)
 			fake = SimpleNamespace(Host=lambda *args, **kwargs: None,
-				snapshot=lambda host, backup: backup / 'manifest.json')
+				snapshot=lambda host, backup: backup / 'manifest.json', occupied=lambda backup: [])
 			with patch.object(runner, 'SYSTEM', 'Linux'), patch.object(runner, 'require'), \
 				patch.object(runner, 'helper', return_value=fake), \
 				patch.object(run, 'command', return_value='') as command, \
 				redirect_stdout(io.StringIO()):
 				runner.system_snapshot(run, 'testdcheck')
 			command.assert_called_once_with('sudo-ready', ['sudo', '-n', 'true'], terminal=True)
+
+	def test_system_snapshot_refuses_preexisting_integration(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			host = FakeHost()
+			marker = state.files(host)[2]['path']
+			host.files[marker] = b'another installation'
+			fake = SimpleNamespace(Host=lambda *args, **kwargs: host, snapshot=state.snapshot, occupied=state.occupied)
+			with patch.object(runner, 'SYSTEM', 'Linux'), patch.object(runner, 'helper', return_value=fake), \
+				redirect_stdout(io.StringIO()):
+				with self.assertRaisesRegex(RuntimeError, 'clean disposable host'):
+					runner.system_snapshot(run, 'testdcheck', interactive=True)
+			backup = run.output / 'system-before'
+			self.assertEqual(state.occupied(backup), [marker])
+			self.assertEqual(host.files[marker], b'another installation')
+			self.assertEqual(host.commands, [])
 
 	def test_host_checks_keep_the_terminal_only_for_system_runs(self):
 		for system in (False, True):
