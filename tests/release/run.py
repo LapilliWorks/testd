@@ -337,15 +337,53 @@ def core(run):
 		run.command('msrv-tray', ['cargo', '+1.90.0', 'check', '-p', 'testd-gui', '--locked'], 1200)
 
 
+def candidate_build_environment(run):
+	env = dict(os.environ)
+	if env.get('CARGO_BUILD_TARGET'):
+		raise RuntimeError('automatic candidate builds do not support CARGO_BUILD_TARGET; use --bin instead')
+	identity = f'{ROOT.resolve()}\0{run.metadata.get("commit", "")}'.encode(ENCODING)
+	fingerprint = hashlib.sha256(identity).hexdigest()[:16]
+	metadata = f'metadata=testd-check-{fingerprint}'
+	if 'CARGO_ENCODED_RUSTFLAGS' in env:
+		flags = env['CARGO_ENCODED_RUSTFLAGS']
+		env['CARGO_ENCODED_RUSTFLAGS'] = '\x1f'.join(filter(None, [flags, '-C', metadata]))
+	else:
+		env['RUSTFLAGS'] = ' '.join(filter(None, [env.get('RUSTFLAGS', ''), '-C', metadata]))
+	run.metadata['build_fingerprint'] = fingerprint
+	return env
+
+
+def backup_build_candidate(run, path):
+	if path.is_symlink():
+		raise RuntimeError(f'existing build candidate is a symlink: {path}')
+	if not path.exists():
+		return
+	if not path.is_file():
+		raise RuntimeError(f'existing build candidate is not a regular file: {path}')
+	backup = run.output / f'pre-build-{path.name}'
+	index = 2
+	while backup.exists() or backup.is_symlink():
+		backup = run.output / f'pre-build-{index}-{path.name}'
+		index += 1
+	before = file_digest(path)
+	shutil.copy2(path, backup)
+	if file_digest(backup) != before:
+		raise RuntimeError(f'could not verify the pre-build candidate backup: {backup}')
+	run.record('build-backup', 'pass', f'{backup}; sha256 {before}')
+
+
 def binary(run):
 	if run.args.bin:
 		path = run.args.bin.resolve()
 	else:
-		run.command('build-cli', ['cargo', 'build', '--release', '--bin', 'testd', '--locked'], 1200)
 		base = pathlib.Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'target'))
 		if not base.is_absolute():
 			base = ROOT / base
-		path = (base / 'release' / ('testd.exe' if SYSTEM == 'Windows' else 'testd')).resolve()
+		path = base / 'release' / ('testd.exe' if SYSTEM == 'Windows' else 'testd')
+		env = candidate_build_environment(run)
+		backup_build_candidate(run, path)
+		run.command('build-cli', ['cargo', '+stable', 'build', '--release', '--bin', 'testd', '--locked'], 1200, env=env)
+		path = path.resolve()
 	run.metadata.setdefault('binaries', {})[str(path)] = file_digest(path)
 	run.save()
 	return path

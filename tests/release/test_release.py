@@ -287,6 +287,79 @@ class PlatformSequenceTests(unittest.TestCase):
 		self.assertEqual([call.args[0] for call in required.call_args_list], ['cargo', 'rustup', 'cargo-deny'])
 		self.assertEqual(run.command.call_args.args[1], ['cargo', '+stable', 'deny', '--workspace', '--locked', 'check'])
 
+	def test_candidate_build_flags_distinguish_checkouts_and_preserve_existing_flags(self):
+		run = Mock(metadata={'commit': 'fixture'})
+		with patch.dict(os.environ, {'RUSTFLAGS': '-C debuginfo=0'}, clear=True), \
+			patch.object(runner, 'ROOT', pathlib.Path('/checkout-a')):
+			first = runner.candidate_build_environment(run)
+		with patch.dict(os.environ, {'RUSTFLAGS': '-C debuginfo=0'}, clear=True), \
+			patch.object(runner, 'ROOT', pathlib.Path('/checkout-b')):
+			second = runner.candidate_build_environment(run)
+		self.assertIn('-C debuginfo=0', first['RUSTFLAGS'])
+		self.assertIn('-C metadata=testd-check-', first['RUSTFLAGS'])
+		self.assertNotEqual(first['RUSTFLAGS'], second['RUSTFLAGS'])
+		with patch.dict(os.environ, {'CARGO_ENCODED_RUSTFLAGS': '-C\x1fdebuginfo=0'}, clear=True):
+			encoded = runner.candidate_build_environment(run)
+		self.assertIn('-C\x1fdebuginfo=0\x1f-C\x1fmetadata=testd-check-', encoded['CARGO_ENCODED_RUSTFLAGS'])
+
+	def test_automatic_build_refuses_an_explicit_cross_target(self):
+		run = Mock(args=SimpleNamespace(bin=None), metadata={'commit': 'fixture'})
+		with patch.dict(os.environ, {'CARGO_BUILD_TARGET': 'another-target'}):
+			with self.assertRaisesRegex(RuntimeError, 'CARGO_BUILD_TARGET'):
+				runner.binary(run)
+		run.command.assert_not_called()
+
+	def test_build_keeps_a_verified_backup_of_an_existing_candidate(self):
+		for system, name in [('Linux', 'testd'), ('Windows', 'testd.exe')]:
+			with self.subTest(system=system), tempfile.TemporaryDirectory() as directory:
+				root = pathlib.Path(directory)
+				candidate = root / 'target/release' / name
+				candidate.parent.mkdir(parents=True)
+				candidate.write_bytes(b'previous candidate')
+				report = root / 'report'
+				report.mkdir()
+				run = Mock(args=SimpleNamespace(bin=None), output=report, metadata={})
+				run.command.side_effect = lambda *args, **kwargs: candidate.write_bytes(b'new candidate')
+				with patch.object(runner, 'SYSTEM', system), patch.dict(os.environ, {'CARGO_TARGET_DIR': str(root / 'target')}):
+					self.assertEqual(runner.binary(run), candidate)
+				self.assertEqual((report / f'pre-build-{name}').read_bytes(), b'previous candidate')
+				self.assertEqual(candidate.read_bytes(), b'new candidate')
+				self.assertEqual(run.metadata['binaries'][str(candidate)], runner.file_digest(candidate))
+				self.assertEqual(run.command.call_args.args[1], ['cargo', '+stable', 'build', '--release',
+					'--bin', 'testd', '--locked'])
+
+	def test_build_refuses_an_unverified_backup_before_compiling(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = pathlib.Path(directory)
+			candidate = root / 'target/release/testd'
+			candidate.parent.mkdir(parents=True)
+			candidate.write_bytes(b'previous candidate')
+			run = Mock(args=SimpleNamespace(bin=None), output=root, metadata={})
+			def corrupt_copy(source, destination):
+				destination.write_bytes(b'corrupt backup')
+			with patch.object(runner, 'SYSTEM', 'Linux'), patch.dict(os.environ, {'CARGO_TARGET_DIR': str(root / 'target')}), \
+				patch.object(runner.shutil, 'copy2', side_effect=corrupt_copy):
+				with self.assertRaisesRegex(RuntimeError, 'verify the pre-build candidate backup'):
+					runner.binary(run)
+			run.command.assert_not_called()
+			self.assertEqual(candidate.read_bytes(), b'previous candidate')
+
+	@unittest.skipIf(os.name == 'nt', 'unprivileged symlink creation is not generally available on Windows')
+	def test_build_refuses_a_preexisting_candidate_symlink(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = pathlib.Path(directory)
+			target = root / 'unrelated'
+			target.write_bytes(b'keep')
+			candidate = root / 'target/release/testd'
+			candidate.parent.mkdir(parents=True)
+			candidate.symlink_to(target)
+			run = Mock(args=SimpleNamespace(bin=None), output=root, metadata={})
+			with patch.object(runner, 'SYSTEM', 'Linux'), patch.dict(os.environ, {'CARGO_TARGET_DIR': str(root / 'target')}):
+				with self.assertRaisesRegex(RuntimeError, 'candidate.*symlink'):
+					runner.binary(run)
+			run.command.assert_not_called()
+			self.assertEqual(target.read_bytes(), b'keep')
+
 
 class ArtifactInstallTests(unittest.TestCase):
 	def test_upgrade_and_rollback_preserve_state_with_backups(self):
