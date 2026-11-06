@@ -1,6 +1,7 @@
 import contextlib
 import importlib.util
 import io
+import os
 import pathlib
 import subprocess
 import sys
@@ -144,6 +145,28 @@ class PlatformScriptsTests(unittest.TestCase):
 				self.assertEqual(result.returncode, 0, result.stderr)
 				self.assertIn('automated', result.stdout)
 				self.assertIn('host', result.stdout)
+
+	def test_entry_points_ignore_a_preloaded_shadow_module(self):
+		for name in ('linux', 'macos', 'windows'):
+			with self.subTest(platform=name):
+				script = str(ROOT / f'scripts/test-{name}.py')
+				code = ("import runpy,sys,types; module=types.ModuleType('test_platform'); "
+					"module.main=lambda: 0; sys.modules['test_platform']=module; "
+					f"sys.argv=[{script!r}, '--help']; runpy.run_path({script!r}, run_name='__main__')")
+				result = subprocess.run([sys.executable, '-c', code], cwd=ROOT, capture_output=True, text=True, timeout=10)
+				self.assertEqual(result.returncode, 0, result.stderr)
+				self.assertIn('automated', result.stdout)
+
+	def test_entry_points_ignore_shadow_modules_with_safe_path_enabled(self):
+		with tempfile.TemporaryDirectory() as directory:
+			(pathlib.Path(directory) / 'test_platform.py').write_text('def main():\n\treturn 0\n', encoding='utf-8')
+			env = {**os.environ, 'PYTHONPATH': directory, 'PYTHONSAFEPATH': '1', 'PYTHONDONTWRITEBYTECODE': '1'}
+			for name in ('linux', 'macos', 'windows'):
+				with self.subTest(platform=name):
+					result = subprocess.run([sys.executable, str(ROOT / f'scripts/test-{name}.py'), '--help'],
+						cwd=ROOT, env=env, capture_output=True, text=True, timeout=10)
+					self.assertEqual(result.returncode, 0, result.stderr)
+					self.assertIn('automated', result.stdout)
 
 
 if __name__ == '__main__':
