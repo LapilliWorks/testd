@@ -175,12 +175,19 @@ if ($newestSource -and $newestSource.LastWriteTime -gt (Get-Item $TestdBin).Last
 $OutputRoot = if ($env:TESTD_HOST_OUTPUT_DIR) { $env:TESTD_HOST_OUTPUT_DIR } else {
 	Join-Path $env:LOCALAPPDATA 'testd\host-checks'
 }
+function Set-TestEnvironment([string]$HomeDirectory) {
+	$appData = Join-Path $HomeDirectory 'AppData\Roaming'
+	New-Item -ItemType Directory -Path $appData -Force | Out-Null
+	$env:APPDATA = $appData
+	$env:USERPROFILE = $HomeDirectory
+	$env:HOME = $HomeDirectory
+	# A directory cannot be launched as a provider: startup must not call real Tailscale.
+	$env:TESTD_TUNNEL = $HomeDirectory
+	return $appData
+}
+
 $TestHome = Join-Path $OutputRoot ('testd-host-' + [guid]::NewGuid().ToString('N'))
-$AppData = Join-Path $TestHome 'AppData\Roaming'
-New-Item -ItemType Directory -Path $AppData -Force | Out-Null
-$env:APPDATA = $AppData
-$env:USERPROFILE = $TestHome
-$env:HOME = $TestHome
+$AppData = Set-TestEnvironment $TestHome
 $Config = Join-Path $AppData 'testd\config.toml'
 $Pki = Join-Path $AppData 'testd\pki'
 $Control = Join-Path $AppData 'testd\control.json'

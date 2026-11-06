@@ -1175,6 +1175,7 @@ class DesktopRunnerTests(unittest.TestCase):
 			snapshot.assert_called_once_with(run, 'test', interactive=True)
 			restore.assert_called_once_with(run, backup, 'test', interactive=True)
 			self.assertNotIn('TESTD_HOST_TLD', launch.call_args.kwargs['env'])
+			self.assertEqual(launch.call_args.kwargs['env']['TESTD_TUNNEL'], str(run.output))
 			self.assertTrue(run.metadata['incomplete'])
 
 	def test_desktop_refuses_existing_user_data_before_system_snapshot(self):
@@ -1256,22 +1257,25 @@ class BrowserTests(unittest.TestCase):
 				redirect_stdout(io.StringIO()):
 				runner.browser(run)
 			self.assertEqual(events, ['start', 'stop'])
-			serve.assert_called_once_with('host-fixture', [str(binary_path), 'host'], stop_signal=signal.SIGINT)
+			self.assertEqual(serve.call_args.args, ('host-fixture', [str(binary_path), 'host']))
+			self.assertEqual(serve.call_args.kwargs['stop_signal'], signal.SIGINT)
+			self.assertEqual(serve.call_args.kwargs['env']['TESTD_TUNNEL'], str(run.output))
 			wait.assert_called_once_with(7737, 'process', 'output')
 			command.assert_called_once()
 
-	def test_browser_can_refuse_a_host_that_it_did_not_start(self):
+	def test_browser_refuses_a_host_that_it_did_not_start(self):
 		with tempfile.TemporaryDirectory() as directory:
 			run = self.create_run(directory)
-			run.args.require_managed_host = True
 			with patch.object(runner, 'require'), patch.object(runner, 'check_ports'), \
 				patch.object(runner, 'local_host_status', return_value={'tld': 'test'}), \
 				patch.object(runner, 'binary', return_value=pathlib.Path('candidate')), \
 				patch.object(runner, 'require_host_resolution') as resolution, \
-				patch.object(run, 'command') as command, redirect_stdout(io.StringIO()):
+				patch.object(run, 'serve') as serve, patch.object(run, 'command') as command, \
+				redirect_stdout(io.StringIO()):
 				with self.assertRaisesRegex(RuntimeError, 'existing host'):
 					runner.browser(run)
 			resolution.assert_not_called()
+			serve.assert_not_called()
 			command.assert_not_called()
 
 	def test_expected_browser_checks_match_the_page(self):
@@ -1373,8 +1377,9 @@ class BrowserTests(unittest.TestCase):
 				(run.output / 'browser-duplicate.json').write_text(json.dumps(result), encoding='utf-8')
 				return ''
 
+			host = SimpleNamespace(status={'tld': 'test'}, started=True)
 			with patch.object(runner, 'require'), patch.object(runner, 'check_ports'), \
-				patch.object(runner, 'local_host_status', return_value={'tld': 'test'}), \
+				patch.object(runner, 'HostFixture', return_value=contextlib.nullcontext(host)), \
 				patch.object(runner, 'binary', return_value=pathlib.Path('/bin/true')), \
 				patch.object(runner, 'require_host_resolution'), patch.object(run, 'command', side_effect=write_report), \
 				redirect_stdout(io.StringIO()):
@@ -1440,33 +1445,33 @@ class BrowserTests(unittest.TestCase):
 		with self.assertRaisesRegex(RuntimeError, 'is it initialized with `testd init`'):
 			runner.wait_for_host(7737, process, output)
 
-	def test_a_different_host_tld_is_refused_before_the_fixture_starts(self):
+	def test_a_different_managed_host_tld_is_refused_before_the_fixture_starts(self):
 		with tempfile.TemporaryDirectory() as directory:
 			run = self.create_run(directory)
+			host = SimpleNamespace(status={'tld': 'localhost'}, started=True)
 			with patch.object(runner, 'require'), \
 				patch.object(runner, 'check_ports'), \
-				patch.object(runner, 'local_host_status', return_value={'tld': 'localhost'}), \
+				patch.object(runner, 'HostFixture', return_value=contextlib.nullcontext(host)), \
 				patch.object(runner, 'binary', return_value=pathlib.Path('/bin/true')), \
-				patch.object(run, 'serve') as serve, \
+				patch.object(runner, 'require_host_resolution') as resolution, \
 				patch.object(run, 'command') as command:
 				with self.assertRaisesRegex(RuntimeError, r'serves \.localhost'):
 					runner.browser(run)
-			serve.assert_not_called()
+			resolution.assert_not_called()
 			command.assert_not_called()
 
-	def test_a_reachable_host_starts_the_fixture(self):
+	def test_a_managed_host_starts_the_fixture(self):
 		with tempfile.TemporaryDirectory() as directory:
 			run = self.create_run(directory)
+			host = SimpleNamespace(status={'tld': 'test'}, started=True)
 			with patch.object(runner, 'require'), \
 				patch.object(runner, 'check_ports'), \
-				patch.object(runner, 'local_host_status', return_value={'tld': 'test'}), \
+				patch.object(runner, 'HostFixture', return_value=contextlib.nullcontext(host)), \
 				patch.object(runner, 'binary', return_value=pathlib.Path('/bin/true')), \
 				patch.object(runner, 'require_host_resolution'), \
-				patch.object(run, 'serve') as serve, \
 				patch.object(run, 'command', return_value='') as command, \
 				redirect_stdout(io.StringIO()):
 				runner.browser(run)
-			serve.assert_not_called()
 			command.assert_called_once()
 			self.assertIn('app.othercheck:19080', command.call_args.args[1])
 			self.assertTrue(run.metadata['incomplete'])
@@ -1858,6 +1863,34 @@ class PowerShellScriptTests(unittest.TestCase):
 				with self.subTest(engine=pathlib.Path(engine).name, script=str(script.relative_to(ROOT))):
 					code, output = script_syntax_errors(engine, script)
 					self.assertEqual(code, 0, f'{script.relative_to(ROOT)}: {output}')
+
+	def test_windows_host_fixture_disables_real_providers(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			home = pathlib.Path(temporary) / 'fixture-home'
+			script = state.powershell_quote(ROOT / 'tests/host/windows.ps1')
+			path = state.powershell_quote(home)
+			command = (
+				'[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false);'
+				'$tokens = $null; $errors = $null;'
+				f'$ast = [System.Management.Automation.Language.Parser]::ParseFile({script}, [ref]$tokens, [ref]$errors);'
+				'$definition = $ast.Find({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] '
+				"-and $args[0].Name -eq 'Set-TestEnvironment' }, $true);"
+				'. ([scriptblock]::Create($definition.Extent.Text));'
+				"$env:TESTD_TUNNEL = 'real-provider';"
+				f'$appData = Set-TestEnvironment {path};'
+				'@{ home = $env:HOME; appdata = $env:APPDATA; tunnel = $env:TESTD_TUNNEL; '
+				'created = (Test-Path -LiteralPath $appData -PathType Container) } | ConvertTo-Json -Compress'
+			)
+			for engine in POWERSHELLS:
+				with self.subTest(engine=pathlib.Path(engine).name):
+					result = subprocess.run([engine, '-NoProfile', '-NonInteractive', '-Command', command],
+						capture_output=True, encoding='utf-8', timeout=30)
+					self.assertEqual(result.returncode, 0, result.stderr)
+					value = json.loads(result.stdout)
+					self.assertEqual(value['home'], str(home))
+					self.assertEqual(value['tunnel'], str(home))
+					self.assertTrue(value['created'])
+					self.assertEqual(pathlib.Path(value['appdata']), home / 'AppData/Roaming')
 
 	def test_multi_entry_nrpt_signatures_compare_and_re_add_as_values(self):
 		"""`-eq` on two arrays filters the left side, so a rule whose lists have

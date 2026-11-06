@@ -760,16 +760,19 @@ class HostFixture:
 
 	def __enter__(self):
 		try:
-			self.status = local_host_status(self.port)
+			local_host_status(self.port)
 		except HostUnavailable:
 			self.started = True
 			self.start()
-		return self
+			return self
+		raise RuntimeError('the browser suite found an existing host; stop it and rerun with the candidate CLI')
 
 	def start(self):
 		name = 'host-fixture' if self.starts == 0 else f'host-fixture-restart-{self.starts}'
 		self.starts += 1
-		self.context = self.run.serve(name, [str(self.cli), 'host'], stop_signal=signal.SIGINT)
+		# The daemon's startup sweep must never invoke a real tunnel provider.
+		env = dict(os.environ, TESTD_TUNNEL=str(self.run.output))
+		self.context = self.run.serve(name, [str(self.cli), 'host'], env=env, stop_signal=signal.SIGINT)
 		self.process, self.output = self.context.__enter__()
 		try:
 			self.status = wait_for_host(self.port, self.process, self.output)
@@ -861,8 +864,6 @@ def browser(run):
 	check_ports([run.args.port, run.args.port + 1])
 	cli = binary(run)
 	with HostFixture(run, cli, run.args.intake_port) as host:
-		if getattr(run.args, 'require_managed_host', False) and not host.started:
-			raise RuntimeError('the browser suite found an existing host; stop it and rerun with the candidate CLI')
 		status = host.status
 		if status.get('tld') != 'test':
 			raise RuntimeError(f'the host at 127.0.0.1:{run.args.intake_port} serves .{status.get("tld")}, '
@@ -954,7 +955,7 @@ def desktop(run):
 		# The app must not inherit the checklist's stdin. Its daemon logs belong
 		# in the report, not on top of the next prompt.
 		with app_log.open('xb') as sink:
-			env = dict(os.environ)
+			env = dict(os.environ, TESTD_TUNNEL=str(run.output))
 			env.pop('TESTD_HOST_TLD', None)
 			app_process = subprocess.Popen(
 				command, stdin=subprocess.DEVNULL, stdout=sink, stderr=subprocess.STDOUT, env=env)

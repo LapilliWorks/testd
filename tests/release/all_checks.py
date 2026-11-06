@@ -311,7 +311,6 @@ class AllChecks:
 
 	def browser(self, child):
 		child.args.bin = self.require_candidate()
-		child.args.require_managed_host = True
 		self.api.check_ports([child.args.intake_port])
 		self.api.browser(child)
 
