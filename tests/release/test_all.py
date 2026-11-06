@@ -303,6 +303,23 @@ class AllChecksTests(unittest.TestCase):
 			self.assertEqual(outcome(parent, 'browser')['status'], 'fail')
 			api.browser.assert_not_called()
 
+	def test_macos_probe_refuses_preexisting_integration_before_running(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			args = arguments(system=True, interactive=True)
+			parent, api, commands = fixture(temporary, args=args, system='Darwin')
+			api.system_snapshot.side_effect = RuntimeError('pre-existing integration')
+			run = checks.AllChecks(parent, api, args)
+			run.cli = pathlib.Path('candidate')
+			run.system_confirmed = True
+			run.boundary_log = io.StringIO()
+			stage = next(item for item in run.stages() if item.name == 'platform-resolver-probe')
+			with patch.object(run, 'confirm', return_value=True), patch.object(run, 'authorize'), \
+				patch.object(checks.shutil, 'which', return_value='installed'), contextlib.redirect_stdout(io.StringIO()):
+				run.stage(1, 1, stage)
+			self.assertEqual(outcome(parent, 'platform-resolver-probe')['status'], 'fail')
+			self.assertFalse(commands)
+			api.system_restore.assert_not_called()
+
 	def test_macos_probe_restores_the_scoped_snapshot_after_failure(self):
 		with tempfile.TemporaryDirectory() as temporary:
 			args = arguments(system=True, interactive=True)
