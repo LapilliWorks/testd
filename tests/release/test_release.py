@@ -1892,6 +1892,40 @@ class PowerShellScriptTests(unittest.TestCase):
 					self.assertTrue(value['created'])
 					self.assertEqual(pathlib.Path(value['appdata']), home / 'AppData/Roaming')
 
+	def test_windows_disconnect_requires_router_and_live_dns_evidence(self):
+		script = state.powershell_quote(ROOT / 'tests/host/windows.ps1')
+		command = (
+			'[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false);'
+			'$tokens = $null; $errors = $null;'
+			f'$ast = [System.Management.Automation.Language.Parser]::ParseFile({script}, [ref]$tokens, [ref]$errors);'
+			"foreach ($name in @('Router-Status', 'Test-NameRemoved')) {"
+			'$definition = $ast.Find({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] '
+			'-and $args[0].Name -eq $name }, $true); . ([scriptblock]::Create($definition.Extent.Text)) };'
+			"$Tld = 'testdcheck'; $router = '404'; $stale = $false; $dns = $true;"
+			'function global:curl.exe { $global:curlArgs = @($args); return $global:router };'
+			'function global:Resolve-DnsName { [CmdletBinding()] param($Name, $Server, $Type, [switch]$DnsOnly);'
+			"if ($Name -eq 'testd.testdcheck') { if ($global:dns) { return @{ IPAddress = '127.0.0.1' } }; "
+			"throw 'DNS unavailable' }; if ($global:stale) { return @{ IPAddress = '127.0.0.1' } }; throw 'NXDOMAIN' };"
+			"$good = Test-NameRemoved 'app.testdproj.testdcheck';"
+			"$router = '200'; $routed = Test-NameRemoved 'app.testdproj.testdcheck';"
+			"$router = '000'; $unreachable = Test-NameRemoved 'app.testdproj.testdcheck';"
+			"$router = '404'; $stale = $true; $staleName = Test-NameRemoved 'app.testdproj.testdcheck';"
+			"$stale = $false; $dns = $false; $noDns = Test-NameRemoved 'app.testdproj.testdcheck';"
+			'@{ good = $good; routed = $routed; unreachable = $unreachable; stale = $staleName; '
+			'noDns = $noDns; curlArgs = $global:curlArgs } | ConvertTo-Json -Depth 4 -Compress'
+		)
+		for engine in POWERSHELLS:
+			with self.subTest(engine=pathlib.Path(engine).name):
+				result = subprocess.run([engine, '-NoProfile', '-NonInteractive', '-Command', command],
+					capture_output=True, encoding='utf-8', timeout=30)
+				self.assertEqual(result.returncode, 0, result.stderr)
+				value = json.loads(result.stdout)
+				self.assertTrue(value['good'])
+				for field in ('routed', 'unreachable', 'stale', 'noDns'):
+					self.assertFalse(value[field], field)
+				self.assertIn('Host: app.testdproj.testdcheck', value['curlArgs'])
+				self.assertIn('http://127.0.0.1:7740/', value['curlArgs'])
+
 	def test_multi_entry_nrpt_signatures_compare_and_re_add_as_values(self):
 		"""`-eq` on two arrays filters the left side, so a rule whose lists have
 		more than one entry never matched and was reported as missing."""

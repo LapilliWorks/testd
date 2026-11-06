@@ -83,6 +83,25 @@ function System-Status([string]$HostName, [string]$Path = '/') {
 		--output NUL --write-out '%{http_code}' --resolve "${HostName}:${EdgePort}:127.0.0.1" $url
 }
 
+function Router-Status([string]$HostName, [string]$Path = '/') {
+	& curl.exe --silent --max-time 10 --noproxy '*' --output NUL --write-out '%{http_code}' `
+		--header "Host: $HostName" "http://127.0.0.1:7740$Path"
+}
+
+function Test-NameRemoved([string]$HostName) {
+	# An unregistered TLS name has no certificate, so ask the plain router for a positive 404.
+	if ((Router-Status $HostName) -ne '404') { return $false }
+	try {
+		$answer = @(Resolve-DnsName -Name $HostName -Server 127.0.0.1 -Type A -DnsOnly -ErrorAction Stop)
+		if (@($answer | Where-Object { $_.IPAddress }).Count -gt 0) { return $false }
+	} catch { }
+	# A failed query alone is not proof of removal: the DNS server must still answer.
+	try {
+		$dashboard = Resolve-DnsName -Name "testd.$Tld" -Server 127.0.0.1 -Type A -DnsOnly -ErrorAction Stop
+		return $dashboard.IPAddress -contains '127.0.0.1'
+	} catch { return $false }
+}
+
 function Dashboard-Token {
 	$path = Join-Path $AppData 'testd\control.json'
 	if (-not (Test-Path $path)) { return '' }
@@ -500,7 +519,7 @@ if ($revoke.ExitCode -eq 0) {
 if ($ClientProc) { Stop-Process -Id $ClientProc.Id -Force -ErrorAction SilentlyContinue; $ClientProc = $null }
 $removed = $false
 for ($i = 0; $i -lt 20; $i++) {
-	if ((Curl-Status "app.testdproj.$Tld" '/') -eq '404') { $removed = $true; break }
+	if (Test-NameRemoved "app.testdproj.$Tld") { $removed = $true; break }
 	Start-Sleep -Seconds 1
 }
 if ($removed) { Pass 'disconnect removes the name' } else { Fail 'disconnect removes the name' }
