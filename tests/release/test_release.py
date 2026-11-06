@@ -41,7 +41,29 @@ def workspace_version():
 	return release.tomllib.loads((ROOT / 'Cargo.toml').read_text())['package']['version']
 
 
+def fixture_symlink(test, path, target, **options):
+	try:
+		path.symlink_to(target, **options)
+	except OSError as error:
+		if os.name == 'nt' and getattr(error, 'winerror', None) in (50, 1314):
+			test.skipTest(f'Windows symlink creation is unavailable: {error}')
+		raise
+
+
 class ReleaseTests(unittest.TestCase):
+	def test_windows_symlink_capability_skip_is_not_a_pass(self):
+		path = Mock()
+		unavailable = OSError('fixture privilege unavailable')
+		unavailable.winerror = 1314
+		path.symlink_to.side_effect = unavailable
+		with patch.object(os, 'name', 'nt'), self.assertRaises(unittest.SkipTest):
+			fixture_symlink(self, path, 'target')
+		unexpected = OSError('unexpected I/O failure')
+		unexpected.winerror = 5
+		path.symlink_to.side_effect = unexpected
+		with patch.object(os, 'name', 'nt'), self.assertRaisesRegex(OSError, 'unexpected'):
+			fixture_symlink(self, path, 'target')
+
 	def test_advisory_exceptions_are_limited_to_documented_maintenance_notices(self):
 		policy = release.tomllib.loads((ROOT / 'deny.toml').read_text())
 		self.assertEqual(set(policy['advisories']['ignore']), {
@@ -434,7 +456,6 @@ class PlatformSequenceTests(unittest.TestCase):
 			run.command.assert_not_called()
 			self.assertEqual(candidate.read_bytes(), b'previous candidate')
 
-	@unittest.skipIf(os.name == 'nt', 'unprivileged symlink creation is not generally available on Windows')
 	def test_build_refuses_a_preexisting_candidate_symlink(self):
 		with tempfile.TemporaryDirectory() as directory:
 			root = pathlib.Path(directory)
@@ -443,7 +464,7 @@ class PlatformSequenceTests(unittest.TestCase):
 			triple = 'x86_64-unknown-linux-gnu'
 			candidate = root / 'target' / triple / 'release/testd'
 			candidate.parent.mkdir(parents=True)
-			candidate.symlink_to(target)
+			fixture_symlink(self, candidate, target)
 			run = Mock(args=SimpleNamespace(bin=None), output=root, metadata={})
 			with patch.object(runner, 'SYSTEM', 'Linux'), patch.dict(os.environ, {'CARGO_TARGET_DIR': str(root / 'target')}), \
 				patch.object(runner, 'native_build_target', return_value=triple):
@@ -615,11 +636,10 @@ class FakeHost(state.Host):
 
 
 class SystemStateTests(unittest.TestCase):
-	@unittest.skipIf(os.name == 'nt', 'creating symlinks may require Windows privileges')
 	def test_dangling_symlinks_count_as_existing_integration(self):
 		with tempfile.TemporaryDirectory() as temporary:
 			path = pathlib.Path(temporary) / 'anchor'
-			path.symlink_to(pathlib.Path(temporary) / 'missing')
+			fixture_symlink(self, path, pathlib.Path(temporary) / 'missing')
 			self.assertTrue(state.Host('Linux', 'testdcheck').exists(path))
 
 	@unittest.skipIf(os.name == 'nt', 'not applicable: Unix fixture file operations are not used on Windows')
@@ -1608,12 +1628,11 @@ class DesktopRunnerTests(unittest.TestCase):
 		with patch.object(runner, 'SYSTEM', 'Linux'), patch.dict(os.environ, {'HOME': '/user'}, clear=True):
 			self.assertEqual(runner.desktop_config_dir(), pathlib.Path('/user/.config/testd'))
 
-	@unittest.skipIf(os.name == 'nt', 'unprivileged symlink creation is not generally available on Windows')
 	def test_desktop_refuses_a_broken_user_data_symlink(self):
 		with tempfile.TemporaryDirectory() as directory:
 			config = pathlib.Path(directory) / '.config'
 			config.mkdir()
-			(config / 'testd').symlink_to(config / 'missing')
+			fixture_symlink(self, config / 'testd', config / 'missing', target_is_directory=True)
 			with patch.object(runner, 'SYSTEM', 'Linux'), patch.dict(os.environ, {'HOME': directory}):
 				with self.assertRaisesRegex(RuntimeError, 'existing testd user data'):
 					runner.require_fresh_desktop_user()
