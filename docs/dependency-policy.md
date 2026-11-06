@@ -7,6 +7,12 @@ description: 'Advisory exceptions and MSRV constraints accepted by the dependenc
 
 `cargo deny check` remains the dependency policy gate. Vulnerability advisories are not exempted.
 
+## GTK3 procedural macros
+
+RUSTSEC-2024-0370 reports that `proc-macro-error` 1.0.4 is unmaintained; it does not report a vulnerability or a patched release. The locked crate is used at build time through `glib-macros` and `gtk3-macros` in the GUI's GTK3 dependency graph, not in the shipped runtime. The single advisory is temporarily exempted in `deny.toml`.
+
+An unmaintained crate can still develop security problems. Reassess the exception when the GTK or Tauri dependencies change, remove it when those macros no longer require the crate, and continue enforcing any vulnerability advisory.
+
 ## D-Bus crate merger
 
 The following informational `unmaintained` advisories are temporarily accepted:
@@ -21,7 +27,7 @@ These advisories describe the standalone crates being merged into zbus, not repo
 
 `notify-rust` and Tauri's Linux single-instance backend require zbus 5. Current upstream releases retain that requirement. Upgrading a transitive version cannot replace zbus 5 with the incompatible zbus 6 API. Notification actions and single-instance/deep-link behavior remain enabled.
 
-The three advisory IDs are listed explicitly in `deny.toml`; all other advisory checks remain enforced. Their dependency entries in `crates/testd-daemon/Cargo.toml` and `src-tauri/Cargo.toml` carry the same rationale.
+These three advisory IDs are listed explicitly in `deny.toml`; other advisory checks remain enforced except for the GTK3 maintenance notice above. Their dependency entries in `crates/testd-daemon/Cargo.toml` and `src-tauri/Cargo.toml` carry the same rationale.
 
 Remove these exceptions once both dependency paths use zbus 6 and the standalone crates no longer appear in the resolved graph. Reassess the exceptions on every notification or single-instance dependency update. Upstream migration: [zbus issue 2043](https://github.com/z-galaxy/zbus/issues/2043).
 

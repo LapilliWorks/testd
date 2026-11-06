@@ -41,10 +41,10 @@ def workspace_version():
 
 
 class ReleaseTests(unittest.TestCase):
-	def test_advisory_exceptions_are_limited_to_the_dbus_merger(self):
+	def test_advisory_exceptions_are_limited_to_documented_maintenance_notices(self):
 		policy = release.tomllib.loads((ROOT / 'deny.toml').read_text())
 		self.assertEqual(set(policy['advisories']['ignore']), {
-			'RUSTSEC-2026-0370', 'RUSTSEC-2026-0371', 'RUSTSEC-2026-0372',
+			'RUSTSEC-2024-0370', 'RUSTSEC-2026-0370', 'RUSTSEC-2026-0371', 'RUSTSEC-2026-0372',
 		})
 		self.assertNotIn('unmaintained', policy['advisories'])
 		self.assertEqual(policy['bans']['wildcards'], 'deny')
