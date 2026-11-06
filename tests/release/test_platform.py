@@ -129,6 +129,19 @@ class PlatformScriptsTests(unittest.TestCase):
 			self.assertIn('out of sync', stderr.getvalue())
 			run.assert_not_called()
 
+	def test_all_reports_a_missing_doctest_output_helper(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = pathlib.Path(directory).resolve()
+			(root / 'tests/release').mkdir(parents=True)
+			(root / 'tests/release/all_checks.py').touch()
+			with patch.object(self.script, 'ROOT', root), patch.object(self.script.platform, 'system', return_value='Linux'), \
+				patch.object(self.script, 'run_cli') as run, contextlib.redirect_stderr(io.StringIO()) as stderr:
+				with self.assertRaises(SystemExit) as error:
+					self.script.main('Linux', ['all'])
+				self.assertEqual(error.exception.code, 2)
+				self.assertIn('doctest_output.py', stderr.getvalue())
+				run.assert_not_called()
+
 	def test_all_rejects_incomplete_or_irrelevant_options(self):
 		with patch.object(self.script.platform, 'system', return_value='Linux'), \
 			patch.object(self.script, 'run_cli') as run, contextlib.redirect_stderr(io.StringIO()):

@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -110,6 +111,7 @@ class AllChecks:
 	def stages(self):
 		cargo = ('cargo', 'rustup')
 		nextest = (*cargo, 'cargo-nextest')
+		output = self.api.NEXTEST_OUTPUT_OPTIONS if self.api else ()
 		return [
 			Stage('format', self.command('format', ['cargo', '+stable', 'fmt', '--all', '--', '--check'], cargo)),
 			Stage('clippy-cli', self.command('clippy-cli', ['cargo', '+stable', 'clippy', '--workspace',
@@ -120,23 +122,21 @@ class AllChecks:
 				'testd-gui', '--locked'], cargo)),
 			Stage('msrv-gui', self.command('msrv-gui', ['cargo', '+1.90.0', 'check', '-p', 'testd-gui', '--locked'], cargo)),
 			Stage('contracts-msrv', self.command('contracts-msrv', ['cargo', '+1.89.0', 'nextest', 'run',
-				'--workspace', '--exclude', 'testd-gui', '--locked', '--run-ignored', 'all', '--no-fail-fast'], nextest,
-				skip_pattern=r'\b(\d+) skipped\b')),
+				'--workspace', '--exclude', 'testd-gui', '--locked', '--run-ignored', 'all', '--no-fail-fast', *output],
+				nextest, skip_pattern=r'\b(\d+) skipped\b')),
 			Stage('cli-stable', self.command('cli-stable', ['cargo', '+stable', 'nextest', 'run', '--workspace',
-				'--exclude', 'testd-gui', '--all-features', '--locked', '--run-ignored', 'all', '--no-fail-fast'], nextest,
-				skip_pattern=r'\b(\d+) skipped\b')),
+				'--exclude', 'testd-gui', '--all-features', '--locked', '--run-ignored', 'all', '--no-fail-fast', *output],
+				nextest, skip_pattern=r'\b(\d+) skipped\b')),
 			Stage('workspace-stable', self.command('workspace-stable', ['cargo', '+stable', 'nextest', 'run',
-				'--workspace', '--all-features', '--locked', '--run-ignored', 'all', '--no-fail-fast'], nextest,
+				'--workspace', '--all-features', '--locked', '--run-ignored', 'all', '--no-fail-fast', *output], nextest,
 				skip_pattern=r'\b(\d+) skipped\b')),
-			Stage('rustdoc-msrv', self.command('rustdoc-msrv', ['cargo', '+1.89.0', 'test', '--workspace',
-				'--exclude', 'testd-gui', '--doc', '--locked', '--', '--include-ignored'], cargo,
-				skip_pattern=r'\b(\d+) ignored\b')),
-			Stage('rustdoc-cli-stable', self.command('rustdoc-cli-stable', ['cargo', '+stable', 'test', '--workspace',
-				'--exclude', 'testd-gui', '--all-features', '--doc', '--locked', '--', '--include-ignored'], cargo,
-				skip_pattern=r'\b(\d+) ignored\b')),
-			Stage('rustdoc-workspace', self.command('rustdoc-workspace', ['cargo', '+stable', 'test', '--workspace',
-				'--all-features', '--doc', '--locked', '--', '--include-ignored'], cargo,
-				skip_pattern=r'\b(\d+) ignored\b')),
+			Stage('rustdoc-msrv', self.doctests('rustdoc-msrv', ['cargo', '+1.89.0', 'test', '--workspace',
+				'--exclude', 'testd-gui', '--doc', '--locked', '--', '--include-ignored', '--show-output'], cargo)),
+			Stage('rustdoc-cli-stable', self.doctests('rustdoc-cli-stable', ['cargo', '+stable', 'test', '--workspace',
+				'--exclude', 'testd-gui', '--all-features', '--doc', '--locked', '--', '--include-ignored', '--show-output'],
+				cargo)),
+			Stage('rustdoc-workspace', self.doctests('rustdoc-workspace', ['cargo', '+stable', 'test', '--workspace',
+				'--all-features', '--doc', '--locked', '--', '--include-ignored', '--show-output'], cargo)),
 			Stage('release-script-fixtures', self.command('release-script-fixtures', [sys.executable, '-m', 'unittest',
 				'discover', '-s', 'tests/release', '-p', 'test_*.py', '-v'], (), 300,
 				skip_pattern=r'\bskipped=(\d+)')),
@@ -189,6 +189,21 @@ class AllChecks:
 		missing = [tool for tool in tools if not shutil.which(tool)]
 		if missing:
 			raise Blocked(f'please install: {", ".join(missing)}')
+
+	def doctests(self, name, argv, tools):
+		def action(child):
+			self.require(*tools)
+			env, directory, reason = self.api.prepare_doctests(ROOT, child.output, os.environ)
+			if reason:
+				child.record('doctest-output', 'skip', f'blocked: {reason}')
+			try:
+				output = child.command(name, argv, 1200, env=env)
+			finally:
+				if directory is not None:
+					self.api.replay_doctests(directory)
+			if any(int(value) for value in re.findall(r'\b(\d+) ignored\b', output)):
+				child.record('coverage', 'skip', 'blocked: doctests were ignored; inspect the command log')
+		return action
 
 	def site_environment(self):
 		return {**os.environ, 'TESTD_SITE_OUT_DIR': str(self.run.output / 'site-dist'),
@@ -420,6 +435,8 @@ class AllChecks:
 			self.interrupted = True
 			status, detail = 'blocked', 'interrupted by the operator or input closed'
 		except Exception as error:
+			if child is None or not any(item['status'] == 'fail' for item in child.results):
+				traceback.print_exc()
 			status, detail = 'fail', str(error)
 		if child is not None:
 			try:

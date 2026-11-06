@@ -63,7 +63,9 @@ On macOS, use `scripts/test-macos.py` with the same options. Pass `--bin` for a 
 
 Missing prerequisites, declined stages, unprovided artifacts, and skipped checks are recorded as blocked, not passed. Exit status is `1` for any failure, `2` for an incomplete run without failures, and `0` only when all applicable stages completed without failures. The Linux and macOS release-contract stages currently fail on four share-lifetime contracts; the full GUI dependency audit has a known unmaintained-dependency advisory. The optional Windows NRPT diagnostic is not tracked and its cleanup can remove unrelated rules, so it remains blocked instead of being run automatically. The macOS probe is wrapped in a scoped resolver/trust snapshot, which is not a full VM backup.
 
-Inspect `report.json`, `boundaries.log`, and each stage's report and logs. A failed or incomplete system stage blocks later sensitive stages unless its cleanup was verified. If the self-test cannot restore, its retained `self-test-state` directory can be passed to `tests/release/run.py --restore-report`; use the full VM snapshot if scoped recovery is incomplete. Reports may contain credentials and fixture keys and must remain private.
+Every suite writes a live UTF-8 `run.log` containing runner messages and emitted command stdout and stderr. The `all` transcript includes every stage boundary and summary; individual command logs retain the raw combined bytes. Rust nextest output includes passing and failing tests. The `all` doctest stages retain each executable's separate stdout and stderr and replay them into the transcript, including ignored tests. If an existing Cargo rustdoc flag or custom target runner prevents safe capture, the tests still run unchanged but doctest logging is marked blocked.
+
+Inspect `report.json`, `run.log`, `boundaries.log`, and each stage's report and logs. Desktop app output, browser evidence, host fixture files, and system snapshots remain separate report files; typed input, sudo prompts, and GUI actions are not recorded. A failed or incomplete system stage blocks later sensitive stages unless its cleanup was verified. If the self-test cannot restore, its retained `self-test-state` directory can be passed to `tests/release/run.py --restore-report`; use the full VM snapshot if scoped recovery is incomplete. Complete logs can contain credentials and fixture keys and must remain private.
 
 ## Individual platform suites
 
@@ -98,13 +100,14 @@ System, desktop, browser-trust, and installation checks require a clean disposab
 
 ## Routine automated checks
 
-The scripts above run these commands. To run them individually from the repository root:
+The scripts above run these checks and retain a transcript. Individual commands print output without creating a runner report:
 
 ```sh
 cargo +stable fmt --all -- --check
 cargo +stable clippy --workspace --all-targets --exclude testd-gui --locked -- -D warnings
-cargo +1.89.0 nextest run --workspace --exclude testd-gui --locked
-python3 -m unittest discover -s tests/release -p test_release.py
+cargo +1.89.0 nextest run --workspace --exclude testd-gui --locked \
+  --success-output immediate --failure-output immediate --status-level all --final-status-level all
+python3 -m unittest discover -s tests/release -p 'test_*.py' -v
 bun test "$(pwd)/tests/release/browser.test.ts"
 ```
 

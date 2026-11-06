@@ -20,6 +20,7 @@ def load(name, path):
 
 
 checks = load('testd_all_checks', ROOT / 'tests/release/all_checks.py')
+doctest_output = load('testd_doctest_output', ROOT / 'tests/release/doctest_output.py')
 runner = load('testd_all_runner', ROOT / 'tests/release/run.py')
 
 
@@ -65,7 +66,9 @@ def fixture(directory, *, args=None, system='Linux', failures=(), outputs=None):
 	def child(child_args):
 		return FakeRun(child_args, child_args.report, commands, failures, outputs)
 	api = SimpleNamespace(Run=child, SYSTEM=system, HOST_TLD='testdcheck', DESKTOP_TLD='test',
-		binary=Mock(return_value=root / 'candidate'), file_digest=Mock(return_value='a' * 64),
+		NEXTEST_OUTPUT_OPTIONS=runner.NEXTEST_OUTPUT_OPTIONS,
+		prepare_doctests=Mock(side_effect=lambda project, report, env: (dict(env), None, None)),
+		replay_doctests=Mock(), binary=Mock(return_value=root / 'candidate'), file_digest=Mock(return_value='a' * 64),
 		host=Mock(), service=Mock(), artifacts=Mock(), desktop=Mock(), browser=Mock(),
 		system_snapshot=Mock(return_value=root / 'snapshot'), system_restore=Mock(),
 		check_ports=Mock(), checklist_items=runner.checklist_items)
@@ -103,13 +106,19 @@ class AllChecksTests(unittest.TestCase):
 			api.browser.assert_not_called()
 			api.desktop.assert_not_called()
 			by_name = {name: command for name, command, _, _, _ in commands}
+			for name in ('contracts-msrv', 'cli-stable', 'workspace-stable'):
+				command = by_name[name]
+				self.assertEqual(command[command.index('--success-output') + 1], 'immediate')
+				self.assertEqual(command[command.index('--failure-output') + 1], 'immediate')
+				self.assertEqual(command[command.index('--status-level') + 1], 'all')
 			self.assertIn('--run-ignored', by_name['contracts-msrv'])
 			self.assertIn('--no-fail-fast', by_name['contracts-msrv'])
 			self.assertIn('--all-features', by_name['cli-stable'])
 			self.assertIn('--all-features', by_name['workspace-stable'])
-			self.assertIn('--include-ignored', by_name['rustdoc-msrv'])
-			self.assertIn('--include-ignored', by_name['rustdoc-cli-stable'])
-			self.assertIn('--include-ignored', by_name['rustdoc-workspace'])
+			for name in ('rustdoc-msrv', 'rustdoc-cli-stable', 'rustdoc-workspace'):
+				self.assertIn('--include-ignored', by_name[name])
+				self.assertIn('--show-output', by_name[name])
+			self.assertEqual(api.prepare_doctests.call_count, 3)
 			self.assertIn('testd-gui', by_name['msrv-gui'])
 			self.assertIn('deny', by_name['dependency-audit'])
 			self.assertEqual(by_name['browser-server-fixtures'][-1], str(ROOT / 'tests/release/browser.test.ts'))
@@ -157,7 +166,8 @@ class AllChecksTests(unittest.TestCase):
 		with tempfile.TemporaryDirectory() as temporary:
 			parent, api, _ = fixture(temporary)
 			api.binary.side_effect = RuntimeError('candidate build failed')
-			with patch.object(checks.shutil, 'which', return_value='installed'), contextlib.redirect_stdout(io.StringIO()):
+			with patch.object(checks.shutil, 'which', return_value='installed'), \
+				contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
 				checks.execute(parent, api)
 			self.assertEqual(outcome(parent, 'cli-candidate')['status'], 'fail')
 			self.assertEqual(outcome(parent, 'host-unprivileged')['status'], 'blocked')
@@ -181,6 +191,32 @@ class AllChecksTests(unittest.TestCase):
 			self.assertIn('END [01/02] first: BLOCKED', output.getvalue())
 			self.assertIn('END [02/02] second: BLOCKED', output.getvalue())
 			later.assert_not_called()
+
+	def test_doctest_logging_conflict_is_incomplete_but_does_not_skip_the_tests(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			parent, api, commands = fixture(temporary)
+			api.prepare_doctests.side_effect = lambda project, report, env: (dict(env), None, 'custom runtool')
+			run = checks.AllChecks(parent, api, parent.args)
+			run.boundary_log = io.StringIO()
+			stage = next(item for item in run.stages() if item.name == 'rustdoc-msrv')
+			with patch.object(checks.shutil, 'which', return_value='installed'), contextlib.redirect_stdout(io.StringIO()):
+				run.stage(1, 1, stage)
+			self.assertEqual(outcome(parent, 'rustdoc-msrv')['status'], 'blocked')
+			self.assertIn('rustdoc-msrv', [name for name, *_ in commands])
+			api.replay_doctests.assert_not_called()
+
+	def test_doctest_output_is_replayed_after_a_failed_command(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			parent, api, _ = fixture(temporary, failures=('rustdoc-msrv',))
+			directory = pathlib.Path(temporary) / 'doctest-output'
+			api.prepare_doctests.side_effect = lambda project, report, env: (dict(env), directory, None)
+			run = checks.AllChecks(parent, api, parent.args)
+			run.boundary_log = io.StringIO()
+			stage = next(item for item in run.stages() if item.name == 'rustdoc-msrv')
+			with patch.object(checks.shutil, 'which', return_value='installed'), contextlib.redirect_stdout(io.StringIO()):
+				run.stage(1, 1, stage)
+			self.assertEqual(outcome(parent, 'rustdoc-msrv')['status'], 'fail')
+			api.replay_doctests.assert_called_once_with(directory)
 
 	def test_fixture_skips_are_incomplete_not_a_pass(self):
 		with tempfile.TemporaryDirectory() as temporary:
@@ -298,7 +334,8 @@ class AllChecksTests(unittest.TestCase):
 			run.boundary_log = io.StringIO()
 			api.check_ports.side_effect = RuntimeError('fixture port is in use')
 			stage = next(item for item in run.stages() if item.name == 'browser')
-			with patch.object(run, 'confirm', return_value=True), contextlib.redirect_stdout(io.StringIO()):
+			with patch.object(run, 'confirm', return_value=True), contextlib.redirect_stdout(io.StringIO()), \
+				contextlib.redirect_stderr(io.StringIO()):
 				run.stage(1, 1, stage)
 			self.assertEqual(outcome(parent, 'browser')['status'], 'fail')
 			api.browser.assert_not_called()
@@ -314,7 +351,8 @@ class AllChecksTests(unittest.TestCase):
 			run.boundary_log = io.StringIO()
 			stage = next(item for item in run.stages() if item.name == 'platform-resolver-probe')
 			with patch.object(run, 'confirm', return_value=True), patch.object(run, 'authorize'), \
-				patch.object(checks.shutil, 'which', return_value='installed'), contextlib.redirect_stdout(io.StringIO()):
+				patch.object(checks.shutil, 'which', return_value='installed'), \
+				contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
 				run.stage(1, 1, stage)
 			self.assertEqual(outcome(parent, 'platform-resolver-probe')['status'], 'fail')
 			self.assertFalse(commands)
@@ -385,6 +423,33 @@ class AllChecksTests(unittest.TestCase):
 			self.assertEqual(child.results[1]['detail'], 'blocked: not implemented')
 			self.assertEqual(run.classify(child)[0], 'blocked')
 
+	def test_all_run_writes_one_transcript_even_when_a_stage_fails(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			report = pathlib.Path(temporary).resolve() / 'report'
+			def command(name, code):
+				return lambda child: child.command(name, [sys.executable, '-c', code])
+			def blocked(child):
+				raise checks.Blocked('missing fixture')
+			stages = [
+				checks.Stage('passing', command('passing', "print('passed output')")),
+				checks.Stage('failing', command('failing', "import sys; print('failure output', file=sys.stderr); sys.exit(7)")),
+				checks.Stage('blocked', blocked),
+				checks.Stage('later', command('later', "print('later output')")),
+			]
+			modules = {'all_checks': checks, 'doctest_output': doctest_output}
+			with patch.object(runner, 'helper', side_effect=lambda name: modules[name]), \
+				patch.object(checks, 'is_ephemeral', return_value=False), \
+				patch.object(checks.AllChecks, 'stages', return_value=stages), patch.object(runner.signal, 'signal'), \
+				contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+				self.assertEqual(runner.main(['all', '--report', str(report)]), 1)
+			text = (report / 'run.log').read_text(encoding='utf-8')
+			for value in ('BEGIN [01/04] passing', 'passed output', 'END [01/04] passing: PASS',
+				'BEGIN [02/04] failing', 'failure output', 'END [02/04] failing: FAIL',
+				'END [03/04] blocked: BLOCKED', 'later output', 'ALL TESTS: SUMMARY'):
+				self.assertIn(value, text)
+			self.assertEqual((report / '01-passing/00-passing.log').read_text(), 'passed output\n')
+			self.assertIn('failure output', (report / '02-failing/00-failing.log').read_text())
+
 	def test_main_returns_failure_before_incomplete_and_never_treats_incomplete_as_success(self):
 		for failed, incomplete, expected in [(False, False, 0), (False, True, 2), (True, True, 1)]:
 			with self.subTest(failed=failed, incomplete=incomplete):
@@ -392,8 +457,8 @@ class AllChecksTests(unittest.TestCase):
 					results=[{'status': 'fail' if failed else 'pass'}])
 				module = Mock()
 				with patch.object(runner, 'Run', return_value=run), patch.object(runner, 'helper', return_value=module), \
-					patch.object(runner, 'all_suites'), patch.object(runner.signal, 'signal'), \
-					patch.object(runner, 'match_redirected_encoding'):
+					patch.object(runner, 'all_suites'), patch.object(runner, 'run_transcript', return_value=contextlib.nullcontext()), \
+					patch.object(runner.signal, 'signal'), patch.object(runner, 'match_redirected_encoding'):
 					self.assertEqual(runner.main(['all']), expected)
 
 	def test_plan_lists_all_stages_without_executing_them(self):

@@ -24,6 +24,7 @@ import tarfile
 import threading
 import time
 import tomllib
+import traceback
 import types
 import uuid
 import zipfile
@@ -38,6 +39,10 @@ ENCODING = 'utf-8'
 HOST_TLD = os.environ.get('TESTD_HOST_TLD', 'testdcheck')
 # The desktop setup wizard always configures the product TLD.
 DESKTOP_TLD = 'test'
+NEXTEST_OUTPUT_OPTIONS = (
+	'--success-output', 'immediate', '--failure-output', 'immediate',
+	'--status-level', 'all', '--final-status-level', 'all',
+)
 
 
 def require(tool):
@@ -104,6 +109,53 @@ def safe_members(names):
 		path = pathlib.PurePosixPath(name.replace('\\', '/'))
 		if path.is_absolute() or '..' in path.parts or ':' in name:
 			raise ValueError(f'unsafe archive path: {name}')
+
+
+class LoggedStream:
+	"""Mirror terminal output to a shared, immediately flushed transcript."""
+
+	def __init__(self, stream, transcript, lock):
+		self.stream = stream
+		self.transcript = transcript
+		self.lock = lock
+
+	def write(self, text):
+		with self.lock:
+			self.transcript.write(text)
+			self.transcript.flush()
+			return self.stream.write(text)
+
+	def flush(self):
+		with self.lock:
+			self.transcript.flush()
+			self.stream.flush()
+
+	def __getattr__(self, name):
+		return getattr(self.stream, name)
+
+
+@contextlib.contextmanager
+def run_transcript(run):
+	"""Capture runner output without redirecting the operator's stdin."""
+	path = run.output / 'run.log'
+	with path.open('x', encoding=ENCODING, errors='backslashreplace', newline='') as transcript:
+		transcript.write(f'Report: {run.output}\n')
+		transcript.flush()
+		original_stdout, original_stderr = sys.stdout, sys.stderr
+		lock = threading.RLock()
+		stdout = LoggedStream(original_stdout, transcript, lock)
+		stderr = LoggedStream(original_stderr, transcript, lock)
+		try:
+			sys.stdout, sys.stderr = stdout, stderr
+			run.metadata['transcript'] = str(path)
+			run.save()
+			yield
+		finally:
+			try:
+				stdout.flush()
+				stderr.flush()
+			finally:
+				sys.stdout, sys.stderr = original_stdout, original_stderr
 
 
 class CommandOutput:
@@ -281,14 +333,15 @@ def automated(run):
 	run.command('clippy', ['cargo', '+stable', 'clippy', '--workspace', '--all-targets', '--exclude',
 		'testd-gui', '--locked', '--', '-D', 'warnings'], 1200)
 	run.command('rust-tests', ['cargo', '+1.89.0', 'nextest', 'run', '--workspace', '--exclude',
-		'testd-gui', '--locked'], 1200)
+		'testd-gui', '--locked', *NEXTEST_OUTPUT_OPTIONS], 1200)
 	run.command('release-script-tests', [sys.executable, '-m', 'unittest', 'discover',
-		'-s', 'tests/release', '-p', 'test_*.py'], 300)
+		'-s', 'tests/release', '-p', 'test_*.py', '-v'], 300)
 	fixture = ROOT / 'tests/release/browser.test.ts'
 	run.command('browser-fixture-tests', ['bun', 'test', str(fixture)], 300)
 	if run.args.gui:
 		run.command('msrv-tray', ['cargo', '+1.90.0', 'check', '-p', 'testd-gui', '--locked'], 1200)
-		run.command('gui-workspace-tests', ['cargo', '+stable', 'nextest', 'run', '--workspace', '--locked'], 1200)
+		run.command('gui-workspace-tests', ['cargo', '+stable', 'nextest', 'run', '--workspace', '--locked',
+			*NEXTEST_OUTPUT_OPTIONS], 1200)
 
 
 def contracts(run):
@@ -297,7 +350,7 @@ def contracts(run):
 	if run.args.gui:
 		raise RuntimeError('the Rust 1.89 contract gate excludes the GUI; run the GUI checks separately')
 	run.command('release-contracts', ['cargo', '+1.89.0', 'nextest', 'run', '--workspace', '--exclude',
-		'testd-gui', '--locked', '--run-ignored', 'all', '--no-fail-fast'], 1200)
+		'testd-gui', '--locked', '--run-ignored', 'all', '--no-fail-fast', *NEXTEST_OUTPUT_OPTIONS], 1200)
 
 
 def audit(run):
@@ -312,11 +365,11 @@ def core(run):
 	packages = ['--workspace'] + ([] if run.args.gui else ['--exclude', 'testd-gui'])
 	run.command('clippy', ['cargo', 'clippy', *packages, '--all-targets', '--locked', '--', '-D', 'warnings'], 1200)
 	if shutil.which('cargo-nextest'):
-		command = ['cargo', 'nextest', 'run', *packages, '--locked', '--run-ignored', 'all']
+		command = ['cargo', 'nextest', 'run', *packages, '--locked', '--run-ignored', 'all', *NEXTEST_OUTPUT_OPTIONS]
 	else:
-		command = ['cargo', 'test', *packages, '--locked', '--', '--include-ignored']
+		command = ['cargo', 'test', *packages, '--locked', '--', '--include-ignored', '--show-output']
 	run.command('rust-tests', command, 1200)
-	run.command('release-script-tests', [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests/release'])
+	run.command('release-script-tests', [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests/release', '-v'])
 	if shutil.which('bun'):
 		fixture = ROOT / 'tests/release/browser.test.ts'
 		run.command('browser-fixture-tests', ['bun', 'test', str(fixture)])
@@ -1013,8 +1066,11 @@ def interrupt(signum, frame):
 
 
 def all_suites(run):
+	doctest_output = helper('doctest_output')
 	api = types.SimpleNamespace(Run=Run, SYSTEM=SYSTEM, HOST_TLD=HOST_TLD, DESKTOP_TLD=DESKTOP_TLD,
-		binary=binary, file_digest=file_digest, host=host, service=service, artifacts=artifacts,
+		NEXTEST_OUTPUT_OPTIONS=NEXTEST_OUTPUT_OPTIONS, prepare_doctests=doctest_output.prepare,
+		replay_doctests=doctest_output.replay, binary=binary, file_digest=file_digest,
+		host=host, service=service, artifacts=artifacts,
 		desktop=desktop, browser=browser, system_snapshot=system_snapshot, system_restore=system_restore,
 		check_ports=check_ports, checklist_items=checklist_items)
 	helper('all_checks').execute(run, api)
@@ -1074,23 +1130,25 @@ def main(argv=None):
 		if hasattr(signal, number):
 			signal.signal(getattr(signal, number), interrupt)
 	run = Run(args)
-	try:
-		if args.suite == 'all':
-			all_suites(run)
-		else:
-			globals()[args.suite](run)
-	except KeyboardInterrupt:
-		run.metadata['incomplete'] = True
-		run.record(args.suite, 'skip', 'interrupted; check system-restore and use --restore-report if needed')
-		return 2
-	except Exception as error:
-		run.record(args.suite, 'fail', str(error))
-		return 1
-	finally:
-		run.save()
-	if any(check['status'] == 'fail' for check in run.results):
-		return 1
-	return 2 if run.metadata.get('incomplete') else 0
+	with run_transcript(run):
+		try:
+			if args.suite == 'all':
+				all_suites(run)
+			else:
+				globals()[args.suite](run)
+		except KeyboardInterrupt:
+			run.metadata['incomplete'] = True
+			run.record(args.suite, 'skip', 'interrupted; check system-restore and use --restore-report if needed')
+			return 2
+		except Exception as error:
+			traceback.print_exc()
+			run.record(args.suite, 'fail', str(error))
+			return 1
+		finally:
+			run.save()
+		if any(check['status'] == 'fail' for check in run.results):
+			return 1
+		return 2 if run.metadata.get('incomplete') else 0
 
 
 if __name__ == '__main__':

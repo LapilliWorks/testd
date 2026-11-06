@@ -166,8 +166,10 @@ def require_compatible_runner(parser, suite):
 	if suite == 'all':
 		required += ('all_suites',)
 	missing = [name for name in required if not callable(getattr(runner, name, None))]
-	if suite == 'all' and not (ROOT / 'tests/release/all_checks.py').is_file():
-		missing.append('all_checks.py')
+	if suite == 'all':
+		for name in ('all_checks.py', 'doctest_output.py'):
+			if not (ROOT / 'tests/release' / name).is_file():
+				missing.append(name)
 	if missing:
 		parser.error('tests/release/run.py is out of sync with these scripts; update the entire checkout '
 			f'(missing: {", ".join(missing)})')

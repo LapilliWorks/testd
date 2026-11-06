@@ -276,9 +276,9 @@ class PlatformSequenceTests(unittest.TestCase):
 		self.assertEqual(commands['clippy'], ['cargo', '+stable', 'clippy', '--workspace', '--all-targets',
 			'--exclude', 'testd-gui', '--locked', '--', '-D', 'warnings'])
 		self.assertEqual(commands['rust-tests'], ['cargo', '+1.89.0', 'nextest', 'run', '--workspace',
-			'--exclude', 'testd-gui', '--locked'])
+			'--exclude', 'testd-gui', '--locked', *runner.NEXTEST_OUTPUT_OPTIONS])
 		self.assertEqual(commands['release-script-tests'], [sys.executable, '-m', 'unittest', 'discover',
-			'-s', 'tests/release', '-p', 'test_*.py'])
+			'-s', 'tests/release', '-p', 'test_*.py', '-v'])
 		self.assertEqual(commands['browser-fixture-tests'], ['bun', 'test', str(ROOT / 'tests/release/browser.test.ts')])
 
 	def test_gui_sequence_adds_the_tray_msrv_and_full_workspace_tests(self):
@@ -287,7 +287,8 @@ class PlatformSequenceTests(unittest.TestCase):
 			runner.automated(run)
 		commands = {call.args[0]: call.args[1] for call in run.command.call_args_list}
 		self.assertEqual(commands['msrv-tray'], ['cargo', '+1.90.0', 'check', '-p', 'testd-gui', '--locked'])
-		self.assertEqual(commands['gui-workspace-tests'], ['cargo', '+stable', 'nextest', 'run', '--workspace', '--locked'])
+		self.assertEqual(commands['gui-workspace-tests'], ['cargo', '+stable', 'nextest', 'run', '--workspace', '--locked',
+			*runner.NEXTEST_OUTPUT_OPTIONS])
 
 	def test_contract_sequence_includes_ignored_cases_without_fail_fast(self):
 		run = Mock(args=SimpleNamespace(gui=False))
@@ -295,7 +296,7 @@ class PlatformSequenceTests(unittest.TestCase):
 			runner.contracts(run)
 		command = run.command.call_args.args[1]
 		self.assertEqual(command, ['cargo', '+1.89.0', 'nextest', 'run', '--workspace', '--exclude',
-			'testd-gui', '--locked', '--run-ignored', 'all', '--no-fail-fast'])
+			'testd-gui', '--locked', '--run-ignored', 'all', '--no-fail-fast', *runner.NEXTEST_OUTPUT_OPTIONS])
 
 	def test_dependency_audit_covers_the_whole_workspace(self):
 		run = Mock(args=SimpleNamespace(gui=False))
@@ -1423,6 +1424,70 @@ class BrowserTests(unittest.TestCase):
 			connection.return_value.getresponse.side_effect = ConnectionRefusedError(111, 'Connection refused')
 			with self.assertRaisesRegex(runner.HostUnavailable, 'no testd host is listening'):
 				runner.local_host_status(7737)
+
+
+class TranscriptTests(unittest.TestCase):
+	def create_run(self, directory):
+		args = SimpleNamespace(report=pathlib.Path(directory) / 'report', suite='fixture')
+		with redirect_stdout(io.StringIO()):
+			return runner.Run(args)
+
+	def test_transcript_retains_runner_messages_and_both_child_streams(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			stdout, stderr = io.StringIO(), io.StringIO()
+			code = "import os; os.write(1, b'child-out\\n'); os.write(2, b'child-err\\n')"
+			with redirect_stdout(stdout), redirect_stderr(stderr):
+				with runner.run_transcript(run):
+					print('stage begin')
+					run.command('fixture', [sys.executable, '-c', code])
+					print('stage end')
+			text = (run.output / 'run.log').read_text(encoding='utf-8')
+			for value in ('Report:', 'stage begin', 'Running:', 'child-out', 'child-err', 'pass', 'stage end'):
+				self.assertIn(value, text)
+			self.assertIn('child-out\n', stdout.getvalue())
+			self.assertNotIn('\nchild-err\n', stdout.getvalue())
+			self.assertIn('child-err\n', stderr.getvalue())
+			self.assertEqual(run.metadata['transcript'], str(run.output / 'run.log'))
+
+	def test_transcript_does_not_replace_an_existing_log(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			path = run.output / 'run.log'
+			path.write_text('existing evidence', encoding='utf-8')
+			with self.assertRaises(FileExistsError):
+				with runner.run_transcript(run):
+					pass
+			self.assertEqual(path.read_text(encoding='utf-8'), 'existing evidence')
+
+	def test_transcript_retains_non_utf8_paths_as_escapes(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+				with runner.run_transcript(run):
+					print('path-\udcff')
+			self.assertIn('path-\\udcff', (run.output / 'run.log').read_text(encoding='utf-8'))
+
+	def test_transcript_flushes_before_terminal_output_and_restores_streams_on_exception(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			class Terminal(io.StringIO):
+				def write(self, text):
+					if text == 'live output':
+						self.assert_in_log()
+					return super().write(text)
+				def assert_in_log(self):
+					if 'live output' not in (run.output / 'run.log').read_text(encoding='utf-8'):
+						raise AssertionError('transcript was not flushed before mirroring')
+			terminal, error_terminal = Terminal(), io.StringIO()
+			with redirect_stdout(terminal), redirect_stderr(error_terminal):
+				with self.assertRaisesRegex(RuntimeError, 'fixture'):
+					with runner.run_transcript(run):
+						print('live output')
+						raise RuntimeError('fixture')
+				self.assertIs(sys.stdout, terminal)
+				self.assertIs(sys.stderr, error_terminal)
+			self.assertIn('live output', (run.output / 'run.log').read_text(encoding='utf-8'))
 
 
 class CommandOutputTests(unittest.TestCase):
