@@ -357,11 +357,7 @@ because they have no snapshot to restore from.
 
 ### CI coverage
 
-Three levels, in `.github/workflows/ci.yml`:
-
-- `test` runs the release-script unit tests on `ubuntu-latest`, `macos-15`, and `windows-latest`. They use an in-memory host, so they cover the manifest and restore rules, not the commands.
-- `system-restore` runs `python tests/release/system_state.py --self-test` on the same three runners. It snapshots the real paths, installs what `doctor --fix` would (a resolver file, a throwaway root certificate, and on Windows an NRPT rule plus machine root), restores, and verifies. It refuses to run where testd integration already exists, so the disposable runners are its target. It needs elevation and `openssl` on Linux and macOS; the trust reload runs only where the distro tool exists, and the resolver reload is left to `host-system` because it needs a running systemd-resolved.
-- `host-system` runs the full `host --system` suite. It is gated: dispatch the workflow with `host_system` checked, or set the `TESTD_CI_HOST_SYSTEM` repository variable to `true`. It is off by default because it rewrites the runner's resolver and trust store, and Linux needs `systemd-resolved`, which the runner image ships stopped. The service suite is not in CI: runners have no user session bus for `systemctl --user`.
+`.github/workflows/ci.yml` runs system-state fixtures on `ubuntu-latest`, `macos-15`, and `windows-latest`. These use an in-memory host and do not change the runner's resolver or trust store. Real system and service checks require an explicitly confirmed disposable host with a persisted full-system snapshot; hosted CI does not supply that snapshot and does not run them.
 
 ### System checks need a running daemon
 

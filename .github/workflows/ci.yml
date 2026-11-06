@@ -6,11 +6,6 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
-    inputs:
-      host_system:
-        description: Run the privileged `host --system` suite on disposable runners
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -82,8 +77,8 @@ jobs:
       - run: bun run build
       - run: bun run check:links
 
-  system-restore:
-    name: system restore (${{ matrix.os }})
+  system-state-fixtures:
+    name: system-state fixtures (${{ matrix.os }})
     needs: changes
     if: needs.changes.outputs.release == 'true'
     strategy:
@@ -96,47 +91,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      # Real privileged writes and stores, no daemon and no resolver needed.
-      # Runners are disposable, so the fixture is safe to install and remove.
-      - run: python tests/release/system_state.py --self-test
-
-  host-system:
-    name: host --system (${{ matrix.os }})
-    # Opt in per run with the workflow_dispatch input, or permanently with the
-    # TESTD_CI_HOST_SYSTEM repository variable. Gated by default: the suite
-    # changes the runner's resolver and trust store, and on Linux it needs
-    # systemd-resolved, which the runner image does not start.
-    needs: changes
-    if: >-
-      (needs.changes.outputs.rust == 'true' || needs.changes.outputs.release == 'true') &&
-      (github.event.inputs.host_system == 'true' || vars.TESTD_CI_HOST_SYSTEM == 'true')
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-15, windows-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: ./.github/actions/linux-dependencies
-        if: runner.os == 'Linux'
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      # doctor --fix refuses to write the drop-in unless systemd-resolved is
-      # active, and the image ships it stopped.
-      - if: runner.os == 'Linux'
-        run: |
-          sudo systemctl unmask systemd-resolved || true
-          sudo systemctl enable --now systemd-resolved
-          systemctl is-active systemd-resolved
-      - run: cargo build --release --bin testd --locked
-      # No --service: the runner has no user session bus for `systemctl --user`.
-      - if: runner.os != 'Windows'
-        run: python tests/release/run.py host --system --bin target/release/testd
-      - if: runner.os == 'Windows'
-        run: python tests/release/run.py host --system --bin target/release/testd.exe
+      # Real resolver and trust checks require a separate disposable host with
+      # a persisted full-system snapshot; hosted CI only runs fake-state tests.
+      - run: python -m unittest discover -s tests/release -p test_release.py -k SystemStateTests
 
   msrv:
     name: msrv (${{ matrix.toolchain }})

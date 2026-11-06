@@ -604,8 +604,9 @@ class SystemStateTests(unittest.TestCase):
 	def test_self_test_refuses_a_host_that_already_has_integration(self):
 		host = FakeHost()
 		host.files = {state.files(host)[0]['path']: b'live route'}
-		with patch.object(state, 'Host', return_value=host), redirect_stdout(io.StringIO()):
-			problems = state.self_test('Linux')
+		with tempfile.TemporaryDirectory() as temporary, patch.object(state, 'Host', return_value=host), \
+				redirect_stdout(io.StringIO()):
+			problems = state.self_test('Linux', workdir=pathlib.Path(temporary) / 'persisted')
 		self.assertTrue(any('already installed' in problem for problem in problems), problems)
 
 	def test_self_test_retains_a_new_workdir_and_restores_after_an_exception(self):
@@ -634,9 +635,46 @@ class SystemStateTests(unittest.TestCase):
 				state.self_test('Linux', workdir=workdir)
 			self.assertEqual(marker.read_text(encoding='utf-8'), 'existing evidence')
 
-	def test_self_test_cli_forwards_the_workdir(self):
+	def test_self_test_requires_a_workdir_even_for_library_callers(self):
+		with patch.object(state, 'Host') as host, self.assertRaisesRegex(state.HostError, 'persisted work directory'):
+			state.self_test('Linux')
+		host.assert_not_called()
+
+	def test_self_test_cli_rejects_missing_temporary_or_noninteractive_workdirs(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			workdir = pathlib.Path(temporary) / 'self-test'
+			for arguments in (['--self-test'], ['--self-test', '--workdir', str(workdir)]):
+				with self.subTest(arguments=arguments), patch.object(state, 'self_test') as self_test, \
+						redirect_stderr(io.StringIO()):
+					with self.assertRaises(SystemExit) as error:
+						state.main(arguments)
+					self.assertEqual(error.exception.code, 2)
+					self_test.assert_not_called()
+			with patch.object(state, 'temporary_path', return_value=False), \
+					patch.object(state.sys, 'stdin', SimpleNamespace(isatty=lambda: False)), \
+					patch.object(state, 'self_test') as self_test, redirect_stderr(io.StringIO()):
+				with self.assertRaises(SystemExit) as error:
+					state.main(['--self-test', '--workdir', str(workdir)])
+				self.assertEqual(error.exception.code, 2)
+				self_test.assert_not_called()
+
+	def test_self_test_cli_requires_disposable_host_confirmation(self):
 		workdir = pathlib.Path('persisted-self-test')
-		with patch.object(state, 'self_test', return_value=[]) as self_test, redirect_stdout(io.StringIO()):
+		with patch.object(state, 'temporary_path', return_value=False), \
+				patch.object(state.sys, 'stdin', SimpleNamespace(isatty=lambda: True)), \
+				patch('builtins.input', return_value='no'), patch.object(state, 'self_test') as self_test, \
+				redirect_stderr(io.StringIO()):
+			with self.assertRaises(SystemExit) as error:
+				state.main(['--self-test', '--workdir', str(workdir)])
+			self.assertEqual(error.exception.code, 2)
+			self_test.assert_not_called()
+
+	def test_self_test_cli_forwards_the_workdir_after_confirmation(self):
+		workdir = pathlib.Path('persisted-self-test')
+		with patch.object(state, 'temporary_path', return_value=False), \
+				patch.object(state.sys, 'stdin', SimpleNamespace(isatty=lambda: True)), \
+				patch('builtins.input', return_value='yes'), patch.object(state, 'self_test', return_value=[]) as self_test, \
+				redirect_stdout(io.StringIO()):
 			self.assertEqual(state.main(['--self-test', '--workdir', str(workdir)]), 0)
 		self_test.assert_called_once_with(workdir=workdir)
 
@@ -867,6 +905,50 @@ class SystemStateTests(unittest.TestCase):
 			state.snapshot(host, backup)
 			with self.assertRaises(state.HostError):
 				state.restore(FakeHost('Darwin'), backup)
+
+
+class ReleaseEntrySafetyTests(unittest.TestCase):
+	def test_hosted_ci_does_not_run_privileged_state_changes(self):
+		workflow = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
+		self.assertIn('-k SystemStateTests', workflow)
+		self.assertNotIn('system_state.py --self-test', workflow)
+		self.assertNotIn('tests/release/run.py host --system', workflow)
+
+	def test_disposable_suites_refuse_to_run_without_a_persisted_report(self):
+		for arguments in (['host', '--system'], ['browser'], ['desktop'], ['service'],
+				['host', '--service'], ['artifacts', '--host', '--system', '--artifacts', 'fixtures']):
+			with self.subTest(arguments=arguments), patch.object(runner, 'Run') as run, redirect_stderr(io.StringIO()):
+				with self.assertRaises(SystemExit) as error:
+					runner.main(arguments)
+				self.assertEqual(error.exception.code, 2)
+				run.assert_not_called()
+
+	def test_disposable_suites_refuse_temporary_and_noninteractive_reports(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			report = str(pathlib.Path(temporary) / 'report')
+			with patch.object(runner, 'Run') as run, redirect_stderr(io.StringIO()):
+				with self.assertRaises(SystemExit):
+					runner.main(['host', '--system', '--report', report])
+				run.assert_not_called()
+			with patch.object(runner, 'helper') as helper, \
+					patch.object(runner.sys, 'stdin', SimpleNamespace(isatty=lambda: False)), \
+					patch.object(runner, 'Run') as run, redirect_stderr(io.StringIO()):
+				helper.return_value.is_ephemeral.return_value = False
+				with self.assertRaises(SystemExit):
+					runner.main(['host', '--system', '--report', report])
+				run.assert_not_called()
+
+	def test_disposable_suites_refuse_a_declined_confirmation(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			report = str(pathlib.Path(temporary) / 'report')
+			with patch.object(runner, 'helper') as helper, \
+					patch.object(runner.sys, 'stdin', SimpleNamespace(isatty=lambda: True)), \
+					patch('builtins.input', return_value='no'), patch.object(runner, 'Run') as run, \
+					redirect_stderr(io.StringIO()):
+				helper.return_value.is_ephemeral.return_value = False
+				with self.assertRaises(SystemExit):
+					runner.main(['host', '--system', '--report', report])
+				run.assert_not_called()
 
 
 class HostSystemTests(unittest.TestCase):

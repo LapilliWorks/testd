@@ -1065,6 +1065,30 @@ def interrupt(signum, frame):
 	raise KeyboardInterrupt(f'signal {signum}')
 
 
+def require_disposable_host(parser, args):
+	if args.suite == 'all':
+		return
+	changes_system = args.suite in ('browser', 'desktop', 'service') or \
+		args.suite == 'host' and (args.system or args.service)
+	changes_system |= args.suite == 'artifacts' and (args.service or args.host and args.system)
+	if not changes_system:
+		return
+	if args.report is None:
+		parser.error('system, browser, desktop, and service checks require a new persisted --report')
+	if helper('all_checks').is_ephemeral(args.report):
+		parser.error('system, browser, desktop, and service checks require a report outside temporary directories')
+	if args.report.exists() or args.report.is_symlink():
+		parser.error(f'report path already exists: {args.report}')
+	if not sys.stdin.isatty():
+		parser.error('system, browser, desktop, and service checks require an interactive terminal')
+	try:
+		answer = input('Confirm a disposable host with a persisted full-system snapshot; type yes: ')
+	except (EOFError, KeyboardInterrupt):
+		parser.error('system checks were not confirmed')
+	if answer.strip().lower() != 'yes':
+		parser.error('system checks were not confirmed')
+
+
 def all_suites(run):
 	doctest_output = helper('doctest_output')
 	api = types.SimpleNamespace(Run=Run, SYSTEM=SYSTEM, HOST_TLD=HOST_TLD, DESKTOP_TLD=DESKTOP_TLD,
@@ -1125,6 +1149,7 @@ def main(argv=None):
 			return 0
 	elif args.interactive or args.plan or args.no_previous_release:
 		parser.error('--interactive, --plan, and --no-previous-release are only available for all')
+	require_disposable_host(parser, args)
 	# A supervisor restarting or an operator stopping the run must still restore.
 	for number in ('SIGTERM', 'SIGHUP'):
 		if hasattr(signal, number):

@@ -521,13 +521,20 @@ def self_test(system=None, tld=SELF_TEST_TLD, workdir=None):
 	It refuses to run where testd integration already exists, because the fixture
 	would replace a live root or route for the duration of the round trip.
 	"""
+	if workdir is None:
+		raise HostError('the self-test requires a new persisted work directory')
 	host = Host(system or platform.system(), tld)
-	if workdir is not None:
-		workdir = pathlib.Path(workdir)
-		workdir.mkdir(parents=True, mode=0o700, exist_ok=False)
-		return self_test_in_workdir(host, workdir)
-	with tempfile.TemporaryDirectory(prefix='testd-restore-') as temporary:
-		return self_test_in_workdir(host, pathlib.Path(temporary))
+	workdir = pathlib.Path(workdir)
+	workdir.mkdir(parents=True, mode=0o700, exist_ok=False)
+	return self_test_in_workdir(host, workdir)
+
+
+def temporary_path(path):
+	roots = [pathlib.Path(tempfile.gettempdir())]
+	roots.extend(pathlib.Path(value) for name in ('TMPDIR', 'TMP', 'TEMP') if (value := os.environ.get(name)))
+	if os.name != 'nt':
+		roots.extend(pathlib.Path(value) for value in ('/tmp', '/run', '/dev/shm'))
+	return any(path.expanduser().resolve().is_relative_to(root.resolve()) for root in roots)
 
 
 def main(argv=None):
@@ -539,6 +546,18 @@ def main(argv=None):
 	args = parser.parse_args(argv)
 	if not args.self_test:
 		parser.error('nothing to do; pass --self-test')
+	if args.workdir is None or temporary_path(args.workdir):
+		parser.error('--self-test requires a new persisted --workdir outside temporary directories')
+	if args.workdir.exists() or args.workdir.is_symlink():
+		parser.error(f'work directory already exists: {args.workdir}')
+	if not sys.stdin.isatty():
+		parser.error('the system self-test requires an interactive terminal')
+	try:
+		answer = input('Confirm a disposable host with a persisted full-system snapshot; type yes: ')
+	except (EOFError, KeyboardInterrupt):
+		parser.error('the system self-test was not confirmed')
+	if answer.strip().lower() != 'yes':
+		parser.error('the system self-test was not confirmed')
 	problems = self_test(workdir=args.workdir)
 	for problem in problems:
 		print(f'fail     {problem}', flush=True)
