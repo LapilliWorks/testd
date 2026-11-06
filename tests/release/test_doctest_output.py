@@ -235,24 +235,32 @@ class DoctestOutputTests(unittest.TestCase):
 				self.assertIn(value, output.getvalue())
 			self.assertEqual((case / 'stdout.log').read_bytes(), b'out\xff')
 
-	@unittest.skipUnless(shutil.which('rustdoc'), 'rustdoc is not installed')
-	def test_real_rustdoc_retains_passing_ignored_and_should_panic_output(self):
+	@unittest.skipUnless(shutil.which('cargo') and shutil.which('rustdoc'), 'Rust tools are not installed')
+	def test_real_cargo_captures_doctests_with_a_space_in_the_runner_path(self):
 		with tempfile.TemporaryDirectory() as temporary:
 			root = pathlib.Path(temporary).resolve()
-			source = root / 'examples.rs'
-			source.write_text('/// ```\n/// println!("ordinary-output");\n/// ```\n'
+			(root / 'src').mkdir()
+			(root / 'Cargo.toml').write_text("[package]\nname = 'doctest-output-fixture'\n"
+				"version = '0.0.0'\nedition = '2021'\n[workspace]\n", encoding='utf-8')
+			(root / 'src/lib.rs').write_text('/// ```\n/// println!("ordinary-output");\n/// ```\n'
 				'/// ```ignore\n/// eprintln!("ignored-output");\n/// ```\n'
 				'/// ```should_panic\n/// panic!("expected-panic-output");\n/// ```\n'
 				'pub fn example() {}\n', encoding='utf-8')
-			report = root / 'report'
+			helper_path = root / 'runner with spaces/doctest_output.py'
+			helper_path.parent.mkdir()
+			shutil.copyfile(SCRIPT, helper_path)
+			spec = importlib.util.spec_from_file_location('spaced_doctest_output', helper_path)
+			helper = importlib.util.module_from_spec(spec)
+			spec.loader.exec_module(helper)
+			report = root / 'report with spaces'
 			report.mkdir()
-			env, directory, reason = doctests.prepare(root, report, self.environment(root))
+			env, directory, reason = helper.prepare(root, report, self.environment(root))
 			self.assertIsNone(reason)
+			env['CARGO_NET_OFFLINE'] = 'true'
 			env['RUSTUP_DIST_SERVER'] = (root / 'no-distribution').as_uri()
 			env['RUSTUP_UPDATE_ROOT'] = (root / 'no-updates').as_uri()
-			flags = env['CARGO_ENCODED_RUSTDOCFLAGS'].split('\x1f')
-			command = ['rustdoc', '--test', str(source), *flags, '--test-args=--include-ignored --show-output']
-			result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
+			command = ['cargo', '+stable', 'test', '--offline', '--doc', '--', '--include-ignored', '--show-output']
+			result = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True, timeout=120)
 			self.assertEqual(result.returncode, 0, result.stderr)
 			cases = list(directory.iterdir())
 			self.assertEqual(len(cases), 3)
