@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -47,6 +48,25 @@ class DoctestOutputTests(unittest.TestCase):
 				self.assertEqual((case / 'stderr.log').read_bytes(), result.stderr)
 				self.assertEqual(json.loads((case / 'result.json').read_text())['exit'], exit_code)
 				self.assertEqual(json.loads((case / 'started.json').read_text())['command'][0], sys.executable)
+
+	def test_an_abnormal_doctest_exit_keeps_its_output_and_status(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			root = pathlib.Path(temporary).resolve()
+			logs = root / 'logs'
+			logs.mkdir()
+			env = {**os.environ, doctests.LOG_DIRECTORY: str(logs)}
+			if os.name == 'nt':
+				code = "import os,sys; os.write(2,b'before-exit'); sys.exit(7)"
+				expected = 7
+			else:
+				code = "import os,signal; os.write(2,b'before-exit'); os.kill(os.getpid(),signal.SIGTERM)"
+				expected = -signal.SIGTERM
+			result = subprocess.run([sys.executable, str(SCRIPT), sys.executable, '-c', code], env=env,
+				capture_output=True, timeout=15)
+			self.assertEqual(result.returncode, expected)
+			case, = logs.iterdir()
+			self.assertEqual((case / 'stderr.log').read_bytes(), b'before-exit')
+			self.assertEqual(json.loads((case / 'result.json').read_text())['exit'], expected)
 
 	def test_large_concurrent_streams_are_not_truncated(self):
 		with tempfile.TemporaryDirectory() as temporary:
