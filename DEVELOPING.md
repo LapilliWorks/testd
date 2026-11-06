@@ -83,37 +83,35 @@ Run against the release candidate on each supported host. Child stdout and stder
 # Automated code/dependency/MSRV checks; omit --gui if Tauri prerequisites are absent
 python3 tests/release/run.py core --strict --gui
 
-# OS integration: sudo -v first on macOS/Linux, or use an elevated shell on
-# Windows. The suite snapshots the integration `doctor --fix` changes and
-# restores it afterwards. No testd daemon may be running.
-python3 tests/release/run.py host --system --service
+# Linux OS integration on a disposable VM with a persisted full-system snapshot
+sudo -v
+python3 tests/release/run.py host --system --bin /path/to/candidate-testd \
+  --report ~/testd-reports/linux-system-01
 
-# Download the candidate CLI archive, SHA256SUMS, and desired bundles into one directory
-python3 tests/release/run.py artifacts --artifacts ~/Downloads/testd-candidate \
-  --require-checksums --host --system --service
+# Candidate archives and checksums on a separately backed-up disposable VM
+python3 tests/release/run.py artifacts --artifacts ~/Downloads/testd-candidate --require-checksums \
+  --report ~/testd-reports/artifacts-01
 # Optional upgrade check: add --previous-bin /path/to/previous/testd
 
-# Real browser checks; starts a headless host if none is running
-python3 tests/release/run.py browser
+# Real browsers on a separately prepared disposable VM and fresh user
+python3 tests/release/run.py browser --bin /path/to/candidate-testd --report ~/testd-reports/browser-01
 
-# Interactive desktop checklist, for example on macOS
-python3 tests/release/run.py desktop --app /Applications/Testd.app
-# On Windows, run this from an elevated PowerShell so the system snapshot and
-# restore can read the NRPT rules and machine root store. Use a disposable
-# desktop VM, not a headless CI runner.
+# Linux desktop on a separately prepared disposable VM and fresh user
+python3 tests/release/run.py desktop --app /path/to/candidate-app --bin /path/to/candidate-testd \
+  --report ~/testd-reports/desktop-01
 ```
 
 The `core` release suite runs ignored Rust contracts as well as ordinary tests; known failing contracts therefore block it until they are resolved or the relevant feature is explicitly excluded. See [tests/README.md](tests/README.md) for the current gaps.
 
 Reports contain local PKI and test credentials and are private by default. Do not attach the entire report directory to a public issue; share only reviewed logs/JSON, never private keys or credentials.
 
-The browser suite uses Bun fixtures and publishes `app.releasecheck`, `api.releasecheck`, and a dead-upstream name. It checks HTTPS, WebSocket idle survival, streamed SSE, a 100 MiB upload, and project-cookie scope. It starts a headless host when none is listening and stops only a host it started; initialize the host with `testd init` first. It checks `testd doctor --json` first, so a missing OS resolver route fails before the browser opens. When the suite started the host, the page's restart button replaces the manual daemon restart for the renewal check; a pre-started host is left alone and must be restarted manually. Run it in every supported browser, complete the certificate and error-response observations, and save the JSON report from the page. A failed run can still be saved with the observations unchecked; the report records it as a failure. Ctrl+C removes only the fixture processes and registrations. For a high edge port, pass `--edge-port 8443`. The suite does not install trust or change the resolver.
+The browser suite uses Bun fixtures and publishes `app.releasecheck`, `api.releasecheck`, and a dead-upstream name. It checks HTTPS, WebSocket idle survival, streamed SSE, a 100 MiB upload, and project-cookie scope. It refuses an occupied intake port, starts and stops its own candidate daemon, and disables real tunnel providers. Initialize the fresh test user and prepare OS DNS and trust on a separately backed-up disposable VM. `testd doctor --json` checks resolver readiness before the browser opens. Run the page in each supported browser, complete the certificate and error-response observations, and save the JSON report. Ctrl+C stops the fixture processes. For a high edge port, pass `--edge-port 8443`. The suite does not itself install trust or change the resolver.
 
-The `service` suite (also available as `host --service` or `artifacts --service`) exercises the real launchd/systemd user-session supervisor: start, TLS, forced-crash restart, and stop. It stages a uniquely named service with an isolated home and high ports, retains the generated unit/plist in the report, and removes only that new service when done. Run in a real user session with a working `systemctl --user` or launchd GUI domain; Windows CLI services are not shipped, so Windows supervision is covered by the tray login checks.
+The `service` suite (also available as `host --service` or `artifacts --service`) requires the disposable-host confirmation and a persisted report. Run it separately from `--system` on a restored snapshot. On Linux it exercises the real systemd user-session supervisor with a randomly named unit, isolated home, fake provider, high ports, and manager-directed crash and stop. It creates the unit exclusively, removes it only if its recorded identity and bytes still match, and retains the generated unit in the report. Launchd checks remain blocked until service ownership can be established; Windows does not ship a CLI service.
 
-The desktop suite launches the supplied app/installer and records each GUI checklist item as pass, fail, or not applicable with evidence. It requires a real interactive terminal, a real desktop session, a fresh user without testd data, and confirmation that a disposable host has a persisted full-system backup. It snapshots the `.test` integration, clears the test-only TLD override from the app environment, and asks for confirmation that all candidate processes have stopped before restoring. The scoped snapshot does not cover every installer, login item, browser store, or shared CA-store effect. If shutdown is not confirmed, restoration is deferred and the report gives the recovery command. Padlocks, UAC, tray behavior, and login cannot be proven by an HTTP-only script. On Linux, grant `CAP_NET_BIND_SERVICE` to the actual tray binary or set a high `[host] edge_addr`; without port privileges the daemon exits after setup. Skips and unanswered checks remain visible in `report.json`; they are not counted as passes. An interrupted desktop checklist or browser run without a saved report exits `2` (incomplete); failed checks exit `1`.
+The desktop suite records each GUI checklist item as pass, fail, or not applicable with evidence. It requires a real interactive terminal and desktop session, a fresh user, a candidate app and CLI, and confirmation of a disposable host with a persisted full-system snapshot. Linux cleanup invokes the candidate's ownership-checked uninstall only after the operator confirms all candidate processes have stopped. macOS and Windows desktop checks remain blocked until resolver and trust ownership can be established. A scoped snapshot does not cover installer, login, browser, or shared CA-store effects. Unconfirmed shutdown defers cleanup. Skips and unanswered checks remain visible in `report.json`; they are not counted as passes.
 
-`host --system` requires a clean disposable host, no testd daemon, and a persisted full-system backup. It snapshots selected integration, refuses pre-existing testd integration, runs the checks, then restores and verifies that scoped snapshot. System trust-store rebuilds and hooks can affect shared generated state beyond the selected paths. See [System integration](#system-integration) for the recorded artifacts and recovery path. Plain `host` does not change system integration. `--bin /path/to/testd` runs a candidate CLI without rebuilding it.
+`host --system` requires a clean disposable host, no testd daemon, an interactive confirmation, a new persisted report, and a persisted full-system snapshot. Linux uses the candidate's ownership-checked uninstall after verifying fixture shutdown; changed or unowned state is left untouched. The scoped verification does not establish that shared trust-store output or hooks are unchanged, so the system stage remains incomplete until independently reviewed against the full-system snapshot. macOS and Windows product system checks are blocked. Plain `host` does not change system integration. `--bin /path/to/testd` runs a candidate CLI without rebuilding it.
 
 ## Contents
 
@@ -135,8 +133,8 @@ Run them on real machines, not inside the dev container. A macOS, Linux, and Win
 | Script | Checks |
 |---|---|
 | `tests/host/linux.sh` | resolver route, CA trust, edge TLS, loopback dashboard, DNS A records, token requests, issued tokens, local registration, sharing, quick launches, URL actions, doctor state checks, launch-at-login entry, systemd unit |
-| `tests/host/macos.sh` | resolver file, CA trust, edge, loopback dashboard, DNS, token requests, issued tokens, local registration, sharing, quick launches, URL actions, doctor state checks, launch-at-login entry, launchd plist |
-| `tests/host/windows.ps1` | edge and proxy without system trust, loopback dashboard, NRPT and root trust when elevated, DNS on port 53, token requests, issued tokens, local registration, sharing, quick launches, URL actions, launch-at-login entry |
+| `tests/host/macos.sh` | Unprivileged edge, dashboard, DNS, registration, sharing, quick launches, doctor state, and launch-at-login checks; resolver and trust checks are blocked |
+| `tests/host/windows.ps1` | Unprivileged edge, dashboard, DNS, registration, sharing, quick launches, and launch-at-login checks; NRPT and root trust checks are blocked |
 | `tests/host/gui-checklist.md` | setup dialog, tray, dashboard window, click-to-open, single instance, quick launches, certificate controls, URL actions, packaging/signing |
 
 The Linux and macOS scripts share their core checks in `tests/host/common.sh` and their helpers in `tests/host/lib.sh`; the platform scripts add the resolver, trust, and init-system sections.
@@ -154,7 +152,7 @@ Each script uses:
 - a high HTTPS port (`8443`) so it does not need root for the edge,
 - dedicated upstream ports for registration (`18080`) and quick launches (`18081`).
 
-The scripts do **not** call sudo themselves. On Linux and macOS they use `--cacert` for HTTPS; on Windows they use `--insecure` for the edge and proxy checks because Schannel does not treat `--cacert` like OpenSSL. To also test the OS resolver and trust store, use `python3 tests/release/run.py host --system` with a cached sudo credential (Linux/macOS) or an elevated shell (Windows). The platform scripts refuse privileged checks without the runner's snapshot.
+The scripts do **not** call sudo themselves. On Linux and macOS they use `--cacert` for HTTPS; on Windows they use `--insecure` for edge and proxy checks because Schannel does not treat `--cacert` like OpenSSL. Only the Linux runner currently permits optional OS resolver and trust checks, with a cached sudo credential, a disposable-host confirmation, and a persisted full-system snapshot. macOS and Windows system checks are blocked.
 
 ### Linux
 
@@ -169,52 +167,25 @@ cargo build --release -p testd
 # Core checks, no system changes
 tests/host/linux.sh
 
-# Optional: resolver + trust store; restored automatically afterwards
+# Optional system checks on a backed-up disposable VM, with a new persisted report
 sudo -v
-python3 tests/release/run.py host --system
-
-# Same against an existing candidate binary
-python3 tests/release/run.py host --system --bin target/release/testd
+python3 tests/release/run.py host --system --bin target/release/testd \
+  --report ~/testd-reports/linux-system-01
 ```
 
-The system check writes `/etc/systemd/resolved.conf.d/90-testd.conf` and the
-distro's CA anchor: `/usr/local/share/ca-certificates/testd-root.crt` with
-`update-ca-certificates` on Debian and Ubuntu, or
-`/etc/pki/ca-trust/source/anchors/testd-root.crt` with `update-ca-trust extract`
-on Fedora and RHEL. Both are the same changes a real `testd doctor --fix` makes,
-and both are restored from the snapshot.
+The Linux system check can write `/etc/systemd/resolved.conf.d/90-testd.conf` and the distro's CA anchor: `/usr/local/share/ca-certificates/testd-root.crt` on Debian and Ubuntu or `/etc/pki/ca-trust/source/anchors/testd-root.crt` on Fedora and RHEL. Cleanup uses the candidate's ownership checks and reports conflicts without replacing or deleting unowned state. Trust-store regeneration and hooks can affect additional shared files, which the scoped snapshot does not verify.
 
 ### macOS
 
-Prerequisites: `bash`, `curl`, `python3`, `plutil`, `dscacheutil`. Xcode
-command-line tools are needed to build. `sudo` must be available if
-`TESTD_HOST_TEST_SYSTEM=1`.
+Prerequisites: `bash`, `curl`, `python3`, `plutil`, and `dscacheutil`. Xcode command-line tools are needed to build.
 
 ```sh
 cd testd
 cargo build --release -p testd
-
 tests/host/macos.sh
-
-sudo -v
-python3 tests/release/run.py host --system
 ```
 
-The system check writes `/etc/resolver/testdcheck` and installs the test root
-into `/Library/Keychains/System.keychain`. Both are restored from the snapshot;
-the upstream root is identified by its SHA-1, not by name, so an unrelated
-`testd root` certificate is never deleted.
-
-To probe only the `/etc/resolver` configure and unconfigure path, run:
-
-```sh
-tests/release/macos-resolver-probe.sh
-```
-
-It snapshots the current route, runs `doctor --fix`, checks `dscacheutil`,
-`getaddrinfo`, `scutil --dns`, and the DNS server directly, removes the route
-with `uninstall --keep-certificate`, checks again, then restores the original
-file and mode. Evidence stays under `~/Library/Application Support/testd/resolver-probes/`.
+The unprivileged host checks do not install a resolver or trust root. The product system checks, desktop runner, launchd service check, and resolver-specific probe are blocked until their ownership and cleanup can be established. The scoped self-test removes only a recorded exact fixture certificate and cannot verify all keychain trust settings or shared effects.
 
 ### Windows
 
@@ -222,11 +193,7 @@ Prerequisites: PowerShell 5.1 or later, `curl.exe` (included with Windows 10
 1803+), and a free port 53. The daemon uses port 53 for NRPT; if another
 service owns it, the script fails at the DNS check.
 
-Verified on Windows 10 22H2, build 19045.7807, with both the non-elevated and
-elevated paths. Windows 11 is not yet verified; the NRPT, `certutil`, and
-`curl.exe` paths are expected to be the same, but leave it to CI or another
-tester before claiming Windows 11 support. The script prints the OS caption,
-version, build, and architecture at the start of every run.
+The unprivileged script prints the OS caption, version, build, and architecture at the start of every run. Compilation, PowerShell fixtures, and CLI checks do not validate NRPT, machine trust, or a desktop Windows release.
 
 CI's `windows-latest` runner is Windows Server, not a desktop Windows 11 host.
 It is useful for compilation and the CLI tests, but it does not replace the
@@ -238,18 +205,9 @@ cargo build --release -p testd
 
 # Core checks: edge and proxy without system trust
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\host\windows.ps1
-
-# Optional: NRPT + root trust. Open PowerShell with "Run as Administrator",
-# then set the flag in that elevated session.
-python tests\release\run.py host --system
 ```
 
-The non-elevated run intentionally uses `curl --insecure --ssl-no-revoke` for
-the edge and proxy checks. That validates routing and TLS minting without
-requiring a trust-store change. The elevated run then calls
-`testd doctor --fix`, checks the NRPT rule and the machine root store, and
-repeats a request to `https://testd.<tld>/` without `--insecure` to prove the OS
-trust path. The loopback dashboard is proxied through the edge and returns 200.
+The unprivileged run intentionally uses `curl --insecure --ssl-no-revoke` for edge and proxy checks. That validates routing and TLS minting without requiring a trust-store change. The loopback dashboard is proxied through the edge and returns 200; these checks do not establish OS trust.
 
 `testd init` and `testd doctor --fix` no longer need the whole process elevated
 on Windows. Privileged actions are delegated to
@@ -257,15 +215,7 @@ on Windows. Privileged actions are delegated to
 IPv4 address, certificate thumbprint, and CA constraints. If testd is not
 elevated, Windows shows one UAC prompt for that helper only.
 
-Cleanup is automatic: the snapshot taken before the checks removes the NRPT rule
-for `.testdcheck` and the test root by thumbprint. Recovery after a hard kill:
-
-```powershell
-python tests\release\run.py --restore-report $env:LOCALAPPDATA\testd\release-checks\<stamp>-<id>
-```
-
-Windows NRPT rules cannot specify a port, which is why the daemon binds `:53`
-there. If port 53 is occupied, stop the other service before running the test.
+The Windows snapshot helper verifies NRPT rules and machine roots without deleting or recreating them by name. Real product system and desktop checks remain blocked because the helper cannot prove ownership of every change; use the persisted full-system snapshot for recovery. Windows NRPT rules cannot specify a port, so the daemon binds `:53`. If it is occupied, use a different disposable host rather than stopping an unrelated service.
 
 ### Launch at login
 
@@ -324,36 +274,23 @@ for the per-artifact commands.
 
 ### System integration
 
-`host --system` assumes no testd daemon is running and that the host's own
-integration comes back afterwards. Before the checks run, `run.py` records every
-artifact `doctor --fix` can change in `<report>/system-before/`:
+Before permitted system checks, `run.py` records selected integration under `<report>/system-before/`. The scoped snapshot is not a full-system backup and does not capture every artifact, trust setting, generated store, or hook affected by the product.
 
-| Platform | Artifacts | Reload |
+| Platform | Selected snapshot | Cleanup policy |
 |---|---|---|
-| Linux (Debian, Ubuntu) | `/etc/systemd/resolved.conf.d/90-testd.conf`, `/usr/local/share/ca-certificates/testd-root.crt` | `systemctl reload systemd-resolved`, `update-ca-certificates` |
-| Linux (Fedora, RHEL) | `/etc/systemd/resolved.conf.d/90-testd.conf`, `/etc/pki/ca-trust/source/anchors/testd-root.crt` | `systemctl reload systemd-resolved`, `update-ca-trust extract` |
-| macOS | `/etc/resolver/<test-only TLD>`, every `CN=testd root <covo name>` (and legacy `CN=testd root` or `CN=testd root testing`) in the System keychain | keychain operations are per SHA-1 |
-| Windows | NRPT rules for `.<test-only TLD>`, every `CN=testd root <covo name>` (and legacy `CN=testd root` or `CN=testd root testing`) in the machine root store | per thumbprint |
+| Linux | The systemd-resolved drop-in, the distro's CA anchor, and their ownership markers | Candidate-owned integration is removed through the candidate's ownership checks; other changes are left untouched |
+| macOS | The test TLD resolver file and named testd roots in the System keychain | Product checks are blocked; the self-test removes only its exact recorded fixture certificate |
+| Windows | NRPT rules for the test TLD and named testd roots in the machine store | Verify only; never remove or recreate rules or roots by name |
 
-The manifest records file bytes, modes, SHA-256 digests, and every pre-existing
-store entry. Restore puts back what the suite removed, removes what it added,
-reloads each consumer, and then verifies the host against the manifest; the
-result is the `system-restore` check. Restores are idempotent. A report that ran
-system checks more than once keeps each snapshot as `system-before`,
-`system-before-2`, and so on.
+File fixtures use exclusive creation and record their identity and content before cleanup. A replaced, changed, deleted, or unowned artifact is reported, not overwritten or removed. Pre-existing keychain and machine-root trust settings are not captured and cannot be verified from this snapshot. System stages remain incomplete when shared trust-store output or hooks have not been compared with the persisted full-system snapshot.
 
-A run that is killed outright cannot restore itself. The snapshot stays on disk,
-so recover with the report directory:
+After an interrupted run, stop all candidate processes and inspect the persisted report and full-system snapshot. An interactive scoped recovery can be attempted with the relevant report or `self-test-state` directory:
 
 ```sh
-python3 tests/release/run.py --restore-report ~/.local/share/testd/release-checks/<stamp>-<id>
+python3 tests/release/run.py --restore-report ~/testd-reports/linux-system-01
 ```
 
-This works from any shell, needs the same sudo (or elevation) as the original
-run, restores every snapshot in the report newest first, and exits non-zero if
-the host does not match the snapshots afterwards. Direct runs of
-`tests/host/*.sh` and `tests/host/windows.ps1` cannot do privileged checks,
-because they have no snapshot to restore from.
+Recovery requires the same platform and any necessary sudo or elevation. It leaves conflicts untouched. Exit `2` means scoped state matched but shared trust effects remain unverified; restore or compare the full-system snapshot before reusing the machine. Direct host scripts cannot run privileged checks without the runner's safeguards.
 
 ### CI coverage
 
@@ -361,15 +298,7 @@ because they have no snapshot to restore from.
 
 ### System checks need a running daemon
 
-The resolver, name-resolution, and trust checks query the live daemon: the DNS
-server answers the query, `doctor --fix` re-reads the route, and the trust check
-connects to the edge. The scripts restart the daemon if it went away, and skip
-the section with a reason if it cannot start, so a dead daemon is not reported
-as a broken resolver.
-
-On Windows the trust check connects to `https://testd.<test-only TLD>/` **without**
-`--insecure`: any HTTP status means Schannel accepted the chain from the machine
-store.
+The Linux resolver and trust checks query the fixture daemon. The runner verifies that its fixture ports are free before cleanup and refuses to stop or replace unrelated listeners. A missing daemon or unresolved cleanup is reported rather than counted as a pass.
 
 ### Interpreting failures
 
@@ -393,7 +322,7 @@ store.
 
 ## Browser validation
 
-Manual checks that a name works in a real browser. Run on the host, or on another device that trusts the root.
+Manual checks that a name works in a real browser. Use a disposable host with a persisted full-system snapshot. A separate device or non-loopback exposure needs separate approval and synthetic data.
 
 ### Preconditions
 

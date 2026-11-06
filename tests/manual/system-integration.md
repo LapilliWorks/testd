@@ -2,7 +2,7 @@
 
 These checks can modify machine-wide DNS and trust. Use only a disposable VM with a persisted, restorable full-system snapshot and a fresh user. Do not seed or remove real routes, certificates, or production trust. Record the OS image and version, resolver implementation, candidate hashes and source commit, full-system snapshot location, commands, results, and before/after evidence without collecting private keys or credentials.
 
-The release runner snapshots selected paths and refuses existing testd integration. Its snapshot is not a full machine backup and does not prove that shared CA bundles, hooks, unrelated resolver configuration, or login settings are unchanged. The conflicting-state cases below require separate, manually seeded disposable snapshots; do not use `host --system` to overwrite a conflict. macOS and Windows do not yet have equivalent ownership safeguards, so their destructive conflict cases are known blockers and must never be attempted on a real host.
+The release runner snapshots selected paths and refuses existing testd integration. Its snapshot is not a full machine backup and does not prove that shared CA bundles, hooks, unrelated resolver configuration, or login settings are unchanged. The conflicting-state cases below require separate, manually seeded disposable snapshots; do not use `host --system` to overwrite a conflict. Product system checks on macOS and Windows are blocked until equivalent ownership safeguards exist.
 
 ```sh
 python3 tests/release/run.py host --system --bin /path/to/candidate-testd --report /path/to/new-persisted-report
@@ -10,7 +10,7 @@ python3 tests/release/run.py host --system --bin /path/to/candidate-testd --repo
 
 ## Clean installation and recovery
 
-- [ ] SYS-01: On a clean disposable host, run the candidate's `host --system` release suite with the required elevation. It installs its test-only DNS route and root, resolves its test name through the OS, reaches the edge without a TLS bypass, and records an actual successful restore.
+- [ ] SYS-01: On a clean disposable Linux host, run the candidate's `host --system` release suite with the required elevation. It installs its test-only DNS route and root, resolves its test name through the OS, reaches the edge without a TLS bypass, and records ownership-checked cleanup and scoped verification. Independently compare shared trust effects with the full-system snapshot.
 - [ ] SYS-02: Verify `doctor --json` distinguishes an unavailable resolver, a missing route, missing trust, and a working setup. Check that failures give an actionable reason and do not claim success.
 - [ ] SYS-03: Interrupt a separate test run after a scoped snapshot is persisted. Stop all candidate and provider processes, run the report's `--restore-report` recovery command, and compare the selected state with the snapshot. Restore the full VM if recovery is incomplete.
 - [ ] SYS-04: Before uninstall or purge, retain the installation ID and root certificate required for owned cleanup. Confirm a missing root or missing ownership proof produces an error and does not purge the data needed for recovery.
