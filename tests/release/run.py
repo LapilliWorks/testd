@@ -598,7 +598,7 @@ def host(run):
 		if snapshot:
 			try:
 				try:
-					check_ports(tcp_ports, udp_ports)
+					wait_for_fixture_ports(tcp_ports, udp_ports)
 				except Exception as error:
 					run.record('fixture-shutdown', 'fail', str(error))
 					raise
@@ -625,6 +625,18 @@ def check_ports(tcp, udp=()):
 					probe.bind(('127.0.0.1', port))
 				except OSError as error:
 					raise RuntimeError(f'fixture port {port} is unavailable; stop the existing service first') from error
+
+
+def wait_for_fixture_ports(tcp, udp, timeout=10):
+	deadline = time.monotonic() + timeout
+	while True:
+		try:
+			check_ports(tcp, udp)
+			return
+		except RuntimeError:
+			if time.monotonic() >= deadline:
+				raise
+			time.sleep(0.25)
 
 
 def extract_archive(path, destination):
@@ -1104,7 +1116,7 @@ def desktop(run):
 			try:
 				try:
 					if SYSTEM == 'Linux':
-						check_ports([7737, 7740, 443], [7753])
+						wait_for_fixture_ports([7737, 7740, 443], [7753])
 				except Exception as error:
 					run.record('fixture-shutdown', 'fail', str(error))
 					raise

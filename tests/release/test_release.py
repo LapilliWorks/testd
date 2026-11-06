@@ -1239,6 +1239,17 @@ class HostSystemTests(unittest.TestCase):
 				else:
 					self.assertEqual(run.results, [])
 
+	def test_shutdown_port_check_retries_without_stopping_an_existing_listener(self):
+		with patch.object(runner, 'check_ports', side_effect=[RuntimeError('busy'), None]) as ports, \
+				patch.object(runner.time, 'sleep') as sleep:
+			runner.wait_for_fixture_ports([7737], [7753])
+		self.assertEqual(ports.call_count, 2)
+		sleep.assert_called_once()
+		with patch.object(runner, 'check_ports', side_effect=RuntimeError('still busy')) as ports, \
+				self.assertRaisesRegex(RuntimeError, 'still busy'):
+			runner.wait_for_fixture_ports([7737], [7753], timeout=0)
+		ports.assert_called_once()
+
 	def test_host_summary_failure_is_not_accepted_as_success(self):
 		with tempfile.TemporaryDirectory() as temporary:
 			run = self.create_run(temporary)
@@ -1575,7 +1586,8 @@ class DesktopRunnerTests(unittest.TestCase):
 			terminal.isatty.return_value = True
 			with patch.object(runner, 'SYSTEM', 'Linux'), patch.dict(os.environ, {'HOME': directory}), \
 					patch.object(runner.sys, 'stdin', terminal), patch.object(runner.time, 'sleep'), \
-					patch.object(runner, 'check_ports', side_effect=[None, RuntimeError('port still occupied')]), \
+					patch.object(runner, 'check_ports'), \
+					patch.object(runner, 'wait_for_fixture_ports', side_effect=RuntimeError('port still occupied')), \
 					patch.object(runner.threading, 'Thread'), patch.object(runner.subprocess, 'Popen', return_value=process), \
 					patch.object(runner, 'checklist_items', return_value=['fixture']), \
 					patch.object(runner, 'ask', side_effect=['y', 'q', 'y']), \
