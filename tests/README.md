@@ -30,9 +30,44 @@ Never count an ignored, skipped, inapplicable, or unrun check as a pass. A succe
 
 `crates/testd-daemon/tests/product_flow.rs` composes the real registration engine, DNS server, and TLS edge on ephemeral loopback sockets. Its root is trusted only by the test client, and a resolver wrapper forbids system integration. It is not a full daemon process, OS trust test, browser test, or GUI test.
 
-## Platform scripts
+## All-in-one platform run
 
-Run the matching script on the actual platform, with Python 3.12 or newer, Rust toolchains 1.89 and stable, `cargo-nextest`, and Bun installed. The scripts do not install dependencies. With no arguments they run the non-GUI automated sequence and save a private report.
+Run the matching script on each actual platform and architecture. The `all` suite runs GUI and non-GUI Rust checks, the ignored release contracts, doctests, release-script and browser-server fixtures, the full dependency audit, version verification, website checks, a candidate CLI build, and the unprivileged host suite. Each stage has explicit `BEGIN` and `END` markers, its own report and logs, and a final summary. Failed stages do not prevent independent checks from running.
+
+```sh
+python3 scripts/test-linux.py all
+python3 scripts/test-macos.py all
+```
+
+```powershell
+python scripts\test-windows.py all
+```
+
+The scripts require Python 3.12 or newer, Rust 1.89, 1.90 and stable, `cargo-nextest`, `cargo-deny`, Bun, installed website dependencies, and the platform GUI prerequisites. They do not install dependencies. `all` builds a CLI unless `--bin` specifies an existing candidate; a pre-existing build candidate is backed up in the report. Website output and caches are isolated inside the report rather than overwriting the checkout's `dist/`. Run `all --plan` to list stages without executing them.
+
+For the system, desktop, browser, artifact, and manual stages, provide the candidate assets and explicitly opt in. The report directory must be new and persisted outside temporary storage. Use a disposable VM with a persisted full-system snapshot; on Windows, use an elevated PowerShell.
+
+```sh
+python3 scripts/test-linux.py all --system --interactive --app /path/to/candidate-app \
+  --artifacts /path/to/host-assets --no-previous-release --report /path/to/new-persisted-report
+```
+
+```powershell
+python scripts\test-windows.py all --system --interactive --app C:\candidate\setup.exe `
+  --artifacts C:\candidate\assets --no-previous-release --report D:\testd-reports\run-001
+```
+
+On macOS, use `scripts/test-macos.py` with the same options. Pass `--bin` for a verified candidate CLI. Supply `--previous-bin` instead of `--no-previous-release` when a real previous release exists. The assets directory must contain the host-compatible candidate assets and `SHA256SUMS`. The build fingerprint and CLI hash do not establish release-artifact provenance.
+
+`--system` requires an interactive confirmation of the disposable host and full-system snapshot; each sensitive stage asks again. `--interactive` adds the actual desktop and browser runners and prompts for every manual checklist result and evidence. The browser stage requires configured OS DNS and trust and refuses to attach to an existing daemon. Some checklists require separately restored snapshots, multiple machines, or separate browser runs; skip a stage and use another run on the appropriate VM rather than assuming one snapshot covers them. Network exposure and real providers still require explicit approval.
+
+Missing prerequisites, declined stages, unprovided artifacts, and skipped checks are recorded as blocked, not passed. Exit status is `1` for any failure, `2` for an incomplete run without failures, and `0` only when all applicable stages completed without failures. The Linux and macOS release-contract stages currently fail on four share-lifetime contracts; the full GUI dependency audit has a known unmaintained-dependency advisory. The optional Windows NRPT diagnostic is not tracked and its cleanup can remove unrelated rules, so it remains blocked instead of being run automatically. The macOS probe is wrapped in a scoped resolver/trust snapshot, which is not a full VM backup.
+
+Inspect `report.json`, `boundaries.log`, and each stage's report and logs. A failed or incomplete system stage blocks later sensitive stages unless its cleanup was verified. If the self-test cannot restore, its retained `self-test-state` directory can be passed to `tests/release/run.py --restore-report`; use the full VM snapshot if scoped recovery is incomplete. Reports may contain credentials and fixture keys and must remain private.
+
+## Individual platform suites
+
+Without arguments, the platform scripts retain their non-GUI automated sequence. Use the Linux script in WSL. Each entry point rejects a different operating system. Run `--help` to see all options:
 
 ```sh
 python3 scripts/test-linux.py
@@ -43,10 +78,11 @@ python3 scripts/test-macos.py
 python scripts\test-windows.py
 ```
 
-Use the Linux script in WSL. Each entry point rejects a different operating system. Run `--help` to see the available suites and options. The same options work on all three platforms:
+The same options work on all three platforms:
 
 | Invocation | Checks |
 |---|---|
+| `all` | Every automated stage, plus explicitly enabled and prepared system, artifact, desktop, browser, and manual stages |
 | `automated --gui` | Default automated checks plus the Rust 1.90 tray check and full-workspace tests; requires platform GUI prerequisites |
 | `contracts` | Release contracts including ignored cases; currently fails on known blockers |
 | `audit` | Full-workspace cargo-deny audit; requires `cargo-deny` |

@@ -66,7 +66,7 @@ bun run check:links
 
 ## Test
 
-See [tests/README.md](tests/README.md) for the contract matrix, test layers, known gaps, and manual validation.
+See [tests/README.md](tests/README.md) for the all-in-one platform runners, contract matrix, test layers, known gaps, and manual validation. The `all` suite prints boundaries for every stage and requires explicit opt-in for privileged or interactive checks.
 
 ```sh
 cargo nextest run --workspace

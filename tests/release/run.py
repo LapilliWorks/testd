@@ -24,6 +24,7 @@ import tarfile
 import threading
 import time
 import tomllib
+import types
 import uuid
 import zipfile
 
@@ -807,6 +808,8 @@ def browser(run):
 	check_ports([run.args.port, run.args.port + 1])
 	cli = binary(run)
 	with HostFixture(run, cli, run.args.intake_port) as host:
+		if getattr(run.args, 'require_managed_host', False) and not host.started:
+			raise RuntimeError('the browser suite found an existing host; stop it and rerun with the candidate CLI')
 		status = host.status
 		if status.get('tld') != 'test':
 			raise RuntimeError(f'the host at 127.0.0.1:{run.args.intake_port} serves .{status.get("tld")}, '
@@ -1009,6 +1012,14 @@ def interrupt(signum, frame):
 	raise KeyboardInterrupt(f'signal {signum}')
 
 
+def all_suites(run):
+	api = types.SimpleNamespace(Run=Run, SYSTEM=SYSTEM, HOST_TLD=HOST_TLD, DESKTOP_TLD=DESKTOP_TLD,
+		binary=binary, file_digest=file_digest, host=host, service=service, artifacts=artifacts,
+		desktop=desktop, browser=browser, system_snapshot=system_snapshot, system_restore=system_restore,
+		check_ports=check_ports, checklist_items=checklist_items)
+	helper('all_checks').execute(run, api)
+
+
 def main(argv=None):
 	if sys.version_info < (3, 12):
 		raise SystemExit('Please install Python 3.12 or newer for release validation')
@@ -1019,7 +1030,7 @@ def main(argv=None):
 		if hasattr(stream, 'reconfigure'):
 			stream.reconfigure(encoding=ENCODING)
 	parser = argparse.ArgumentParser(description=__doc__)
-	parser.add_argument('suite', nargs='?', choices=['automated', 'contracts', 'audit', 'core', 'host',
+	parser.add_argument('suite', nargs='?', choices=['automated', 'contracts', 'audit', 'all', 'core', 'host',
 		'artifacts', 'browser', 'desktop', 'service'])
 	parser.add_argument('--report', type=pathlib.Path, help='new persisted report directory')
 	parser.add_argument('--restore-report', type=pathlib.Path,
@@ -1034,7 +1045,11 @@ def main(argv=None):
 	parser.add_argument('--host', action='store_true', help='run host suite against the extracted CLI')
 	parser.add_argument('--service', action='store_true', help='also test launchd/systemd supervision')
 	parser.add_argument('--app', type=pathlib.Path)
-	parser.add_argument('--previous-bin', type=pathlib.Path, help='previous CLI for artifact upgrade checks')
+	previous = parser.add_mutually_exclusive_group()
+	previous.add_argument('--previous-bin', type=pathlib.Path, help='previous CLI for artifact upgrade checks')
+	previous.add_argument('--no-previous-release', action='store_true', help='record upgrade checks as not applicable')
+	parser.add_argument('--interactive', action='store_true', help='include real browser, desktop, and manual checks')
+	parser.add_argument('--plan', action='store_true', help='list all stages without running them')
 	parser.add_argument('--port', type=int, default=19080)
 	parser.add_argument('--edge-port', type=int, default=443)
 	parser.add_argument('--intake-port', type=int, default=7737)
@@ -1046,13 +1061,24 @@ def main(argv=None):
 		parser.error('a suite is required unless --restore-report is given')
 	if args.suite == 'artifacts' and not args.artifacts:
 		parser.error('artifacts requires --artifacts')
+	if args.suite == 'all':
+		all_checks = helper('all_checks')
+		all_checks.validate(parser, args)
+		if args.plan:
+			all_checks.print_plan(args)
+			return 0
+	elif args.interactive or args.plan or args.no_previous_release:
+		parser.error('--interactive, --plan, and --no-previous-release are only available for all')
 	# A supervisor restarting or an operator stopping the run must still restore.
 	for number in ('SIGTERM', 'SIGHUP'):
 		if hasattr(signal, number):
 			signal.signal(getattr(signal, number), interrupt)
 	run = Run(args)
 	try:
-		globals()[args.suite](run)
+		if args.suite == 'all':
+			all_suites(run)
+		else:
+			globals()[args.suite](run)
 	except KeyboardInterrupt:
 		run.metadata['incomplete'] = True
 		run.record(args.suite, 'skip', 'interrupted; check system-restore and use --restore-report if needed')

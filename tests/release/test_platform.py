@@ -94,6 +94,50 @@ class PlatformScriptsTests(unittest.TestCase):
 			self.script.main('Darwin', ['--gui'])
 			run.assert_called_once_with(['automated', '--gui'])
 
+	def test_all_defaults_to_an_automatically_built_candidate(self):
+		with patch.object(self.script.platform, 'system', return_value='Linux'), \
+			patch.object(self.script, 'run_cli', return_value=2) as run:
+			self.assertEqual(self.script.main('Linux', ['all']), 2)
+			run.assert_called_once_with(['all'])
+
+	def test_all_forwards_candidates_artifacts_and_explicit_system_scope(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = pathlib.Path(directory).resolve()
+			cli = root / 'candidate'
+			app = root / 'app'
+			assets = root / 'assets'
+			cli.write_text('fixture', encoding='utf-8')
+			app.write_text('fixture', encoding='utf-8')
+			assets.mkdir()
+			report = root / 'report'
+			arguments = ['all', '--bin', str(cli), '--app', str(app), '--artifacts', str(assets),
+				'--no-previous-release', '--interactive', '--report', str(report), '--system']
+			with patch.object(self.script.platform, 'system', return_value='Windows'), \
+				patch.object(self.script, 'is_ephemeral_report', return_value=False), \
+				patch.object(self.script, 'run_cli', return_value=0) as run:
+				self.assertEqual(self.script.main('Windows', arguments), 0)
+				run.assert_called_once_with(arguments)
+			self.assertFalse(report.exists())
+
+	def test_all_requires_the_matching_orchestrator(self):
+		with patch.object(self.script.platform, 'system', return_value='Linux'), \
+			patch.object(self.script.runner, 'all_suites', None), patch.object(self.script, 'run_cli') as run, \
+			contextlib.redirect_stderr(io.StringIO()) as stderr:
+			with self.assertRaises(SystemExit) as error:
+				self.script.main('Linux', ['all'])
+			self.assertEqual(error.exception.code, 2)
+			self.assertIn('out of sync', stderr.getvalue())
+			run.assert_not_called()
+
+	def test_all_rejects_incomplete_or_irrelevant_options(self):
+		with patch.object(self.script.platform, 'system', return_value='Linux'), \
+			patch.object(self.script, 'run_cli') as run, contextlib.redirect_stderr(io.StringIO()):
+			for arguments in (['all', '--interactive'], ['all', '--system'], ['all', '--app', 'candidate'],
+				['all', '--previous-bin', 'candidate'], ['automated', '--plan'], ['contracts', '--artifacts', 'assets']):
+				with self.subTest(arguments=arguments), self.assertRaises(SystemExit):
+					self.script.main('Linux', arguments)
+			run.assert_not_called()
+
 	def test_wrong_platform_fails_without_running_a_suite(self):
 		with patch.object(self.script.platform, 'system', return_value='Linux'), \
 			patch.object(self.script, 'run_cli') as run, contextlib.redirect_stderr(io.StringIO()):

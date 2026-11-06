@@ -7,7 +7,7 @@ const root = process.env.TESTD_SITE_OUT_DIR
 	: fileURLToPath(new URL('../dist', import.meta.url));
 
 if (!existsSync(join(root, 'index.html'))) {
-	console.error('check-links: dist/index.html is missing; run `bun run build` first');
+	console.error(`check-links: ${join(root, 'index.html')} is missing; run \`bun run build\` first`);
 	process.exit(1);
 }
 

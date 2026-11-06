@@ -1177,6 +1177,20 @@ class BrowserTests(unittest.TestCase):
 			wait.assert_called_once_with(7737, 'process', 'output')
 			command.assert_called_once()
 
+	def test_browser_can_refuse_a_host_that_it_did_not_start(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			run.args.require_managed_host = True
+			with patch.object(runner, 'require'), patch.object(runner, 'check_ports'), \
+				patch.object(runner, 'local_host_status', return_value={'tld': 'test'}), \
+				patch.object(runner, 'binary', return_value=pathlib.Path('candidate')), \
+				patch.object(runner, 'require_host_resolution') as resolution, \
+				patch.object(run, 'command') as command, redirect_stdout(io.StringIO()):
+				with self.assertRaisesRegex(RuntimeError, 'existing host'):
+					runner.browser(run)
+			resolution.assert_not_called()
+			command.assert_not_called()
+
 	def test_expected_browser_checks_match_the_page(self):
 		page = (ROOT / 'tests/release/browser.html').read_text(encoding='utf-8')
 		names = re.findall(r"await check\('([^']+)'", page)
