@@ -17,9 +17,21 @@
 
 set -euo pipefail
 
-if [ "${TESTD_HOST_TEST_SYSTEM:-0}" = '1' ] && [ ! -f "${TESTD_HOST_SNAPSHOT:-/nonexistent}/manifest.json" ]; then
-	printf 'system checks need a snapshot: run tests/release/run.py host --system\n' >&2
-	exit 2
+# Keep only test-runner controls; never inherit real hosts, credentials, or providers.
+for variable in ${!TESTD_@}; do
+	case "$variable" in
+		TESTD_BIN|TESTD_HOST_TLD|TESTD_HOST_EDGE_PORT|TESTD_HOST_APP_PORT|TESTD_HOST_LAUNCH_PORT|\
+		TESTD_HOST_OUTPUT_DIR|TESTD_HOST_TEST_SYSTEM|TESTD_HOST_SNAPSHOT|TESTD_HOST_DISPOSABLE_CONFIRMED) ;;
+		*) unset "$variable" ;;
+	esac
+done
+
+if [ "${TESTD_HOST_TEST_SYSTEM:-0}" = '1' ]; then
+	if [ "${TESTD_HOST_DISPOSABLE_CONFIRMED:-0}" != '1' ] || [ ! -t 0 ] || \
+		[ ! -f "${TESTD_HOST_SNAPSHOT:-/nonexistent}/manifest.json" ]; then
+		printf 'system checks require a confirmed disposable host and snapshot through the release runner\n' >&2
+		exit 2
+	fi
 fi
 
 TLD="${TESTD_HOST_TLD:-testdcheck}"

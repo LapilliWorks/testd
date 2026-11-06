@@ -62,6 +62,8 @@ def fixture(directory, *, args=None, system='Linux', failures=(), outputs=None):
 	root = pathlib.Path(directory)
 	args = args or arguments()
 	commands = []
+	outputs = {'release-script-fixtures': 'Ran 1 test in 0.1s\n\nOK\n',
+		'system-restore-self-test': 'ok       scoped fixture state was restored and verified\n', **(outputs or {})}
 	parent = FakeRun(args, root / 'report', commands, failures, outputs)
 	def child(child_args):
 		return FakeRun(child_args, child_args.report, commands, failures, outputs)
@@ -226,17 +228,53 @@ class AllChecksTests(unittest.TestCase):
 			self.assertEqual(outcome(parent, 'release-script-fixtures')['status'], 'blocked')
 			self.assertTrue(parent.metadata['incomplete'])
 
+	def test_platform_fixture_skips_are_not_confused_with_missing_evidence(self):
+		cases = (
+			('Ran 2 tests in 0.1s\n\nOK (skipped=0)\n', 'pass'),
+			("test_a ... skipped 'not applicable: Unix only'\nRan 2 tests in 0.1s\n\nOK (skipped=1)\n", 'pass'),
+			("test_a ... skipped 'PowerShell is not installed'\nRan 2 tests in 0.1s\n\nOK (skipped=1)\n", 'blocked'),
+			("test_a ... skipped 'not applicable: Unix only'\nRan 2 tests in 0.1s\n\nOK (skipped=2)\n", 'blocked'),
+			("test_a ... skipped 'not applicable: Unix only'\nRan 2 tests in 0.1s\n\nOK\n", 'blocked'),
+			('Ran 0 tests in 0.1s\n\nOK\n', 'blocked'),
+			('no result summary', 'blocked'),
+		)
+		for output, expected in cases:
+			with self.subTest(output=output), tempfile.TemporaryDirectory() as temporary:
+				parent, api, _ = fixture(temporary, outputs={'release-script-fixtures': output})
+				run = checks.AllChecks(parent, api, parent.args)
+				run.boundary_log = io.StringIO()
+				stage = next(item for item in run.stages() if item.name == 'release-script-fixtures')
+				with contextlib.redirect_stdout(io.StringIO()):
+					run.stage(1, 1, stage)
+				self.assertEqual(outcome(parent, 'release-script-fixtures')['status'], expected)
+
 	def test_artifact_checks_distinguish_missing_and_inapplicable_prior_releases(self):
 		for no_previous, expected in [(False, 'blocked'), (True, 'pass')]:
 			with self.subTest(no_previous=no_previous), tempfile.TemporaryDirectory() as temporary:
-				args = arguments(artifacts=pathlib.Path(temporary), no_previous_release=no_previous)
+				args = arguments(system=True, artifacts=pathlib.Path(temporary), no_previous_release=no_previous)
 				parent, api, _ = fixture(temporary, args=args)
-				with patch.object(checks.shutil, 'which', return_value='installed'), contextlib.redirect_stdout(io.StringIO()):
-					checks.execute(parent, api)
+				run = checks.AllChecks(parent, api, args)
+				run.system_confirmed = True
+				run.boundary_log = io.StringIO()
+				stage = next(item for item in run.stages() if item.name == 'artifacts')
+				with patch.object(run, 'confirm', return_value=True), contextlib.redirect_stdout(io.StringIO()):
+					run.stage(1, 1, stage)
 				self.assertEqual(outcome(parent, 'artifacts')['status'], expected)
 				api.artifacts.assert_called_once()
 				self.assertTrue(api.artifacts.call_args.args[0].args.require_checksums)
 				self.assertTrue(api.artifacts.call_args.args[0].args.host)
+
+	def test_artifacts_never_execute_without_disposable_host_confirmation(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			args = arguments(artifacts=pathlib.Path(temporary))
+			parent, api, _ = fixture(temporary, args=args)
+			run = checks.AllChecks(parent, api, args)
+			run.boundary_log = io.StringIO()
+			stage = next(item for item in run.stages() if item.name == 'artifacts')
+			with contextlib.redirect_stdout(io.StringIO()):
+				run.stage(1, 1, stage)
+			self.assertEqual(outcome(parent, 'artifacts')['status'], 'blocked')
+			api.artifacts.assert_not_called()
 
 	def test_declined_system_confirmation_never_starts_sensitive_operations(self):
 		with tempfile.TemporaryDirectory() as temporary:
@@ -272,6 +310,36 @@ class AllChecksTests(unittest.TestCase):
 			self.assertIn('--workdir', self_test)
 			self.assertTrue(pathlib.Path(self_test[-1]).is_relative_to(parent.output))
 
+	def test_unverified_shared_trust_effects_block_later_system_stages(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			args = arguments(system=True, interactive=True, app=pathlib.Path('app'))
+			parent, api, _ = fixture(temporary, args=args)
+			run = checks.AllChecks(parent, api, args)
+			with patch.object(run, 'confirm', return_value=True), patch.object(run, 'authorize'), \
+					patch.object(checks.shutil, 'which', return_value='installed'), \
+					contextlib.redirect_stdout(io.StringIO()):
+				run.execute()
+			self.assertEqual(outcome(parent, 'system-restore-self-test')['status'], 'blocked')
+			self.assertEqual(outcome(parent, 'host-system')['status'], 'blocked')
+			self.assertIn('earlier system stage failed', outcome(parent, 'host-system')['detail'])
+			api.host.assert_called_once()
+			api.desktop.assert_not_called()
+
+	def test_self_test_exit_two_without_success_evidence_is_a_failure(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			args = arguments(system=True)
+			parent, api, _ = fixture(temporary, args=args,
+				outputs={'system-restore-self-test': 'usage: invalid arguments\n'})
+			run = checks.AllChecks(parent, api, args)
+			run.system_confirmed = True
+			run.boundary_log = io.StringIO()
+			stage = next(item for item in run.stages() if item.name == 'system-restore-self-test')
+			with patch.object(run, 'confirm', return_value=True), patch.object(run, 'authorize'), \
+					contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+				run.stage(1, 1, stage)
+			self.assertEqual(outcome(parent, 'system-restore-self-test')['status'], 'fail')
+			self.assertTrue(run.system_unsafe)
+
 	def test_system_host_checks_reject_non_throwaway_tlds(self):
 		with tempfile.TemporaryDirectory() as temporary:
 			args = arguments(system=True)
@@ -296,6 +364,7 @@ class AllChecksTests(unittest.TestCase):
 			def host(child):
 				child.record('host-checks', 'pass', 'fixture checks')
 				child.record('host-coverage', 'skip', 'blocked: login not tested')
+				child.record('fixture-shutdown', 'pass', 'fixture stopped')
 				child.record('system-restore', 'pass', 'fixture restore')
 			api.host.side_effect = host
 			stage = next(item for item in run.stages() if item.name == 'host-system')
@@ -315,6 +384,7 @@ class AllChecksTests(unittest.TestCase):
 			run.boundary_log = io.StringIO()
 			def desktop(child):
 				child.record('GUI-01', 'fail', 'fixture observation')
+				child.record('fixture-shutdown', 'pass', 'fixture stopped')
 				child.record('system-restore', 'pass', 'fixture restore')
 			api.desktop.side_effect = desktop
 			stage = next(item for item in run.stages() if item.name == 'desktop')
@@ -323,6 +393,32 @@ class AllChecksTests(unittest.TestCase):
 				run.stage(1, 1, stage)
 			self.assertEqual(outcome(parent, 'desktop')['status'], 'fail')
 			self.assertFalse(run.system_unsafe)
+
+	def test_failed_or_unverified_shutdown_blocks_later_system_changes(self):
+		for name, shutdown in (('host-system', 'missing'), ('host-system', 'fail'), ('desktop', 'missing'),
+				('desktop', 'fail')):
+			with self.subTest(stage=name, shutdown=shutdown), tempfile.TemporaryDirectory() as temporary:
+				args = arguments(system=True, interactive=True, app=pathlib.Path('app'))
+				parent, api, _ = fixture(temporary, args=args)
+				run = checks.AllChecks(parent, api, args)
+				run.cli = pathlib.Path('candidate')
+				run.system_confirmed = True
+				run.boundary_log = io.StringIO()
+				def action(child):
+					child.record('host-checks', 'pass', 'fixture checks')
+					child.record('system-restore', 'pass', 'scoped fixture restore')
+					if shutdown == 'fail':
+						child.record('fixture-shutdown', 'fail', 'a listener is still occupied')
+					else:
+						child.record('coverage', 'skip', 'blocked: shutdown was not verified')
+				api.host.side_effect = action
+				api.desktop.side_effect = action
+				stage = next(item for item in run.stages() if item.name == name)
+				with patch.object(run, 'confirm', return_value=True), patch.object(run, 'authorize'), \
+						contextlib.redirect_stdout(io.StringIO()):
+					run.stage(1, 1, stage)
+				self.assertIn(outcome(parent, name)['status'], ('fail', 'blocked'))
+				self.assertTrue(run.system_unsafe)
 
 	def test_browser_refuses_to_attach_to_an_existing_listener(self):
 		with tempfile.TemporaryDirectory() as temporary:
@@ -340,41 +436,40 @@ class AllChecksTests(unittest.TestCase):
 			self.assertEqual(outcome(parent, 'browser')['status'], 'fail')
 			api.browser.assert_not_called()
 
-	def test_macos_probe_refuses_preexisting_integration_before_running(self):
-		with tempfile.TemporaryDirectory() as temporary:
-			args = arguments(system=True, interactive=True)
-			parent, api, commands = fixture(temporary, args=args, system='Darwin')
-			api.system_snapshot.side_effect = RuntimeError('pre-existing integration')
-			run = checks.AllChecks(parent, api, args)
-			run.cli = pathlib.Path('candidate')
-			run.system_confirmed = True
-			run.boundary_log = io.StringIO()
-			stage = next(item for item in run.stages() if item.name == 'platform-resolver-probe')
-			with patch.object(run, 'confirm', return_value=True), patch.object(run, 'authorize'), \
-				patch.object(checks.shutil, 'which', return_value='installed'), \
-				contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-				run.stage(1, 1, stage)
-			self.assertEqual(outcome(parent, 'platform-resolver-probe')['status'], 'fail')
-			self.assertFalse(commands)
-			api.system_restore.assert_not_called()
+	def test_unowned_platform_integration_is_blocked_before_any_side_effect(self):
+		for system in ('Darwin', 'Windows'):
+			for name in ('host-system', 'desktop', 'platform-resolver-probe'):
+				with self.subTest(system=system, stage=name), tempfile.TemporaryDirectory() as temporary:
+					args = arguments(system=True, interactive=True, app=pathlib.Path('app'))
+					parent, api, commands = fixture(temporary, args=args, system=system)
+					run = checks.AllChecks(parent, api, args)
+					run.cli = pathlib.Path('candidate')
+					run.system_confirmed = True
+					run.boundary_log = io.StringIO()
+					stage = next(item for item in run.stages() if item.name == name)
+					with patch.object(run, 'confirm', return_value=True), patch.object(run, 'authorize') as authorize, \
+							contextlib.redirect_stdout(io.StringIO()):
+						run.stage(1, 1, stage)
+					self.assertEqual(outcome(parent, name)['status'], 'blocked')
+					self.assertFalse(commands)
+					authorize.assert_not_called()
+					api.system_snapshot.assert_not_called()
+					api.host.assert_not_called()
+					api.desktop.assert_not_called()
 
-	def test_macos_probe_restores_the_scoped_snapshot_after_failure(self):
+	def test_windows_self_test_is_blocked_before_authorization(self):
 		with tempfile.TemporaryDirectory() as temporary:
-			args = arguments(system=True, interactive=True)
-			parent, api, commands = fixture(temporary, args=args, system='Darwin', failures=('macos-resolver-probe',))
+			args = arguments(system=True)
+			parent, api, commands = fixture(temporary, args=args, system='Windows')
 			run = checks.AllChecks(parent, api, args)
-			run.cli = pathlib.Path('candidate')
 			run.system_confirmed = True
 			run.boundary_log = io.StringIO()
-			stage = next(item for item in run.stages() if item.name == 'platform-resolver-probe')
-			with patch.object(run, 'confirm', return_value=True), patch.object(run, 'authorize'), \
-				patch.object(checks.shutil, 'which', return_value='installed'), contextlib.redirect_stdout(io.StringIO()):
+			stage = next(item for item in run.stages() if item.name == 'system-restore-self-test')
+			with patch.object(run, 'authorize') as authorize, contextlib.redirect_stdout(io.StringIO()):
 				run.stage(1, 1, stage)
-			self.assertEqual(outcome(parent, 'platform-resolver-probe')['status'], 'fail')
-			self.assertEqual([name for name, *_ in commands], ['macos-resolver-probe'])
-			api.system_snapshot.assert_called_once()
-			api.system_restore.assert_called_once_with(api.system_snapshot.call_args.args[0],
-				api.system_snapshot.return_value, 'test', interactive=True)
+			self.assertEqual(outcome(parent, 'system-restore-self-test')['status'], 'blocked')
+			self.assertFalse(commands)
+			authorize.assert_not_called()
 
 	def test_browser_failures_do_not_block_later_checks_after_owned_fixtures_stop(self):
 		with tempfile.TemporaryDirectory() as temporary:

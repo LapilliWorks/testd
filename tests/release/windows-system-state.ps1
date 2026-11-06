@@ -6,11 +6,11 @@
 #             named "testd root", "testd root <covo name>", or "testd root testing".
 #             Changes nothing, but needs elevation so a
 #             partial read cannot become a manifest that removes unseen rules.
-#   Restore   Remove what the suite added, put back what it removed, then verify.
+#   Restore   Verify only; never remove a rule or root based on its name.
 #   Verify    Compare the machine against the snapshot; throw on any difference.
 #
-# Every rule and certificate is name-scoped (.testdcheck and the testd root names),
-# so nothing outside the throwaway TLD or the testd names is touched.
+# A namespace or certificate name does not prove ownership. If these objects
+# changed, leave them untouched and restore the persisted full-system snapshot.
 
 [CmdletBinding()]
 param(
@@ -133,10 +133,23 @@ function Get-RuleProperties($rule) {
 	$properties
 }
 
+function Write-NewBytes([string]$Path, [byte[]]$Bytes) {
+	$stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+	try {
+		$stream.Write($Bytes, 0, $Bytes.Length)
+		$stream.Flush($true)
+	} finally {
+		$stream.Dispose()
+	}
+}
+
 function Save-Snapshot {
 	# Snapshotting needs the same access as restoring, so a partial read can never
-	# become a manifest that removes rules it never saw.
+	# become a manifest that omits rules it never saw.
 	Assert-Administrator
+	if ((Test-Path -LiteralPath $NrptFile) -or (Test-Path -LiteralPath $RootDirectory)) {
+		throw "snapshot evidence already exists at $Destination"
+	}
 	$rules = @(Get-NamespaceRules | ForEach-Object {
 		[pscustomobject]@{
 			Signature = Get-RuleSignature $_
@@ -145,11 +158,11 @@ function Save-Snapshot {
 	})
 	# PowerShell 5.1 writes nothing for an empty array, so spell empty out.
 	$json = if ($rules.Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject $rules -Depth 10 }
-	Set-Content -LiteralPath $NrptFile -Value $json -Encoding utf8
-	New-Item -ItemType Directory -Path $RootDirectory -Force | Out-Null
+	Write-NewBytes $NrptFile ([Text.UTF8Encoding]::new($false).GetBytes($json))
+	New-Item -ItemType Directory -Path $RootDirectory -ErrorAction Stop | Out-Null
 	foreach ($root in Get-RootCertificates) {
-		[IO.File]::WriteAllBytes((Join-Path $RootDirectory ($root.Thumbprint + '.cer')),
-			$root.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+		Write-NewBytes (Join-Path $RootDirectory ($root.Thumbprint + '.cer')) `
+			($root.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
 	}
 	Write-Host "Saved system snapshot: $Destination"
 }
@@ -172,57 +185,17 @@ function Read-Snapshot {
 			}
 		})
 	}
-	$certificates = @()
-	if (Test-Path -LiteralPath $RootDirectory) {
-		$certificates = @(Get-ChildItem -LiteralPath $RootDirectory -Filter *.cer)
+	if (-not (Test-Path -LiteralPath $RootDirectory -PathType Container)) {
+		throw "missing root-store snapshot: $RootDirectory"
 	}
+	$certificates = @(Get-ChildItem -LiteralPath $RootDirectory -Filter *.cer)
 	[pscustomobject]@{ Rules = $rules; Certificates = $certificates }
 }
 
-function Add-SnapshotRule($rule) {
-	$splat = @{
-		# The snapshot records both lists as one joined string; split it back into
-		# the values the cmdlet takes, dropping duplicates it may still carry.
-		Namespace = Get-SignatureList $rule.Signature.Namespace
-		NameServers = Get-SignatureList $rule.Signature.NameServers
-	}
-	foreach ($name in $FlagProperties) {
-		$property = $rule.Properties.PSObject.Properties[$name]
-		if ($property -and $property.Value) { $splat[$name] = $true }
-	}
-	foreach ($name in $ValueProperties) {
-		$property = $rule.Properties.PSObject.Properties[$name]
-		if ($property -and -not [string]::IsNullOrEmpty("$($property.Value)")) {
-			$splat[$name] = $property.Value
-		}
-	}
-	Add-DnsClientNrptRule @splat | Out-Null
-}
-
 function Restore-Snapshot {
-	Assert-Administrator
-	$snapshot = Read-Snapshot
-	foreach ($rule in Get-NamespaceRules) {
-		# Only the cmdlet's own -Force suppresses its confirmation;
-		# -Confirm:$false and $ConfirmPreference = 'None' do not. A failure must
-		# stop the restore rather than leave the rule behind.
-		Remove-DnsClientNrptRule -Name $rule.Name -Force -Confirm:$false
-	}
-	foreach ($rule in $snapshot.Rules) { Add-SnapshotRule $rule }
-	$expected = @($snapshot.Certificates | ForEach-Object { $_.BaseName.ToUpperInvariant() })
-	foreach ($thumbprint in Get-RootThumbprints) {
-		if ($expected -notcontains $thumbprint) {
-			& certutil.exe -delstore -f Root $thumbprint | Out-Null
-			if ($LASTEXITCODE -ne 0) { throw "certutil -delstore failed for $thumbprint" }
-		}
-	}
-	$current = @(Get-RootThumbprints)
-	foreach ($certificate in $snapshot.Certificates) {
-		if ($current -notcontains $certificate.BaseName.ToUpperInvariant()) {
-			& certutil.exe -addstore -f Root $certificate.FullName | Out-Null
-			if ($LASTEXITCODE -ne 0) { throw "certutil -addstore failed for $($certificate.Name)" }
-		}
-	}
+	# A snapshot does not identify which new rules or trust settings the test owns.
+	# Verifying without mutation is safer than deleting another installation's state.
+	Test-Snapshot
 }
 
 function Get-PropertyDifferences($snapshot) {
@@ -234,16 +207,35 @@ function Get-PropertyDifferences($snapshot) {
 	if ($restored.Count -ne $expected.Count) {
 		return @("NRPT rules for ${Namespace}: expected $($expected.Count), found $($restored.Count)")
 	}
-	$actual = @($restored | ForEach-Object { Get-RuleSignature $_ })
 	foreach ($rule in $expected) {
 		$signature = $rule.Signature
-		$match = $actual | Where-Object {
-			$_.Namespace -eq $signature.Namespace -and $_.NameServers -eq $signature.NameServers -and
-			$_.DisplayName -eq $signature.DisplayName -and $_.Comment -eq $signature.Comment
+		$identifier = $rule.Properties.PSObject.Properties['Name']
+		if (-not $identifier -or -not $identifier.Value) {
+			$differences += "NRPT rule for $Namespace has no recorded identity"
+			continue
 		}
-		if (-not $match) {
+		$matchingRules = @($restored | Where-Object {
+			$actual = Get-RuleSignature $_
+			$_.Name -eq $identifier.Value -and $actual.Namespace -eq $signature.Namespace -and
+			$actual.NameServers -eq $signature.NameServers -and $actual.DisplayName -eq $signature.DisplayName -and
+			$actual.Comment -eq $signature.Comment
+		})
+		if ($matchingRules.Count -ne 1) {
 			$differences += "NRPT rule for $Namespace did not come back: $($signature | ConvertTo-Json -Compress)"
 			continue
+		}
+		$match = $matchingRules[0]
+		$fields = @('Name', 'Version', 'Namespace', 'NameServers', 'DirectAccessEnabled', 'DnsSecEnabled') + $RuleProperties
+		foreach ($name in $fields) {
+			$before = $rule.Properties.PSObject.Properties[$name]
+			$after = $match.PSObject.Properties[$name]
+			if (($null -eq $before) -ne ($null -eq $after)) {
+				$differences += "NRPT rule for $Namespace changed $name"
+			} elseif ($before -and $after) {
+				$old = ConvertTo-Json -InputObject @($before.Value) -Depth 10 -Compress
+				$new = ConvertTo-Json -InputObject @($after.Value) -Depth 10 -Compress
+				if ($old -cne $new) { $differences += "NRPT rule for $Namespace changed $name" }
+			}
 		}
 		$unsupported = @($rule.Properties.PSObject.Properties | Where-Object {
 			$RuleProperties -notcontains $_.Name -and $GeneratedProperties -notcontains $_.Name -and
@@ -261,6 +253,9 @@ function Test-Snapshot {
 	$snapshot = Read-Snapshot
 	$differences = @(Get-PropertyDifferences $snapshot)
 	$expected = @($snapshot.Certificates | ForEach-Object { $_.BaseName.ToUpperInvariant() })
+	if ($expected.Count -gt 0) {
+		$differences += 'pre-existing root trust settings are not captured; use the full-system snapshot'
+	}
 	$actual = @(Get-RootThumbprints)
 	foreach ($thumbprint in $expected) {
 		if ($actual -notcontains $thumbprint) { $differences += "testd root $thumbprint is missing from the machine store" }
@@ -273,6 +268,6 @@ function Test-Snapshot {
 
 switch ($Action) {
 	'Snapshot' { Save-Snapshot }
-	'Restore' { Restore-Snapshot; Test-Snapshot }
+	'Restore' { Restore-Snapshot }
 	'Verify' { Test-Snapshot }
 }

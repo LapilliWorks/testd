@@ -212,7 +212,7 @@ class PlatformScriptsTests(unittest.TestCase):
 					self.script.main('Linux', arguments)
 				run.assert_called_once_with(arguments)
 
-	def test_privileged_and_desktop_reports_cannot_be_in_the_temp_directory(self):
+	def test_privileged_browser_and_desktop_reports_cannot_be_in_the_temp_directory(self):
 		with tempfile.TemporaryDirectory() as directory:
 			root = pathlib.Path(directory).resolve()
 			candidate = root / 'candidate'
@@ -221,7 +221,8 @@ class PlatformScriptsTests(unittest.TestCase):
 				patch.object(self.script, 'run_cli') as run, contextlib.redirect_stderr(io.StringIO()):
 				for arguments in (['host', '--bin', str(candidate), '--report', str(root / 'host'), '--system'],
 					['host', '--build', '--report', str(root / 'build')],
-					['desktop', '--app', str(candidate), '--report', str(root / 'desktop')]):
+					['browser', '--bin', str(candidate), '--report', str(root / 'browser')],
+					['desktop', '--app', str(candidate), '--bin', str(candidate), '--report', str(root / 'desktop')]):
 					with self.subTest(arguments=arguments), self.assertRaises(SystemExit):
 						self.script.main('Linux', arguments)
 				run.assert_not_called()

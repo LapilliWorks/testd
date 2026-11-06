@@ -137,9 +137,7 @@ class AllChecks:
 				cargo)),
 			Stage('rustdoc-workspace', self.doctests('rustdoc-workspace', ['cargo', '+stable', 'test', '--workspace',
 				'--all-features', '--doc', '--locked', '--', '--include-ignored', '--show-output'], cargo)),
-			Stage('release-script-fixtures', self.command('release-script-fixtures', [sys.executable, '-m', 'unittest',
-				'discover', '-s', 'tests/release', '-p', 'test_*.py', '-v'], (), 300,
-				skip_pattern=r'\bskipped=(\d+)')),
+			Stage('release-script-fixtures', self.release_script_fixtures),
 			Stage('browser-server-fixtures', self.command('browser-server-fixtures', ['bun', '--no-install', 'test',
 				str(ROOT / 'tests/release/browser.test.ts')], ('bun',), 300, skip_pattern=r'(?m)^\s*(\d+) skip\b')),
 			Stage('dependency-audit', self.command('dependency-audit', ['cargo', '+stable', 'deny', '--workspace',
@@ -151,10 +149,11 @@ class AllChecks:
 			Stage('site-links', self.site_links),
 			Stage('cli-candidate', self.candidate),
 			Stage('host-unprivileged', self.host),
-			Stage('artifacts', self.artifacts),
-			Stage('system-restore-self-test', self.system_self_test, system=True,
+			Stage('artifacts', self.artifacts, system=True, precondition=self.artifacts_available,
+				checkpoint='Use a disposable host; this executes candidate binaries and extracted artifacts.'),
+			Stage('system-restore-self-test', self.system_self_test, system=True, precondition=self.self_test_available,
 				checkpoint='Use a clean disposable host. This writes real resolver and trust fixtures.'),
-			Stage('host-system', self.host_system, system=True, precondition=self.require_candidate,
+			Stage('host-system', self.host_system, system=True, precondition=self.host_system_available,
 				checkpoint='Use a clean disposable host with no existing testd integration.'),
 			Stage('service-supervision', self.service, system=True, precondition=self.service_available,
 				checkpoint='Use a disposable user session; this starts and stops a test service.'),
@@ -184,6 +183,27 @@ class AllChecks:
 			if skip_pattern and any(int(value) for value in re.findall(skip_pattern, output)):
 				child.record('coverage', 'skip', 'blocked: checks were skipped; inspect the command log')
 		return action
+
+	def release_script_fixtures(self, child):
+		output = child.command('release-script-fixtures', [sys.executable, '-m', 'unittest', 'discover',
+			'-s', 'tests/release', '-p', 'test_*.py', '-v'], 300)
+		ran = re.search(r'(?m)^Ran (\d+) tests? in ', output)
+		summaries = re.findall(r'(?m)^OK(?: \(([^\n]*)\))?[ \t]*$', output)
+		if not ran or int(ran[1]) == 0 or not summaries:
+			child.record('coverage', 'skip', 'blocked: the unittest result summary is missing or empty')
+			return
+		if re.search(r'expected failures=[1-9]\d*', summaries[-1]):
+			child.record('coverage', 'skip', 'blocked: fixture tests include expected failures')
+			return
+		match = re.search(r'\bskipped=(\d+)', summaries[-1])
+		count = int(match[1]) if match else 0
+		reasons = [match[1] for match in re.findall(r'(?m)^.*?\.\.\. skipped ([\'"])(.*?)\1[ \t]*$', output)]
+		if not count and not reasons:
+			return
+		if len(reasons) == count and all(reason.startswith('not applicable:') for reason in reasons):
+			child.record('coverage', 'skip', f'not applicable: {count} platform-specific fixture skips')
+		else:
+			child.record('coverage', 'skip', 'blocked: fixture skips or their reasons are incomplete; inspect the log')
 
 	def require(self, *tools):
 		missing = [tool for tool in tools if not shutil.which(tool)]
@@ -248,9 +268,11 @@ class AllChecks:
 		child.args.service = False
 		self.api.host(child)
 
-	def artifacts(self, child):
+	def artifacts_available(self):
 		if not self.args.artifacts:
 			raise Blocked('provide --artifacts with the candidate assets and SHA256SUMS')
+
+	def artifacts(self, child):
 		child.args.artifacts = self.args.artifacts.expanduser().resolve()
 		child.args.previous_bin = self.args.previous_bin.expanduser().resolve() if self.args.previous_bin else None
 		child.args.require_checksums = True
@@ -276,10 +298,27 @@ class AllChecks:
 				raise Blocked('sudo authorization was not granted')
 		child.record('authorization', 'pass', 'system test authorization is available')
 
+	def self_test_available(self):
+		if self.api.SYSTEM == 'Windows':
+			raise Blocked('the Windows fixture cannot yet prove ownership of its NRPT rule')
+
 	def system_self_test(self, child):
 		self.authorize(child)
-		child.command('system-restore-self-test', [sys.executable, 'tests/release/system_state.py', '--self-test',
-			'--workdir', str(child.output / 'self-test-state')], 600, terminal=True)
+		output = child.command('system-restore-self-test', [sys.executable, 'tests/release/system_state.py', '--self-test',
+			'--workdir', str(child.output / 'self-test-state')], 600, expected=2, terminal=True)
+		if 'ok       scoped fixture state was restored and verified' not in output:
+			child.record('system-restore-self-test-result', 'fail', 'the scoped self-test did not complete')
+			raise RuntimeError('the scoped system-state self-test did not complete')
+		child.record('shared-trust-coverage', 'skip',
+			'blocked: shared trust-store output and hooks need comparison with the full-system snapshot')
+
+	def require_owned_product_integration(self):
+		if self.api.SYSTEM in ('Darwin', 'Windows'):
+			raise Blocked(f'{self.api.SYSTEM} resolver and trust ownership protections are incomplete')
+
+	def host_system_available(self):
+		self.require_owned_product_integration()
+		self.require_candidate()
 
 	def host_system(self, child):
 		child.args.bin = self.require_candidate()
@@ -300,12 +339,14 @@ class AllChecks:
 		self.api.service(child)
 
 	def desktop_available(self):
+		self.require_owned_product_integration()
 		self.require_candidate()
 		if not self.args.app:
 			raise Blocked('provide --app with the actual candidate')
 
 	def desktop(self, child):
 		self.authorize(child)
+		child.args.bin = self.require_candidate()
 		child.args.app = self.args.app.expanduser().resolve()
 		self.api.desktop(child)
 
@@ -343,26 +384,10 @@ class AllChecks:
 		if self.api.SYSTEM == 'Windows':
 			raise Blocked('the local NRPT probe is not tracked and can remove unrelated matching rules; '
 				'review its cleanup before running it')
-		self.require_candidate()
+		raise Blocked('the macOS probe is disabled until resolver and trust ownership can be proven')
 
 	def platform_probe(self, child):
-		cli = self.require_candidate()
-		self.require('bash')
-		self.authorize(child)
-		backup = self.api.system_snapshot(child, self.api.DESKTOP_TLD, interactive=True)
-		try:
-			output = child.command('macos-resolver-probe', ['bash', 'tests/release/macos-resolver-probe.sh',
-				'--bin', str(cli), '--backup-root', str(child.output / 'probe-backups')], 900, terminal=True)
-			for label in ('configure file', 'configure doctor exit', 'unconfigure file', 'restored'):
-				match = re.search(rf'(?m)^{re.escape(label)}:\s+(\w+)', output)
-				if not match or match.group(1) != 'pass':
-					child.record('probe-result', 'fail', f'{label} did not pass; inspect the probe log')
-			for label in ('configure resolution', 'unconfigure resolution'):
-				match = re.search(rf'(?m)^{re.escape(label)}:\s+(\w+)', output)
-				if not match or match.group(1) != 'pass':
-					child.record('probe-coverage', 'skip', f'blocked: {label} was not verified')
-		finally:
-			self.api.system_restore(child, backup, self.api.DESKTOP_TLD, interactive=True)
+		raise Blocked('resolver probes are unavailable until their cleanup proves ownership')
 
 	def confirm(self, message):
 		print(message, flush=True)
@@ -407,9 +432,17 @@ class AllChecks:
 
 	def cleanup_verified(self, stage, child):
 		passed = {item['name'] for item in child.results if item['status'] == 'pass'}
+		if any(item['name'] == 'shared-trust-coverage' and item['status'] != 'pass' for item in child.results):
+			return False
 		if stage.name == 'host-system':
-			return 'host-checks' in passed and 'system-restore' in passed
-		if stage.name in ('desktop', 'platform-resolver-probe'):
+			cleanup = {'fixture-shutdown', 'system-owned-cleanup', 'system-restore'}
+			return {'host-checks', 'fixture-shutdown', 'system-restore'}.issubset(passed) and not any(
+				item['name'] in cleanup and item['status'] != 'pass' for item in child.results)
+		if stage.name == 'desktop':
+			cleanup = {'fixture-shutdown', 'system-owned-cleanup', 'system-restore'}
+			return {'fixture-shutdown', 'system-restore'}.issubset(passed) and not any(
+				item['name'] in cleanup and item['status'] != 'pass' for item in child.results)
+		if stage.name == 'platform-resolver-probe':
 			return 'system-restore' in passed
 		if stage.name == 'browser':
 			fixtures = [item for item in child.results if item['name'].startswith('host-fixture')]
@@ -427,7 +460,7 @@ class AllChecks:
 			stage.action(child)
 			status, detail = self.classify(child)
 		except NotApplicable as error:
-			status, detail = 'not-applicable', str(error)
+			status, detail = 'not-applicable', f'not applicable: {error}'
 		except Blocked as error:
 			status, detail = 'blocked', str(error)
 		except (KeyboardInterrupt, EOFError):

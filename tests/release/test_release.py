@@ -9,6 +9,7 @@ import pathlib
 import re
 import shutil
 import signal
+import socket
 import tempfile
 import unittest
 import subprocess
@@ -134,15 +135,19 @@ class ReleaseTests(unittest.TestCase):
 		self.assertIn('--data-binary "@$bodyFile"', script)
 		self.assertNotIn('--data $Body', script)
 
-	def test_windows_system_scripts_never_wait_for_confirmation(self):
-		"""Nothing on either side answers a prompt, so a confirmation stalls the run."""
-		for name in ('tests/release/windows-system-state.ps1', 'scripts/testd-elevated.ps1'):
-			with self.subTest(script=name):
-				script = (ROOT / name).read_text()
-				self.assertIn("$ConfirmPreference = 'None'", script)
-				self.assertIn('certutil.exe -delstore -f Root', script)
-				self.assertIn('Remove-DnsClientNrptRule -Name $rule.Name -Force', script)
-				self.assertNotIn('Remove-CimInstance', script)
+	def test_windows_state_snapshot_does_not_remove_rules_or_roots(self):
+		script = (ROOT / 'tests/release/windows-system-state.ps1').read_text()
+		self.assertIn("$ConfirmPreference = 'None'", script)
+		self.assertNotIn('certutil.exe -delstore', script)
+		self.assertNotIn('Remove-DnsClientNrptRule', script)
+		self.assertNotIn('Remove-CimInstance', script)
+
+	def test_windows_product_helper_does_not_wait_for_confirmation(self):
+		script = (ROOT / 'scripts/testd-elevated.ps1').read_text()
+		self.assertIn("$ConfirmPreference = 'None'", script)
+		self.assertIn('certutil.exe -delstore -f Root', script)
+		self.assertIn('Remove-DnsClientNrptRule -Name $rule.Name -Force', script)
+		self.assertNotIn('Remove-CimInstance', script)
 
 	def test_workspace_versions_match(self):
 		release.check_version(workspace_version())
@@ -368,7 +373,7 @@ class PlatformSequenceTests(unittest.TestCase):
 				self.assertEqual(run.command.call_args.args[1], ['cargo', '+stable', 'build', '--release',
 					'--bin', 'testd', '--locked', '--target', triple])
 
-	@unittest.skipIf(os.name == 'nt', 'the synthetic cargo fixture uses a Unix shell')
+	@unittest.skipIf(os.name == 'nt', 'not applicable: the synthetic cargo fixture uses a Unix shell')
 	def test_build_sequence_runs_with_a_real_child_and_retains_the_backup(self):
 		with tempfile.TemporaryDirectory() as directory:
 			root = pathlib.Path(directory).resolve()
@@ -474,6 +479,31 @@ class ArtifactInstallTests(unittest.TestCase):
 			self.assertTrue((fixture.output / 'fresh-state-before-upgrade-0.tar.gz').is_file())
 			self.assertTrue((fixture.output / 'fresh-state-before-purge-0.tar.gz').is_file())
 
+	def test_artifact_loop_stops_after_incomplete_system_cleanup(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			root = pathlib.Path(temporary)
+			assets = root / 'assets'
+			assets.mkdir()
+			for version in ('0.1.0', '0.2.0'):
+				(assets / f'testd-{version}-x86_64-unknown-linux-gnu.tar.gz').touch()
+			output = root / 'report'
+			output.mkdir()
+			run = SimpleNamespace(args=SimpleNamespace(artifacts=assets, require_checksums=False, host=True,
+				system=True, service=False, bin=None), output=output, metadata={}, record=Mock())
+			def extract(archive, destination):
+				destination.mkdir()
+				(destination / 'testd').write_text('fixture', encoding='utf-8')
+			def host(child):
+				child.metadata['incomplete'] = True
+			with patch.object(runner, 'SYSTEM', 'Linux'), patch.object(runner.platform, 'machine', return_value='x86_64'), \
+					patch.object(runner, 'extract_archive', side_effect=extract) as extracted, \
+					patch.object(runner, 'fresh_install'), patch.object(runner, 'host', side_effect=host) as host_run:
+				runner.artifacts(run)
+			self.assertEqual(extracted.call_count, 1)
+			host_run.assert_called_once()
+			run.record.assert_any_call('artifact-remaining', 'skip',
+				'blocked: earlier system or service cleanup is incomplete')
+
 	def test_rollback_rejects_lost_configuration_or_root_material(self):
 		for change in ('config', 'certificate', 'key'):
 			with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
@@ -528,12 +558,12 @@ class FakeHost(state.Host):
 	def command(self, argv, privileged=False):
 		argv = [str(item) for item in argv]
 		self.commands.append((argv, privileged))
-		if argv[0] == 'install':
-			self.files[argv[-1]] = pathlib.Path(argv[-2]).read_bytes()
-			self.modes[argv[-1]] = int(argv[2], 8)
-		elif argv[0] == 'rm':
-			self.files.pop(argv[-1], None)
-			self.modes.pop(argv[-1], None)
+		if argv[0] == 'powershell' and "-Action 'Snapshot'" in argv[-1]:
+			match = re.search(r"-Destination '([^']+)'", argv[-1])
+			if match:
+				directory = pathlib.Path(match.group(1))
+				(directory / 'nrpt.json').write_text('[]', encoding='utf-8')
+				(directory / 'roots').mkdir()
 		elif argv[:2] == ['security', 'find-certificate']:
 			return ''.join(state.encode_pem(der) for der in self.certificates.values())
 		elif argv[:2] == ['security', 'delete-certificate']:
@@ -552,11 +582,36 @@ class FakeHost(state.Host):
 	def read(self, path):
 		return self.files[str(path)]
 
+	def regular(self, path):
+		return str(path) in self.files
+
+	def directory(self, path):
+		return True
+
 	def mode(self, path):
 		return self.modes.get(str(path), 0o644)
 
 	def identity(self, path):
 		return self.identities.get(str(path), str(path))
+
+	def fingerprint(self, path):
+		return [self.identity(path), self.mode(path)]
+
+	def create(self, path, data, mode=0o644):
+		path = str(path)
+		if self.exists(path):
+			raise state.HostError(f'{path} already exists')
+		self.files[path] = data
+		self.modes[path] = mode
+		return self.fingerprint(path)
+
+	def remove_owned(self, path, proof):
+		path = str(path)
+		if proof['fingerprint'] != self.fingerprint(path) or proof['sha256'] != state.digest(self.read(path)):
+			raise state.HostError(f'{path}: identity changed')
+		self.commands.append((['remove-owned', path], True))
+		del self.files[path]
+		self.modes.pop(path, None)
 
 
 class SystemStateTests(unittest.TestCase):
@@ -566,6 +621,56 @@ class SystemStateTests(unittest.TestCase):
 			path = pathlib.Path(temporary) / 'anchor'
 			path.symlink_to(pathlib.Path(temporary) / 'missing')
 			self.assertTrue(state.Host('Linux', 'testdcheck').exists(path))
+
+	@unittest.skipIf(os.name == 'nt', 'not applicable: Unix fixture file operations are not used on Windows')
+	def test_fixture_file_creation_and_removal_are_exclusive_and_identity_checked(self):
+		class LocalHost(state.Host):
+			def argv(self, argv, privileged=False):
+				return list(argv)
+
+		with tempfile.TemporaryDirectory() as temporary:
+			root = pathlib.Path(temporary)
+			host = LocalHost('Linux', 'testdcheck')
+			missing = root / 'missing' / 'fixture'
+			with self.assertRaises(state.HostError):
+				host.create(missing, b'fixture')
+			self.assertFalse(missing.parent.exists())
+			path = root / 'fixture'
+			path.write_bytes(b'pre-existing')
+			with self.assertRaises(state.HostError):
+				host.create(path, b'fixture')
+			self.assertEqual(path.read_bytes(), b'pre-existing')
+			path.unlink()
+			target = root / 'unrelated'
+			target.write_bytes(b'keep')
+			path.symlink_to(target)
+			with self.assertRaises(state.HostError):
+				host.create(path, b'fixture')
+			self.assertEqual(target.read_bytes(), b'keep')
+			path.unlink()
+			fingerprint = host.create(path, b'fixture')
+			self.assertEqual(host.fingerprint(path), fingerprint)
+			proof = {'fingerprint': fingerprint, 'sha256': state.digest(b'fixture')}
+			host.remove_owned(path, proof)
+			self.assertFalse(path.exists())
+			host.create(path, b'fixture')
+			proof = {'fingerprint': host.fingerprint(path), 'sha256': state.digest(b'fixture')}
+			path.unlink()
+			path.write_bytes(b'replacement')
+			with self.assertRaises(state.HostError):
+				host.remove_owned(path, proof)
+			self.assertEqual(path.read_bytes(), b'replacement')
+			self.assertEqual(target.read_bytes(), b'keep')
+
+	def test_snapshot_rejects_missing_or_linked_system_directories(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			host = FakeHost()
+			backup = pathlib.Path(temporary) / 'system-before'
+			with patch.object(host, 'directory', return_value=False), \
+					self.assertRaisesRegex(state.HostError, 'missing or a symlink'):
+				state.snapshot(host, backup)
+			self.assertFalse(backup.exists())
+			self.assertEqual(host.commands, [])
 
 	def test_snapshot_accepts_an_artifact_override(self):
 		with tempfile.TemporaryDirectory() as temporary:
@@ -601,6 +706,18 @@ class SystemStateTests(unittest.TestCase):
 				b'\xef\xbb\xbf' + json.dumps([{'Signature': {'Namespace': '.testdrestore'}}]).encode())
 			self.assertEqual(state.occupied(backup), ['NRPT rule for .testdrestore'])
 
+	def test_windows_snapshot_refuses_missing_or_malformed_store_evidence(self):
+		for change in ('rules-missing', 'roots-missing', 'malformed'):
+			with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+				host = FakeHost('Windows')
+				backup = pathlib.Path(temporary) / 'windows'
+				state.snapshot(host, backup)
+				if change == 'rules-missing': (backup / 'nrpt.json').unlink()
+				if change == 'roots-missing': (backup / 'roots').rmdir()
+				if change == 'malformed': (backup / 'nrpt.json').write_text('{}', encoding='utf-8')
+				with self.assertRaises(state.HostError):
+					state.occupied(backup)
+
 	def test_self_test_refuses_a_host_that_already_has_integration(self):
 		host = FakeHost()
 		host.files = {state.files(host)[0]['path']: b'live route'}
@@ -615,7 +732,9 @@ class SystemStateTests(unittest.TestCase):
 			workdir = pathlib.Path(temporary) / 'persisted'
 			path = state.files(host)[0]['path']
 			def failed_install(host, directory, workdir):
-				host.files[path] = b'partial fixture'
+				contents = b'partial fixture'
+				fingerprint = host.create(path, contents)
+				state.record_owned_file(host, directory, path, fingerprint, state.digest(contents))
 				raise RuntimeError('fixture failed')
 			with patch.object(state, 'Host', return_value=host), \
 				patch.object(state, 'install_fixture', side_effect=failed_install), redirect_stdout(io.StringIO()):
@@ -675,7 +794,7 @@ class SystemStateTests(unittest.TestCase):
 				patch.object(state.sys, 'stdin', SimpleNamespace(isatty=lambda: True)), \
 				patch('builtins.input', return_value='yes'), patch.object(state, 'self_test', return_value=[]) as self_test, \
 				redirect_stdout(io.StringIO()):
-			self.assertEqual(state.main(['--self-test', '--workdir', str(workdir)]), 0)
+			self.assertEqual(state.main(['--self-test', '--workdir', str(workdir)]), 2)
 		self_test.assert_called_once_with(workdir=workdir)
 
 	def test_restore_targets_match_the_product(self):
@@ -697,11 +816,15 @@ class SystemStateTests(unittest.TestCase):
 			self.assertIn('+ $Tld', script, 'NRPT namespaces must stay scoped to the TLD')
 		self.assertIn('testd root', windows)
 
-	def test_self_test_fixture_uses_a_dedicated_root_name(self):
+	def test_self_test_uses_a_dedicated_root_and_blocks_unowned_windows_rules(self):
 		self.assertEqual(state.FIXTURE_KEYCHAIN_NAME, 'testd root testing')
 		windows = (ROOT / 'tests/release/windows-system-fixture.ps1').read_text()
-		self.assertIn("CN=testd root testing", windows)
-		self.assertIn('CN=testd root testing', (ROOT / 'tests/release/windows-system-state.ps1').read_text())
+		self.assertIn('blocked', windows)
+		self.assertNotIn('Add-DnsClientNrptRule', windows)
+		with tempfile.TemporaryDirectory() as temporary, patch.object(state, 'Host') as host, \
+				self.assertRaisesRegex(state.HostError, 'NRPT ownership'):
+			state.self_test('Windows', workdir=pathlib.Path(temporary) / 'workdir')
+		host.assert_not_called()
 
 	def test_keychain_scope_accepts_new_roots_but_not_the_fixture(self):
 		self.assertTrue(state.is_testd_root_name('testd root'))
@@ -713,18 +836,20 @@ class SystemStateTests(unittest.TestCase):
 		self.assertTrue(state.is_snapshot_root_name('testd root testing'))
 		self.assertTrue(state.is_snapshot_root_name('testd root vitoba-borubi-hikola'))
 
-	def test_linux_restore_returns_the_exact_previous_bytes(self):
+	def test_linux_restore_does_not_replace_changed_preexisting_files(self):
 		with tempfile.TemporaryDirectory() as temporary:
 			host = FakeHost()
 			resolver, trusted = state.files(host)[0]['path'], state.files(host)[1]['path']
 			host.files = {resolver: b'[Resolve]\nDNS=1.1.1.1\n', trusted: b'original root'}
 			backup = pathlib.Path(temporary) / 'system-before'
 			state.snapshot(host, backup)
-			host.files = {resolver: b'[Resolve]\nDNS=127.0.0.1:7753\n', trusted: b'test root'}
-			self.assertEqual(state.restore(host, backup), [])
-			self.assertEqual(host.files[resolver], b'[Resolve]\nDNS=1.1.1.1\n')
-			self.assertEqual(host.files[trusted], b'original root')
-			self.assertTrue((backup / state.RESTORED).is_file())
+			host.files = {resolver: b'[Resolve]\nDNS=127.0.0.1:7753\n', trusted: b'another root'}
+			before = dict(host.files)
+			problems = state.restore(host, backup)
+			self.assertTrue(any('pre-existing state changed' in problem for problem in problems), problems)
+			self.assertEqual(host.files, before)
+			self.assertEqual(host.commands, [])
+			self.assertFalse((backup / state.RESTORED).exists())
 
 	def test_linux_restore_removes_integration_that_was_absent(self):
 		with tempfile.TemporaryDirectory() as temporary:
@@ -732,12 +857,59 @@ class SystemStateTests(unittest.TestCase):
 			backup = pathlib.Path(temporary) / 'system-before'
 			state.snapshot(host, backup)
 			for item in state.files(host):
-				host.files[item['path']] = b'installed by doctor --fix'
+				fingerprint = host.create(item['path'], b'owned fixture')
+				state.record_owned_file(host, backup, item['path'], fingerprint, state.digest(b'owned fixture'))
 			self.assertEqual(state.restore(host, backup), [])
 			self.assertEqual(host.files, {})
 			expected = [item['reload'] for item in state.files(host) if item.get('reload')]
 			reloads = [argv for argv, _ in host.commands if argv in expected]
 			self.assertEqual(reloads, expected)
+
+	def test_fixture_ownership_is_not_recorded_after_a_racing_replacement(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			host = FakeHost()
+			backup = pathlib.Path(temporary) / 'system-before'
+			state.snapshot(host, backup)
+			path = state.files(host)[0]['path']
+			fingerprint = host.create(path, b'fixture')
+			host.files[path] = b'unrelated replacement'
+			host.identities[path] = 'replacement inode'
+			with self.assertRaisesRegex(state.HostError, 'cannot prove'):
+				state.record_owned_file(host, backup, path, fingerprint, state.digest(b'fixture'))
+			self.assertFalse(state.owned_file_path(backup, path).exists())
+			self.assertTrue(state.restore(host, backup))
+			self.assertEqual(host.files[path], b'unrelated replacement')
+			self.assertEqual(host.commands, [])
+
+	def test_restore_never_deletes_a_new_unowned_system_file(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			host = FakeHost()
+			backup = pathlib.Path(temporary) / 'system-before'
+			state.snapshot(host, backup)
+			path = state.files(host)[0]['path']
+			host.files[path] = b'another installation'
+			problems = state.restore(host, backup)
+			self.assertTrue(any('no proof of test ownership' in problem for problem in problems), problems)
+			self.assertEqual(host.files[path], b'another installation')
+			self.assertEqual(host.commands, [])
+
+	def test_restore_refuses_a_replaced_or_changed_fixture(self):
+		for change in ('identity', 'content', 'mode'):
+			with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+				host = FakeHost()
+				backup = pathlib.Path(temporary) / 'system-before'
+				state.snapshot(host, backup)
+				path = state.files(host)[1]['path']
+				fingerprint = host.create(path, b'fixture')
+				state.record_owned_file(host, backup, path, fingerprint, state.digest(b'fixture'))
+				if change == 'identity': host.identities[path] = 'other inode'
+				if change == 'content': host.files[path] = b'another certificate'
+				if change == 'mode': host.modes[path] = 0o600
+				before = dict(host.files)
+				problems = state.restore(host, backup)
+				self.assertTrue(any('ownership no longer matches' in problem for problem in problems), problems)
+				self.assertEqual(host.files, before)
+				self.assertEqual(host.commands, [])
 
 	def test_linux_trust_layout_follows_the_distro_tool(self):
 		debian = ('/usr/local/share/ca-certificates/testd-root.crt', ['update-ca-certificates'])
@@ -781,7 +953,7 @@ class SystemStateTests(unittest.TestCase):
 					host.modes[anchor] = 0o600
 				before = dict(host.files)
 				problems = state.restore(host, backup)
-				self.assertTrue(any('owned system file changed' in problem for problem in problems), problems)
+				self.assertTrue(any('pre-existing state changed' in problem for problem in problems), problems)
 				self.assertEqual(host.files, before)
 				self.assertEqual(host.commands, [])
 
@@ -795,7 +967,7 @@ class SystemStateTests(unittest.TestCase):
 			state.snapshot(host, backup)
 			host.identities[resolver] = 'replacement inode'
 			problems = state.restore(host, backup)
-			self.assertTrue(any('owned system file changed' in problem for problem in problems), problems)
+			self.assertTrue(any('pre-existing state changed' in problem for problem in problems), problems)
 			self.assertEqual(host.files[resolver], b'original route')
 			self.assertEqual(host.files[marker], b'original ownership')
 			self.assertEqual(host.commands, [])
@@ -803,25 +975,29 @@ class SystemStateTests(unittest.TestCase):
 	def test_restore_is_idempotent(self):
 		with tempfile.TemporaryDirectory() as temporary:
 			host = FakeHost()
-			host.files = {state.files(host)[1]['path']: b'root'}
 			backup = pathlib.Path(temporary) / 'system-before'
 			state.snapshot(host, backup)
-			host.files[state.files(host)[1]['path']] = b'replaced'
+			path = state.files(host)[1]['path']
+			fingerprint = host.create(path, b'owned fixture')
+			state.record_owned_file(host, backup, path, fingerprint, state.digest(b'owned fixture'))
 			self.assertEqual(state.restore(host, backup), [])
 			commands = len(host.commands)
 			self.assertEqual(state.restore(host, backup), [])
-			self.assertEqual(host.files[state.files(host)[1]['path']], b'root')
+			self.assertNotIn(path, host.files)
 			self.assertEqual(len(host.commands), commands, 'a completed restore should not reload again')
 
-	def test_restore_fixes_a_host_that_drifted_after_a_completed_restore(self):
+	def test_restore_leaves_unowned_drift_after_a_completed_restore(self):
 		with tempfile.TemporaryDirectory() as temporary:
 			host = FakeHost()
 			backup = pathlib.Path(temporary) / 'system-before'
 			state.snapshot(host, backup)
 			self.assertEqual(state.restore(host, backup), [])
-			host.files[state.files(host)[0]['path']] = b'drifted'
-			self.assertEqual(state.restore(host, backup), [])
-			self.assertEqual(host.files, {})
+			path = state.files(host)[0]['path']
+			host.files[path] = b'unrelated later route'
+			problems = state.restore(host, backup)
+			self.assertTrue(any('no proof of test ownership' in problem for problem in problems), problems)
+			self.assertEqual(host.files[path], b'unrelated later route')
+			self.assertEqual(host.commands, [])
 
 	def test_restore_rejects_a_tampered_backup(self):
 		with tempfile.TemporaryDirectory() as temporary:
@@ -831,9 +1007,25 @@ class SystemStateTests(unittest.TestCase):
 			state.snapshot(host, backup)
 			manifest = state.load(backup)
 			(backup / manifest['files'][1]['blob']).write_bytes(b'tampered')
-			problems = state.restore(host, backup)
-			self.assertTrue(any('modified' in problem for problem in problems), problems)
+			with self.assertRaisesRegex(state.HostError, 'backed-up copy is missing or modified'):
+				state.restore(host, backup)
 			self.assertFalse((backup / state.RESTORED).exists())
+
+	def test_restore_refuses_unexpected_paths_tlds_and_reload_commands(self):
+		for change in ('path', 'tld', 'reload', 'duplicate'):
+			with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+				host = FakeHost()
+				backup = pathlib.Path(temporary) / 'system-before'
+				state.snapshot(host, backup)
+				manifest = state.load(backup)
+				if change == 'path': manifest['files'][0]['path'] = '/etc/unrelated'
+				if change == 'tld': manifest['tld'] = 'example.com'
+				if change == 'reload': manifest['files'][0]['reload'] = ['sh', '-c', 'unexpected']
+				if change == 'duplicate': manifest['files'][1] = manifest['files'][0]
+				(backup / state.MANIFEST).write_text(json.dumps(manifest), encoding='utf-8')
+				with self.assertRaises(state.HostError):
+					state.restore(host, backup)
+				self.assertEqual(host.commands, [])
 
 	def test_verify_reports_drift_after_restore(self):
 		with tempfile.TemporaryDirectory() as temporary:
@@ -844,21 +1036,45 @@ class SystemStateTests(unittest.TestCase):
 			problems = state.verify(host, backup)
 			self.assertEqual([problem.split(':')[0] for problem in problems], [state.files(host)[0]['path']])
 
-	def test_macos_restore_deletes_extras_by_thumbprint(self):
+	def test_macos_duplicate_certificate_identity_blocks_cleanup(self):
+		host = FakeHost('Darwin')
+		root = b'fixture root'
+		encoded = state.encode_pem(root)
+		with patch.object(host, 'command', return_value=encoded + encoded) as command, \
+				self.assertRaisesRegex(state.HostError, 'duplicate certificate SHA-1'):
+			state.keychain_certificates(host)
+		self.assertEqual(command.call_count, 1)
+		self.assertEqual(command.call_args.args[0][:2], ['security', 'find-certificate'])
+
+	def test_macos_fixture_cannot_adopt_a_preexisting_certificate(self):
 		with tempfile.TemporaryDirectory() as temporary:
 			host = FakeHost('Darwin')
-			kept, extra = b'kept root', b'extra root'
+			root = b'pre-existing root'
+			host.certificates = {hashlib.sha1(root).hexdigest(): root}
+			backup = pathlib.Path(temporary) / 'system-before'
+			state.snapshot(host, backup)
+			with self.assertRaisesRegex(state.HostError, 'already present'):
+				state.record_owned_certificate(backup, root)
+			self.assertEqual(host.certificates, {hashlib.sha1(root).hexdigest(): root})
+
+	def test_macos_restore_removes_only_the_exact_recorded_fixture_certificate(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			host = FakeHost('Darwin')
+			kept, fixture, unrelated = b'kept root', b'fixture root', b'unrelated root'
 			host.certificates = {hashlib.sha1(kept).hexdigest(): kept}
 			backup = pathlib.Path(temporary) / 'system-before'
 			state.snapshot(host, backup)
-			host.certificates[hashlib.sha1(extra).hexdigest()] = extra
-			self.assertEqual(state.restore(host, backup), [])
-			self.assertEqual(list(host.certificates.values()), [kept])
+			state.record_owned_certificate(backup, fixture)
+			host.certificates[hashlib.sha1(fixture).hexdigest()] = fixture
+			host.certificates[hashlib.sha1(unrelated).hexdigest()] = unrelated
+			problems = state.restore(host, backup)
+			self.assertTrue(any('no test ownership proof' in problem for problem in problems), problems)
+			self.assertEqual(set(host.certificates.values()), {kept, unrelated})
 			deletes = [argv for argv, _ in host.commands if argv[:2] == ['security', 'delete-certificate']]
 			self.assertEqual(deletes, [['security', 'delete-certificate', '-Z',
-				hashlib.sha1(extra).hexdigest(), state.KEYCHAIN]])
+				hashlib.sha1(fixture).hexdigest(), state.KEYCHAIN]])
 
-	def test_macos_restore_reinstalls_a_missing_root(self):
+	def test_macos_restore_does_not_reinstall_a_missing_preexisting_root(self):
 		with tempfile.TemporaryDirectory() as temporary:
 			host = FakeHost('Darwin')
 			root = b'pre-existing root'
@@ -866,10 +1082,10 @@ class SystemStateTests(unittest.TestCase):
 			backup = pathlib.Path(temporary) / 'system-before'
 			state.snapshot(host, backup)
 			host.certificates = {}
-			self.assertEqual(state.restore(host, backup), [])
-			self.assertEqual(list(host.certificates.values()), [root])
-			installs = [argv for argv, _ in host.commands if argv[:2] == ['security', 'add-trusted-cert']]
-			self.assertEqual(installs[0][2:6], ['-d', '-r', 'trustRoot', '-k'])
+			problems = state.restore(host, backup)
+			self.assertTrue(any('not reinstalled' in problem for problem in problems), problems)
+			self.assertEqual(host.certificates, {})
+			self.assertFalse(any(argv[:2] == ['security', 'add-trusted-cert'] for argv, _ in host.commands))
 
 	def test_windows_restore_delegates_to_the_elevated_script(self):
 		with tempfile.TemporaryDirectory() as temporary:
@@ -892,9 +1108,6 @@ class SystemStateTests(unittest.TestCase):
 		self.assertIn("-Action 'Snapshot'", command)
 		self.assertIn("-Destination 'C:\\Users\\o''brien\\state'", command)
 		self.assertIn("-Tld 'testdcheck'", command)
-		fixture = state.windows_fixture_command('testdcheck')[-1]
-		self.assertIn('[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)', fixture)
-		self.assertIn("-Tld 'testdcheck'", fixture)
 
 	def test_snapshot_is_required_and_platform_bound(self):
 		with tempfile.TemporaryDirectory() as temporary:
@@ -914,9 +1127,52 @@ class ReleaseEntrySafetyTests(unittest.TestCase):
 		self.assertNotIn('system_state.py --self-test', workflow)
 		self.assertNotIn('tests/release/run.py host --system', workflow)
 
+	def test_restore_report_requires_interactive_confirmation_before_recovery(self):
+		for terminal, answer in ((False, 'yes'), (True, 'no')):
+			with self.subTest(terminal=terminal, answer=answer), \
+					patch.object(runner.sys, 'stdin', SimpleNamespace(isatty=lambda: terminal)), \
+					patch('builtins.input', return_value=answer), patch.object(runner, 'restore_report') as restore, \
+					redirect_stderr(io.StringIO()):
+				with self.assertRaises(SystemExit) as error:
+					runner.main(['--restore-report', 'existing-report'])
+				self.assertEqual(error.exception.code, 2)
+				restore.assert_not_called()
+
+	def test_recovery_does_not_claim_the_shared_trust_store_was_restored(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			backup = pathlib.Path(temporary) / 'system-before'
+			backup.mkdir()
+			(backup / 'manifest.json').write_text('{}', encoding='utf-8')
+			fake = SimpleNamespace(load=lambda path: {'created': 'fixture', 'system': 'Linux', 'tld': 'testdcheck'},
+				Host=lambda *args: None, restore=lambda host, path: [])
+			with patch.object(runner, 'SYSTEM', 'Linux'), patch.object(runner, 'helper', return_value=fake), \
+					redirect_stdout(io.StringIO()) as output:
+				self.assertEqual(runner.restore_report(pathlib.Path(temporary)), 2)
+			self.assertIn('Shared trust-store output', output.getvalue())
+
+	def test_system_and_service_checks_cannot_share_a_dirty_snapshot(self):
+		for arguments in (['host', '--system', '--service'],
+				['artifacts', '--artifacts', 'fixtures', '--host', '--system', '--service']):
+			with self.subTest(arguments=arguments), patch.object(runner, 'Run') as run, redirect_stderr(io.StringIO()):
+				with self.assertRaises(SystemExit) as error:
+					runner.main(arguments)
+				self.assertEqual(error.exception.code, 2)
+				run.assert_not_called()
+
+	def test_only_inapplicable_skips_leave_the_report_complete(self):
+		for detail, incomplete in (('not applicable: another OS', False), ('Bun is not installed', True),
+				('blocked: no browser evidence', True), ('', True)):
+			with self.subTest(detail=detail), tempfile.TemporaryDirectory() as temporary:
+				args = SimpleNamespace(report=pathlib.Path(temporary) / 'report', suite='core')
+				with redirect_stdout(io.StringIO()):
+					run = runner.Run(args)
+					run.record('fixture', 'skip', detail)
+				self.assertEqual(run.metadata.get('incomplete', False), incomplete)
+
 	def test_disposable_suites_refuse_to_run_without_a_persisted_report(self):
 		for arguments in (['host', '--system'], ['browser'], ['desktop'], ['service'],
-				['host', '--service'], ['artifacts', '--host', '--system', '--artifacts', 'fixtures']):
+				['host', '--service'], ['artifacts', '--artifacts', 'fixtures'],
+				['artifacts', '--host', '--system', '--artifacts', 'fixtures']):
 			with self.subTest(arguments=arguments), patch.object(runner, 'Run') as run, redirect_stderr(io.StringIO()):
 				with self.assertRaises(SystemExit) as error:
 					runner.main(arguments)
@@ -957,6 +1213,94 @@ class HostSystemTests(unittest.TestCase):
 			system=True, service=False, bin=None)
 		with redirect_stdout(io.StringIO()):
 			return runner.Run(args)
+
+	def test_host_coverage_distinguishes_zero_expected_and_missing_checks(self):
+		cases = (
+			('passed 12, failed 0, skipped 0\n', False, False, None),
+			('skip  system changes disabled (fixture)\npassed 12, failed 0, skipped 1\n', False, False,
+				'not applicable:'),
+			('skip  system checks blocked until ownership\npassed 12, failed 0, skipped 1\n', False, False,
+				'not applicable:'),
+			('skip  launch at login not configured\npassed 12, failed 0, skipped 1\n', False, True, 'blocked:'),
+			('skip  system changes disabled (fixture)\npassed 12, failed 0, skipped 1\n', True, True, 'blocked:'),
+			('passed 12, failed 0, skipped 1\n', False, True, 'blocked:'),
+			('passed 0, failed 0, skipped 0\n', False, True, 'blocked:'),
+			('no summary', False, True, 'blocked:'),
+		)
+		for text, system, incomplete, prefix in cases:
+			with self.subTest(text=text, system=system), tempfile.TemporaryDirectory() as temporary:
+				run = self.create_run(temporary)
+				run.args.system = system
+				with redirect_stdout(io.StringIO()):
+					runner.record_host_coverage(run, text)
+				self.assertEqual(run.metadata.get('incomplete', False), incomplete)
+				if prefix:
+					self.assertTrue(any(item['detail'].startswith(prefix) for item in run.results), run.results)
+				else:
+					self.assertEqual(run.results, [])
+
+	def test_host_summary_failure_is_not_accepted_as_success(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			run = self.create_run(temporary)
+			with redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, 'failed checks'):
+				runner.record_host_coverage(run, 'passed 12, failed 1, skipped 0\n')
+			self.assertEqual(run.results[-1]['status'], 'fail')
+
+	def test_unowned_platform_system_checks_stop_before_build_or_snapshot(self):
+		for system in ('Darwin', 'Windows'):
+			with self.subTest(system=system), tempfile.TemporaryDirectory() as directory:
+				run = self.create_run(directory)
+				with patch.object(runner, 'SYSTEM', system), patch.object(runner, 'binary') as binary, \
+						patch.object(runner, 'system_snapshot') as snapshot, \
+						self.assertRaisesRegex(RuntimeError, 'ownership is enforced'):
+					runner.host(run)
+				binary.assert_not_called()
+				snapshot.assert_not_called()
+
+	def test_linux_cleanup_requires_the_fixture_ownership_id_and_retains_local_data(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			run = self.create_run(temporary)
+			home = pathlib.Path(temporary) / 'fixture-home'
+			owner = home / '.config/testd/system-ownership-id'
+			with patch.dict(os.environ, {'TESTD_TOKEN': 'real-secret'}), \
+					patch.object(run, 'command') as command:
+				runner.cleanup_owned_linux_integration(run, pathlib.Path('/candidate'), home, 'testdcheck', True)
+				command.assert_not_called()
+				owner.parent.mkdir(parents=True)
+				owner.write_text('fixture-owner', encoding='utf-8')
+				runner.cleanup_owned_linux_integration(run, pathlib.Path('/candidate'), home, 'testdcheck', True)
+			self.assertEqual(command.call_args.args[:3], ('system-owned-cleanup', ['/candidate', 'uninstall'], 300))
+			self.assertNotIn('--purge', command.call_args.args[1])
+			self.assertEqual(command.call_args.kwargs['env']['HOME'], str(home))
+			self.assertEqual(command.call_args.kwargs['env']['TESTD_HOST_TLD'], 'testdcheck')
+			self.assertNotIn('TESTD_TOKEN', command.call_args.kwargs['env'])
+			self.assertTrue(command.call_args.kwargs['terminal'])
+			self.assertTrue(owner.is_file())
+
+	@unittest.skipIf(os.name == 'nt', 'not applicable: Linux ownership cleanup uses Unix paths')
+	def test_linux_cleanup_refuses_a_linked_ownership_path(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			run = self.create_run(temporary)
+			home = pathlib.Path(temporary) / 'fixture-home'
+			config = home / '.config'
+			config.mkdir(parents=True)
+			target = pathlib.Path(temporary) / 'unrelated'
+			target.mkdir()
+			(target / 'system-ownership-id').write_text('keep', encoding='utf-8')
+			(config / 'testd').symlink_to(target, target_is_directory=True)
+			with patch.object(run, 'command') as command, self.assertRaisesRegex(RuntimeError, 'symlink'):
+				runner.cleanup_owned_linux_integration(run, pathlib.Path('/candidate'), home, 'testdcheck', True)
+			command.assert_not_called()
+			self.assertEqual((target / 'system-ownership-id').read_text(encoding='utf-8'), 'keep')
+
+	def test_cleanup_refuses_ambiguous_fixture_directories(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			root = pathlib.Path(temporary)
+			(root / 'testd-host-one').mkdir()
+			(root / 'testd-host-two').mkdir()
+			with self.assertRaisesRegex(RuntimeError, 'ambiguous'):
+				runner.host_fixture_home(root)
+			self.assertEqual(len(list(root.iterdir())), 2)
 
 	def test_failed_host_checks_still_restore_the_snapshot(self):
 		with tempfile.TemporaryDirectory() as directory:
@@ -1065,8 +1409,35 @@ class ManualContractTests(unittest.TestCase):
 		self.assertEqual(len(ids), len(set(ids)), 'manual contract ids must be unique')
 
 
-@unittest.skipUnless(os.name != 'nt' and shutil.which('bash'), 'Unix bash host checks are unavailable')
+@unittest.skipUnless(os.name != 'nt' and shutil.which('bash'),
+	'not applicable: Unix host scripts are not used on Windows' if os.name == 'nt' else 'Bash is not installed')
 class UnixHostContractTests(unittest.TestCase):
+	def test_host_script_discards_operator_tokens_and_remote_hosts(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			script = ('source tests/host/lib.sh; '
+				"printf '%s|%s|%s|%s' \"${TESTD_TOKEN-unset}\" \"${TESTD_HOSTS-unset}\" "
+				'"${TESTD_TUNNEL-unset}" "$TESTD_HOST_TLD"')
+			env = {**os.environ, 'TESTD_HOST_OUTPUT_DIR': temporary, 'TESTD_HOST_TLD': 'testdcheck',
+				'TESTD_TOKEN': 'real-secret', 'TESTD_HOSTS': 'remote.example', 'TESTD_TUNNEL': 'real-provider'}
+			result = subprocess.run(['bash', '-c', script], cwd=ROOT, env=env, capture_output=True, text=True, timeout=15)
+			self.assertEqual(result.returncode, 0, result.stderr)
+			self.assertEqual(result.stdout, 'unset|unset|unset|testdcheck')
+
+	def test_macos_system_scripts_refuse_before_touching_the_host(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			root = pathlib.Path(temporary)
+			marker = root / 'keep'
+			marker.write_text('existing data', encoding='utf-8')
+			env = {**os.environ, 'HOME': temporary, 'TESTD_HOST_TEST_SYSTEM': '1',
+				'TESTD_HOST_OUTPUT_DIR': str(root / 'output')}
+			for script in ('tests/host/macos.sh', 'tests/release/macos-resolver-probe.sh'):
+				with self.subTest(script=script):
+					result = subprocess.run(['bash', script], cwd=ROOT, env=env, capture_output=True, text=True, timeout=15)
+					self.assertEqual(result.returncode, 2)
+					self.assertIn('blocked', result.stderr)
+					self.assertEqual(marker.read_text(encoding='utf-8'), 'existing data')
+					self.assertFalse((root / 'output').exists())
+
 	def test_test_contract_documents_trigger_the_ci_test_job(self):
 		with tempfile.TemporaryDirectory() as directory:
 			fake_git = pathlib.Path(directory) / 'git'
@@ -1112,6 +1483,111 @@ class DesktopRunnerTests(unittest.TestCase):
 		with redirect_stdout(io.StringIO()):
 			return runner.Run(args)
 
+	def test_unowned_platform_desktop_checks_stop_before_launch_or_snapshot(self):
+		for system in ('Darwin', 'Windows'):
+			with self.subTest(system=system), tempfile.TemporaryDirectory() as directory:
+				run = self.create_run(directory)
+				with patch.object(runner, 'SYSTEM', system), patch.object(runner, 'system_snapshot') as snapshot, \
+						patch.object(runner.subprocess, 'Popen') as launch, \
+						self.assertRaisesRegex(RuntimeError, 'ownership is enforced'):
+					runner.desktop(run)
+				snapshot.assert_not_called()
+				launch.assert_not_called()
+
+	def test_linux_desktop_requires_its_candidate_cli_before_snapshot(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			with patch.object(runner, 'SYSTEM', 'Linux'), patch.object(runner, 'system_snapshot') as snapshot, \
+					self.assertRaisesRegex(RuntimeError, 'provide --bin'):
+				runner.desktop(run)
+			snapshot.assert_not_called()
+
+	def test_linux_desktop_refuses_a_missing_cleanup_cli_before_snapshot(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			run.args.bin = pathlib.Path(directory) / 'missing-cli'
+			with patch.object(runner, 'SYSTEM', 'Linux'), patch.object(runner, 'system_snapshot') as snapshot, \
+					self.assertRaisesRegex(RuntimeError, 'missing or not executable'):
+				runner.desktop(run)
+			snapshot.assert_not_called()
+
+	@unittest.skipIf(os.name == 'nt', 'not applicable: Linux desktop cleanup uses executable Unix files')
+	def test_linux_desktop_does_not_run_a_replaced_cleanup_cli(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			cli = pathlib.Path(directory) / 'cli'
+			cli.write_text('original', encoding='utf-8')
+			cli.chmod(0o700)
+			run.args.bin = cli
+			process = Mock()
+			process.poll.return_value = None
+			terminal = Mock()
+			terminal.isatty.return_value = True
+			def launch(*args, **kwargs):
+				cli.write_text('replacement', encoding='utf-8')
+				return process
+			with patch.object(runner, 'SYSTEM', 'Linux'), patch.dict(os.environ, {'HOME': directory}), \
+					patch.object(runner.sys, 'stdin', terminal), patch.object(runner.time, 'sleep'), \
+					patch.object(runner, 'check_ports'), patch.object(runner.threading, 'Thread'), \
+					patch.object(runner.subprocess, 'Popen', side_effect=launch), \
+					patch.object(runner, 'checklist_items', return_value=['fixture']), \
+					patch.object(runner, 'ask', side_effect=['y', 'q', 'y']), \
+					patch.object(runner, 'system_snapshot', return_value=pathlib.Path(directory) / 'before'), \
+					patch.object(runner, 'system_restore') as restore, \
+					patch.object(runner, 'cleanup_owned_linux_integration') as cleanup, redirect_stdout(io.StringIO()):
+				with self.assertRaisesRegex(RuntimeError, 'candidate CLI changed'):
+					runner.desktop(run)
+			cleanup.assert_not_called()
+			restore.assert_called_once()
+			self.assertEqual(cli.read_text(encoding='utf-8'), 'replacement')
+			self.assertTrue(any(item['name'] == 'system-owned-cleanup' and item['status'] == 'fail' for item in run.results))
+
+	@unittest.skipIf(os.name == 'nt', 'not applicable: Linux desktop cleanup uses executable Unix files')
+	def test_linux_desktop_refuses_occupied_ports_before_snapshot(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			cli = pathlib.Path(directory) / 'cli'
+			cli.write_text('fixture', encoding='utf-8')
+			cli.chmod(0o700)
+			run.args.bin = cli
+			terminal = Mock()
+			terminal.isatty.return_value = True
+			with patch.object(runner, 'SYSTEM', 'Linux'), patch.dict(os.environ, {'HOME': directory}), \
+					patch.object(runner.sys, 'stdin', terminal), \
+					patch.object(runner, 'check_ports', side_effect=RuntimeError('port occupied')), \
+					patch.object(runner, 'system_snapshot') as snapshot, patch.object(runner.subprocess, 'Popen') as launch:
+				with self.assertRaisesRegex(RuntimeError, 'port occupied'):
+					runner.desktop(run)
+			snapshot.assert_not_called()
+			launch.assert_not_called()
+
+	@unittest.skipIf(os.name == 'nt', 'not applicable: Linux desktop cleanup uses executable Unix files')
+	def test_linux_desktop_defers_product_cleanup_if_ports_are_still_occupied(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			cli = pathlib.Path(directory) / 'cli'
+			cli.write_text('fixture', encoding='utf-8')
+			cli.chmod(0o700)
+			run.args.bin = cli
+			process = Mock()
+			process.poll.return_value = None
+			terminal = Mock()
+			terminal.isatty.return_value = True
+			with patch.object(runner, 'SYSTEM', 'Linux'), patch.dict(os.environ, {'HOME': directory}), \
+					patch.object(runner.sys, 'stdin', terminal), patch.object(runner.time, 'sleep'), \
+					patch.object(runner, 'check_ports', side_effect=[None, RuntimeError('port still occupied')]), \
+					patch.object(runner.threading, 'Thread'), patch.object(runner.subprocess, 'Popen', return_value=process), \
+					patch.object(runner, 'checklist_items', return_value=['fixture']), \
+					patch.object(runner, 'ask', side_effect=['y', 'q', 'y']), \
+					patch.object(runner, 'system_snapshot', return_value=pathlib.Path(directory) / 'before'), \
+					patch.object(runner, 'system_restore') as restore, \
+					patch.object(runner, 'cleanup_owned_linux_integration') as cleanup, redirect_stdout(io.StringIO()):
+				with self.assertRaisesRegex(RuntimeError, 'port still occupied'):
+					runner.desktop(run)
+			cleanup.assert_not_called()
+			restore.assert_called_once()
+			self.assertTrue(any(item['name'] == 'fixture-shutdown' and item['status'] == 'fail' for item in run.results))
+
 	def test_desktop_user_data_paths_follow_the_product(self):
 		with patch.object(runner, 'SYSTEM', 'Windows'), patch.dict(os.environ, {'APPDATA': '/roaming'}, clear=True):
 			self.assertEqual(runner.desktop_config_dir(), pathlib.Path('/roaming/testd'))
@@ -1144,7 +1620,8 @@ class DesktopRunnerTests(unittest.TestCase):
 			run = self.create_run(directory)
 			terminal = Mock()
 			terminal.isatty.return_value = True
-			with patch.object(runner, 'SYSTEM', 'Windows'), patch.dict(os.environ, {'APPDATA': directory}), \
+			with patch.object(runner, 'require_owned_product_integration'), \
+				patch.object(runner, 'SYSTEM', 'Windows'), patch.dict(os.environ, {'APPDATA': directory}), \
 				patch.object(runner.sys, 'stdin', terminal), patch.object(runner, 'checklist_items', return_value=[]), \
 				patch.object(runner, 'ask', return_value='y'), \
 				patch.object(runner, 'system_snapshot', side_effect=AssertionError('snapshot ran too early')) as snapshot:
@@ -1164,8 +1641,9 @@ class DesktopRunnerTests(unittest.TestCase):
 			backup = pathlib.Path(directory) / 'system-before'
 			terminal = Mock()
 			terminal.isatty.return_value = True
-			with patch.object(runner, 'SYSTEM', 'Windows'), patch.object(runner, 'HOST_TLD', 'testdcheck'), \
-				patch.dict(os.environ, {'TESTD_HOST_TLD': 'different', 'APPDATA': directory}), \
+			with patch.object(runner, 'require_owned_product_integration'), \
+				patch.object(runner, 'SYSTEM', 'Windows'), patch.object(runner, 'HOST_TLD', 'testdcheck'), \
+				patch.dict(os.environ, {'TESTD_HOST_TLD': 'different', 'TESTD_TOKEN': 'secret', 'APPDATA': directory}), \
 				patch.object(runner.sys, 'stdin', terminal), \
 				patch.object(runner, 'system_snapshot', return_value=backup) as snapshot, \
 				patch.object(runner, 'system_restore') as restore, patch.object(runner.subprocess, 'Popen') as launch, \
@@ -1175,6 +1653,7 @@ class DesktopRunnerTests(unittest.TestCase):
 			snapshot.assert_called_once_with(run, 'test', interactive=True)
 			restore.assert_called_once_with(run, backup, 'test', interactive=True)
 			self.assertNotIn('TESTD_HOST_TLD', launch.call_args.kwargs['env'])
+			self.assertNotIn('TESTD_TOKEN', launch.call_args.kwargs['env'])
 			self.assertEqual(launch.call_args.kwargs['env']['TESTD_TUNNEL'], str(run.output))
 			self.assertTrue(run.metadata['incomplete'])
 
@@ -1186,7 +1665,8 @@ class DesktopRunnerTests(unittest.TestCase):
 			(config / 'config.toml').write_text('existing data', encoding='utf-8')
 			terminal = Mock()
 			terminal.isatty.return_value = True
-			with patch.object(runner, 'SYSTEM', 'Windows'), patch.dict(os.environ, {'APPDATA': directory}), \
+			with patch.object(runner, 'require_owned_product_integration'), \
+				patch.object(runner, 'SYSTEM', 'Windows'), patch.dict(os.environ, {'APPDATA': directory}), \
 				patch.object(runner.sys, 'stdin', terminal), \
 				patch.object(runner, 'system_snapshot', side_effect=AssertionError('snapshot ran too early')) as snapshot:
 				with self.assertRaisesRegex(RuntimeError, 'existing testd user data'):
@@ -1199,7 +1679,8 @@ class DesktopRunnerTests(unittest.TestCase):
 			run = self.create_run(directory)
 			terminal = Mock()
 			terminal.isatty.return_value = True
-			with patch.object(runner, 'SYSTEM', 'Windows'), patch.dict(os.environ, {'APPDATA': directory}), \
+			with patch.object(runner, 'require_owned_product_integration'), \
+				patch.object(runner, 'SYSTEM', 'Windows'), patch.dict(os.environ, {'APPDATA': directory}), \
 				patch.object(runner.sys, 'stdin', terminal), patch.object(runner, 'ask', return_value='n'), \
 				patch.object(runner, 'system_snapshot') as snapshot:
 				with self.assertRaisesRegex(RuntimeError, 'disposable host'):
@@ -1211,7 +1692,8 @@ class DesktopRunnerTests(unittest.TestCase):
 			run = self.create_run(directory)
 			terminal = Mock()
 			terminal.isatty.return_value = True
-			with patch.object(runner, 'SYSTEM', 'Windows'), patch.dict(os.environ, {'APPDATA': directory}), \
+			with patch.object(runner, 'require_owned_product_integration'), \
+				patch.object(runner, 'SYSTEM', 'Windows'), patch.dict(os.environ, {'APPDATA': directory}), \
 				patch.object(runner.sys, 'stdin', terminal), \
 				patch.object(runner, 'system_snapshot', return_value=pathlib.Path(directory) / 'system-before'), \
 				patch.object(runner, 'system_restore') as restore, patch.object(runner.subprocess, 'Popen'), \
@@ -1246,9 +1728,9 @@ class BrowserTests(unittest.TestCase):
 				finally:
 					events.append('stop')
 
-			with patch.object(runner, 'require'), \
+			with patch.dict(os.environ, {'TESTD_TOKEN': 'real-secret', 'TESTD_HOSTS': 'remote.example'}), \
+				patch.object(runner, 'require'), \
 				patch.object(runner, 'check_ports'), \
-				patch.object(runner, 'local_host_status', side_effect=runner.HostUnavailable('missing')), \
 				patch.object(runner, 'wait_for_host', return_value={'tld': 'test'}) as wait, \
 				patch.object(runner, 'binary', return_value=binary_path), \
 				patch.object(runner, 'require_host_resolution'), \
@@ -1260,23 +1742,46 @@ class BrowserTests(unittest.TestCase):
 			self.assertEqual(serve.call_args.args, ('host-fixture', [str(binary_path), 'host']))
 			self.assertEqual(serve.call_args.kwargs['stop_signal'], signal.SIGINT)
 			self.assertEqual(serve.call_args.kwargs['env']['TESTD_TUNNEL'], str(run.output))
+			self.assertNotIn('TESTD_TOKEN', serve.call_args.kwargs['env'])
+			self.assertNotIn('TESTD_HOSTS', serve.call_args.kwargs['env'])
 			wait.assert_called_once_with(7737, 'process', 'output')
 			command.assert_called_once()
+			self.assertNotIn('TESTD_TOKEN', command.call_args.args[3])
+			self.assertNotIn('TESTD_HOSTS', command.call_args.args[3])
 
-	def test_browser_refuses_a_host_that_it_did_not_start(self):
+	def test_browser_refuses_an_existing_listener_without_contacting_it(self):
 		with tempfile.TemporaryDirectory() as directory:
 			run = self.create_run(directory)
-			with patch.object(runner, 'require'), patch.object(runner, 'check_ports'), \
-				patch.object(runner, 'local_host_status', return_value={'tld': 'test'}), \
+			def check(ports, udp=()):
+				if ports == [7737]:
+					raise RuntimeError('fixture port 7737 is unavailable')
+			with patch.object(runner, 'require'), patch.object(runner, 'check_ports', side_effect=check), \
+				patch.object(runner, 'local_host_status') as status, \
 				patch.object(runner, 'binary', return_value=pathlib.Path('candidate')), \
 				patch.object(runner, 'require_host_resolution') as resolution, \
 				patch.object(run, 'serve') as serve, patch.object(run, 'command') as command, \
 				redirect_stdout(io.StringIO()):
-				with self.assertRaisesRegex(RuntimeError, 'existing host'):
+				with self.assertRaisesRegex(RuntimeError, 'port 7737'):
 					runner.browser(run)
+			status.assert_not_called()
 			resolution.assert_not_called()
 			serve.assert_not_called()
 			command.assert_not_called()
+
+	def test_browser_preflight_does_not_connect_to_an_unrelated_local_service(self):
+		with tempfile.TemporaryDirectory() as directory, socket.socket() as listener:
+			listener.bind(('127.0.0.1', 0))
+			listener.listen()
+			listener.settimeout(0.1)
+			run = self.create_run(directory)
+			with patch.object(runner, 'local_host_status') as status, patch.object(run, 'serve') as serve:
+				with self.assertRaisesRegex(RuntimeError, 'unavailable'):
+					with runner.HostFixture(run, pathlib.Path('candidate'), listener.getsockname()[1]):
+						self.fail('an occupied listener was accepted')
+			status.assert_not_called()
+			serve.assert_not_called()
+			with self.assertRaises(TimeoutError):
+				listener.accept()
 
 	def test_expected_browser_checks_match_the_page(self):
 		page = (ROOT / 'tests/release/browser.html').read_text(encoding='utf-8')
@@ -1400,7 +1905,7 @@ class BrowserTests(unittest.TestCase):
 				finally:
 					events.append(('stop', args[0]))
 
-			with patch.object(runner, 'local_host_status', side_effect=runner.HostUnavailable('missing')), \
+			with patch.object(runner, 'check_ports'), \
 				patch.object(runner, 'wait_for_host', return_value={'tld': 'test'}), \
 				patch.object(run, 'serve', side_effect=serve) as serve_mock, \
 				redirect_stdout(io.StringIO()):
@@ -1657,7 +2162,7 @@ class CommandOutputTests(unittest.TestCase):
 			self.assertEqual(popen.call_args.kwargs['start_new_session'], runner.SYSTEM != 'Windows')
 			self.assertNotIn('process_group', popen.call_args.kwargs)
 
-	@unittest.skipUnless(hasattr(os, 'getpgid'), 'process groups are POSIX-only')
+	@unittest.skipUnless(hasattr(os, 'getpgid'), 'not applicable: process groups are POSIX-only')
 	def test_a_detached_child_is_signalled_alone(self):
 		process = Mock(pid=4321)
 		with patch.object(runner, 'SYSTEM', 'Linux'), patch.object(runner.os, 'getpgid', return_value=1), \
@@ -1666,7 +2171,7 @@ class CommandOutputTests(unittest.TestCase):
 		process.send_signal.assert_called_once_with(signal.SIGTERM)
 		killpg.assert_not_called()
 
-	@unittest.skipUnless(hasattr(os, 'getpgid'), 'process groups are POSIX-only')
+	@unittest.skipUnless(hasattr(os, 'getpgid'), 'not applicable: process groups are POSIX-only')
 	def test_a_session_leader_takes_its_group_down(self):
 		process = Mock(pid=4321)
 		with patch.object(runner, 'SYSTEM', 'Linux'), patch.object(runner.os, 'getpgid', return_value=4321), \
@@ -1772,18 +2277,29 @@ def script_syntax_errors(engine, path):
 	return result.returncode, (result.stdout + result.stderr).decode('utf-8', errors='replace').strip()
 
 
-# Load the script's constants and functions without running its final action
-# switch, then drive them against a snapshot an older run could have written:
-# Namespace as a list with a duplicate and NameServers as a joined string.
+# Exercise the PowerShell snapshot against fake rules and stores, never the OS.
 SNAPSHOT_PROBE = r'''
 $live = [pscustomobject]@{
+	Name = 'fixture-rule'
 	Namespace = @('.testdcheck', '.testdcheck')
 	NameServers = @('127.0.0.1', '127.0.0.1')
 	DisplayName = ''
 	Comment = ''
 }
 $script:live = $live
+$script:roots = @()
 function Get-NamespaceRules { @($script:live) }
+function Get-RootThumbprints { @($script:roots) }
+function Assert-Administrator { }
+function Remove-DnsClientNrptRule { throw 'must not remove any rule' }
+function Add-DnsClientNrptRule { throw 'must not recreate any rule' }
+function certutil.exe { throw 'must not change the root store' }
+$existing = Join-Path $Destination 'existing-evidence'
+[IO.File]::WriteAllText($existing, 'keep')
+try { Write-NewBytes $existing ([Text.Encoding]::UTF8.GetBytes('replace')); throw 'existing evidence was overwritten' } catch {
+	if ($_ -match 'existing evidence was overwritten') { throw }
+}
+if ([IO.File]::ReadAllText($existing) -ne 'keep') { throw 'existing evidence changed' }
 $legacy = @([pscustomobject]@{
 	Signature = [pscustomobject]@{
 		Namespace = @('.testdcheck', '.testdcheck')
@@ -1791,9 +2307,10 @@ $legacy = @([pscustomobject]@{
 		DisplayName = ''
 		Comment = ''
 	}
-	Properties = [pscustomobject]@{}
+	Properties = Get-RuleProperties $live
 })
 Set-Content -LiteralPath $NrptFile -Value (ConvertTo-Json -InputObject $legacy -Depth 10) -Encoding utf8
+New-Item -ItemType Directory -Path $RootDirectory | Out-Null
 $snapshot = Read-Snapshot
 $signature = $snapshot.Rules[0].Signature
 if ($signature.Namespace -ne '.testdcheck') { throw "namespace is not canonical: $($signature.Namespace)" }
@@ -1801,26 +2318,17 @@ if ($signature.NameServers -ne '127.0.0.1') { throw "name servers are not canoni
 if ((@(Get-PropertyDifferences $snapshot)).Count -ne 0) {
 	throw 'a matching multi-entry rule was reported as missing'
 }
-$script:added = $null
-function Add-DnsClientNrptRule {
-	param($Namespace, $NameServers)
-	$script:added = @{ Namespace = @($Namespace); NameServers = @($NameServers) }
+Restore-Snapshot
+$script:live.Name = 'replacement-rule'
+if ((@(Get-PropertyDifferences $snapshot)).Count -eq 0) { throw 'a replacement rule was not reported' }
+try { Restore-Snapshot; throw 'changed rule was accepted' } catch {
+	if ($_ -match 'changed rule was accepted|must not remove|must not recreate|must not change') { throw }
 }
-Add-SnapshotRule $snapshot.Rules[0]
-if ($script:added.Namespace.Count -ne 1 -or $script:added.Namespace[0] -ne '.testdcheck') {
-	throw "restore re-added namespaces: $($script:added.Namespace -join '|')"
-}
-if ($script:added.NameServers.Count -ne 1 -or $script:added.NameServers[0] -ne '127.0.0.1') {
-	throw "restore re-added name servers: $($script:added.NameServers -join '|')"
-}
-$script:live = [pscustomobject]@{
-	Namespace = @('.testdcheck')
-	NameServers = @('10.0.0.1')
-	DisplayName = ''
-	Comment = ''
-}
-if ((@(Get-PropertyDifferences $snapshot)).Count -eq 0) {
-	throw 'a different name server was not reported'
+$script:live = $live
+$script:live.Name = 'fixture-rule'
+$script:roots = @('0123456789012345678901234567890123456789')
+try { Restore-Snapshot; throw 'unknown root was accepted' } catch {
+	if ($_ -match 'unknown root was accepted|must not remove|must not recreate|must not change') { throw }
 }
 Remove-Item -LiteralPath $Destination -Recurse -Force
 '''
@@ -1864,6 +2372,50 @@ class PowerShellScriptTests(unittest.TestCase):
 					code, output = script_syntax_errors(engine, script)
 					self.assertEqual(code, 0, f'{script.relative_to(ROOT)}: {output}')
 
+	def test_windows_system_scripts_refuse_before_touching_the_host(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			root = pathlib.Path(temporary)
+			marker = root / 'keep'
+			marker.write_text('existing data', encoding='utf-8')
+			env = {**os.environ, 'TESTD_HOST_TEST_SYSTEM': '1', 'TESTD_HOST_OUTPUT_DIR': str(root / 'output')}
+			for engine in POWERSHELLS:
+				for script in ('tests/host/windows.ps1', 'tests/release/windows-system-fixture.ps1'):
+					with self.subTest(engine=pathlib.Path(engine).name, script=script):
+						result = subprocess.run([engine, '-NoProfile', '-NonInteractive', '-File', str(ROOT / script)],
+							env=env, capture_output=True, encoding='utf-8', timeout=30)
+						self.assertNotEqual(result.returncode, 0)
+						self.assertIn('blocked', result.stderr.lower())
+						self.assertEqual(marker.read_text(encoding='utf-8'), 'existing data')
+						self.assertFalse((root / 'output').exists())
+
+	def test_windows_cleanup_uses_fixture_process_objects_and_a_finally_block(self):
+		script = state.powershell_quote(ROOT / 'tests/host/windows.ps1')
+		command = (
+			'$tokens = $null; $errors = $null;'
+			f'$ast = [System.Management.Automation.Language.Parser]::ParseFile({script}, [ref]$tokens, [ref]$errors);'
+			'$definition = $ast.Find({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] '
+			"-and $args[0].Name -eq 'Stop-FixtureProcess' }, $true);"
+			'. ([scriptblock]::Create($definition.Extent.Text));'
+			"$cleanup = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.TryStatementAst] "
+			"-and $null -ne $args[0].Finally -and $args[0].Finally.Extent.Text -match \"Section 'cleanup'\" }, $true));"
+			"if ($cleanup.Count -ne 1) { throw 'missing cleanup finally' };"
+			'$process = [pscustomobject]@{ HasExited = $false; Calls = 0 };'
+			"$process | Add-Member ScriptMethod Kill { $this.Calls++; $this.HasExited = $true };"
+			"$process | Add-Member ScriptMethod WaitForExit { param($timeout) return $true };"
+			'Stop-FixtureProcess $process; Stop-FixtureProcess $process;'
+			"if ($process.Calls -ne 1) { throw 'incorrect process cleanup' };"
+			"$failed = [pscustomobject]@{ HasExited = $false };"
+			"$failed | Add-Member ScriptMethod Kill { throw 'fixture kill failed' };"
+			"try { Stop-FixtureProcess $failed; throw 'error was swallowed' } catch { "
+			"if ($_ -match 'error was swallowed') { throw } }; exit 0;"
+		)
+		for engine in POWERSHELLS:
+			with self.subTest(engine=pathlib.Path(engine).name):
+				result = subprocess.run([engine, '-NoProfile', '-NonInteractive', '-Command', command],
+					capture_output=True, encoding='utf-8', timeout=30)
+				self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+		self.assertNotIn('Stop-Process -Id', (ROOT / 'tests/host/windows.ps1').read_text(encoding='utf-8'))
+
 	def test_windows_host_fixture_disables_real_providers(self):
 		with tempfile.TemporaryDirectory() as temporary:
 			home = pathlib.Path(temporary) / 'fixture-home'
@@ -1876,9 +2428,11 @@ class PowerShellScriptTests(unittest.TestCase):
 				'$definition = $ast.Find({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] '
 				"-and $args[0].Name -eq 'Set-TestEnvironment' }, $true);"
 				'. ([scriptblock]::Create($definition.Extent.Text));'
-				"$env:TESTD_TUNNEL = 'real-provider';"
+				"$env:TESTD_TUNNEL = 'real-provider'; $env:TESTD_TOKEN = 'real-secret';"
+				"$env:TESTD_HOSTS = 'remote.example'; $env:TESTD_HOST_TLD = 'testdcheck';"
 				f'$appData = Set-TestEnvironment {path};'
 				'@{ home = $env:HOME; appdata = $env:APPDATA; tunnel = $env:TESTD_TUNNEL; '
+				'leaked = [bool]($env:TESTD_TOKEN -or $env:TESTD_HOSTS); allowed = $env:TESTD_HOST_TLD; '
 				'created = (Test-Path -LiteralPath $appData -PathType Container) } | ConvertTo-Json -Compress'
 			)
 			for engine in POWERSHELLS:
@@ -1889,6 +2443,8 @@ class PowerShellScriptTests(unittest.TestCase):
 					value = json.loads(result.stdout)
 					self.assertEqual(value['home'], str(home))
 					self.assertEqual(value['tunnel'], str(home))
+					self.assertFalse(value['leaked'])
+					self.assertEqual(value['allowed'], 'testdcheck')
 					self.assertTrue(value['created'])
 					self.assertEqual(pathlib.Path(value['appdata']), home / 'AppData/Roaming')
 
@@ -1926,9 +2482,8 @@ class PowerShellScriptTests(unittest.TestCase):
 				self.assertIn('Host: app.testdproj.testdcheck', value['curlArgs'])
 				self.assertIn('http://127.0.0.1:7740/', value['curlArgs'])
 
-	def test_multi_entry_nrpt_signatures_compare_and_re_add_as_values(self):
-		"""`-eq` on two arrays filters the left side, so a rule whose lists have
-		more than one entry never matched and was reported as missing."""
+	def test_nrpt_snapshot_detects_replacements_without_mutating_rules_or_roots(self):
+		"""Compare multi-entry rules without deleting a replacement or unknown root."""
 		for engine in POWERSHELLS:
 			with self.subTest(engine=pathlib.Path(engine).name):
 				code, output = snapshot_probe(engine)

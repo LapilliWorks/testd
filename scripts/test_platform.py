@@ -65,8 +65,10 @@ def validate_options(parser, args):
 		parser.error('--gui is only available for automated or all checks')
 	if args.system and args.suite not in ('host', 'all'):
 		parser.error('--system is only available for host or all checks')
-	if (args.bin is not None or args.build) and args.suite not in ('host', 'browser', 'all'):
-		parser.error('--bin and --build are only available for host, browser, or all checks')
+	if args.bin is not None and args.suite not in ('host', 'browser', 'desktop', 'all'):
+		parser.error('--bin is only available for host, browser, desktop, or all checks')
+	if args.build and args.suite not in ('host', 'browser', 'all'):
+		parser.error('--build is only available for host, browser, or all checks')
 	if args.app is not None and args.suite not in ('desktop', 'all'):
 		parser.error('--app is only available for desktop or all checks')
 	if args.suite != 'all' and (args.artifacts or args.previous_bin or args.no_previous_release or
@@ -91,6 +93,8 @@ def validate_options(parser, args):
 		parser.error(f'{args.suite} requires --bin with a candidate CLI or explicit --build')
 	if args.suite == 'desktop' and args.app is None:
 		parser.error('desktop requires --app with an existing candidate')
+	if args.suite == 'desktop' and platform.system() == 'Linux' and args.bin is None:
+		parser.error('desktop requires --bin with the candidate CLI for ownership-checked cleanup')
 	if args.suite in ('host', 'browser', 'desktop') and args.report is None:
 		parser.error(f'{args.suite} requires --report with a new persisted directory')
 
@@ -109,7 +113,7 @@ def report_path(parser, args):
 	report = args.report.expanduser().absolute()
 	if report.exists() or report.is_symlink():
 		parser.error(f'report path already exists: {report}')
-	if (args.system or args.build or args.suite in ('desktop', 'all')) and is_ephemeral_report(report):
+	if (args.system or args.build or args.suite in ('browser', 'desktop', 'all')) and is_ephemeral_report(report):
 		parser.error(f'backups require a persisted report outside temporary directories: {report}')
 	return report
 

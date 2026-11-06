@@ -251,6 +251,8 @@ class Run:
 
 	def record(self, name, status, detail=''):
 		with self.lock:
+			if status == 'skip' and not detail.startswith('not applicable:'):
+				self.metadata['incomplete'] = True
 			self.results.append({'name': name, 'status': status, 'detail': detail})
 			self.save()
 			print(f'{status:8} {name}: {detail}', flush=True)
@@ -483,26 +485,94 @@ def system_snapshot(run, tld, interactive=False):
 
 
 def system_restore(run, backup, tld, interactive=False):
-	"""Put the recorded integration back and verify it against the snapshot."""
+	"""Remove proven fixtures and verify only the selected snapshot state."""
 	state = helper('system_state')
 	problems = state.restore(state.Host(SYSTEM, tld, interactive), backup)
 	if problems:
 		run.record('system-restore', 'fail', '; '.join(problems))
-		raise RuntimeError('the host was not fully restored; fix the cause and rerun with '
-			f'--restore-report {run.output}')
-	run.record('system-restore', 'pass', f'{backup}; integration matches the snapshot')
+		raise RuntimeError('scoped system state was not verified; inspect conflicts or restore the full-system snapshot; '
+			f'retry scoped recovery with --restore-report {run.output}')
+	run.record('system-restore', 'pass', f'{backup}; scoped integration matches the snapshot')
+	if SYSTEM in ('Linux', 'Darwin'):
+		run.metadata['incomplete'] = True
+		run.record('shared-trust-coverage', 'skip',
+			'blocked: shared trust-store output and hooks need comparison with the full-system snapshot')
+
+
+def require_owned_product_integration():
+	if SYSTEM in ('Darwin', 'Windows'):
+		raise RuntimeError(f'{SYSTEM} system integration checks are blocked until resolver and trust ownership is enforced')
+
+
+def cleanup_owned_linux_integration(run, cli, home, tld, interactive=False):
+	"""Use the candidate's ownership checks, never name-based deletion."""
+	config = home / '.config/testd'
+	owner = config / 'system-ownership-id'
+	if any(path.is_symlink() for path in (home, home / '.config', config, owner)):
+		raise RuntimeError('fixture ownership path is a symlink; no system cleanup was attempted')
+	if not owner.is_file():
+		return
+	env = isolated_environment(HOME=str(home), TESTD_HOST_TLD=tld, TESTD_TUNNEL=str(run.output))
+	run.command('system-owned-cleanup', [str(cli), 'uninstall'], 300, env=env, terminal=interactive)
+
+
+def host_fixture_home(directory):
+	if directory.is_symlink() or not directory.is_dir():
+		raise RuntimeError('the host fixture directory is not a regular directory; no system cleanup was attempted')
+	candidates = [path for path in directory.iterdir() if path.name.startswith('testd-host-')]
+	if not candidates:
+		return None
+	if len(candidates) != 1 or candidates[0].is_symlink() or not candidates[0].is_dir():
+		raise RuntimeError('the host fixture directory is ambiguous; no system cleanup was attempted')
+	return candidates[0]
+
+
+def record_host_coverage(run, text):
+	match = re.search(r'(?m)^passed (\d+), failed (\d+), skipped (\d+)\s*$', text)
+	if not match:
+		run.metadata['incomplete'] = True
+		run.record('host-coverage', 'skip', 'blocked: the host summary is missing')
+		return
+	passed, failed, skipped = (int(value) for value in match.groups())
+	if failed:
+		run.record('host-summary', 'fail', f'{passed} passed, {failed} failed, {skipped} skipped')
+		raise RuntimeError('the host summary reports failed checks')
+	if not passed:
+		run.metadata['incomplete'] = True
+		run.record('host-coverage', 'skip', 'blocked: no host checks passed')
+		return
+	reasons = re.findall(r'(?m)^skip[ \t]+(.+?)\s*$', text)
+	if len(reasons) != skipped:
+		run.metadata['incomplete'] = True
+		run.record('host-coverage', 'skip', 'blocked: host skip details do not match the summary')
+		return
+	expected = ('system changes disabled ', 'system checks blocked until ')
+	separate = [reason for reason in reasons if not run.args.system and reason.startswith(expected)]
+	uncovered = [reason for reason in reasons if reason not in separate]
+	if separate:
+		run.record('host-system-coverage', 'skip', 'not applicable: system checks are reported separately')
+	if uncovered:
+		run.metadata['incomplete'] = True
+		run.record('host-coverage', 'skip', 'blocked: ' + '; '.join(uncovered))
 
 
 def host(run):
+	if run.args.system:
+		require_owned_product_integration()
 	cli = binary(run)
-	ports = [7737, 7740, int(os.environ.get('TESTD_HOST_EDGE_PORT', '8443')),
+	cli_digest = file_digest(cli) if run.args.system else None
+	tcp_ports = [7737, 7740, int(os.environ.get('TESTD_HOST_EDGE_PORT', '8443')),
 		int(os.environ.get('TESTD_HOST_APP_PORT', '18080')), int(os.environ.get('TESTD_HOST_LAUNCH_PORT', '18081'))]
+	udp_ports = [53 if SYSTEM == 'Windows' else 7753]
 	# Refuse a busy fixture port before any system state is touched.
-	check_ports(ports, [53 if SYSTEM == 'Windows' else 7753])
+	check_ports(tcp_ports, udp_ports)
 	state = run.output / 'host-state'
 	state.mkdir(mode=0o700)
-	env = dict(os.environ, TESTD_HOST_OUTPUT_DIR=str(state), TESTD_BIN=str(cli),
-		TESTD_HOST_TEST_SYSTEM='1' if run.args.system else '0', TESTD_HOST_TLD=HOST_TLD)
+	port_options = {name: os.environ[name] for name in ('TESTD_HOST_EDGE_PORT', 'TESTD_HOST_APP_PORT',
+		'TESTD_HOST_LAUNCH_PORT') if name in os.environ}
+	env = isolated_environment(**port_options, TESTD_HOST_OUTPUT_DIR=str(state), TESTD_BIN=str(cli),
+		TESTD_HOST_TEST_SYSTEM='1' if run.args.system else '0',
+		TESTD_HOST_DISPOSABLE_CONFIRMED='1' if run.args.system else '0', TESTD_HOST_TLD=HOST_TLD)
 	snapshot = system_snapshot(run, HOST_TLD) if run.args.system else None
 	if snapshot:
 		env['TESTD_HOST_SNAPSHOT'] = str(snapshot)
@@ -516,8 +586,7 @@ def host(run):
 		# credential was validated on. Plain runs keep fixtures off the operator's
 		# stdin.
 		text = run.command('host-checks', command, 600, env, terminal=run.args.system)
-		if 'skip' in text:
-			run.record('host-coverage', 'skip', 'see host log for unchecked system/autostart sections')
+		record_host_coverage(run, text)
 		if run.args.system:
 			if 'ok    doctor --fix' not in text:
 				raise RuntimeError('requested system checks did not run successfully')
@@ -527,7 +596,25 @@ def host(run):
 			service(run)
 	finally:
 		if snapshot:
-			system_restore(run, snapshot, HOST_TLD)
+			try:
+				try:
+					check_ports(tcp_ports, udp_ports)
+				except Exception as error:
+					run.record('fixture-shutdown', 'fail', str(error))
+					raise
+				run.record('fixture-shutdown', 'pass', 'fixture ports are available')
+				try:
+					home = host_fixture_home(state)
+					if home is not None:
+						if file_digest(cli) != cli_digest:
+							raise RuntimeError('the candidate CLI changed; no system cleanup was attempted')
+						cleanup_owned_linux_integration(run, cli, home, HOST_TLD, interactive=True)
+				except Exception as error:
+					if not any(item['name'] == 'system-owned-cleanup' and item['status'] == 'fail' for item in run.results):
+						run.record('system-owned-cleanup', 'fail', str(error))
+					raise
+			finally:
+				system_restore(run, snapshot, HOST_TLD)
 
 
 def check_ports(tcp, udp=()):
@@ -605,6 +692,9 @@ def artifacts(run):
 			host(run)
 		elif run.args.service:
 			service(run)
+		if (run.args.system or run.args.service) and run.metadata.get('incomplete'):
+			run.record('artifact-remaining', 'skip', 'blocked: earlier system or service cleanup is incomplete')
+			return
 	for image in sorted(directory.glob('*.AppImage')):
 		run.command('appimage-runtime', [str(image), '--appimage-version'])
 	for image in sorted(directory.glob('*.dmg')):
@@ -618,10 +708,7 @@ def artifacts(run):
 def fresh_install(run, cli, index, expected_version):
 	home = run.output / f'fresh-home-{index}'
 	home.mkdir(mode=0o700)
-	env = dict(os.environ, HOME=str(home), USERPROFILE=str(home), APPDATA=str(home / 'AppData/Roaming'))
-	for key in list(env):
-		if key.startswith('TESTD_'):
-			del env[key]
+	env = isolated_environment(HOME=str(home), USERPROFILE=str(home), APPDATA=str(home / 'AppData/Roaming'))
 	run.metadata.setdefault('binaries', {})[str(cli)] = file_digest(cli)
 	version = run.command('archive-version', [str(cli), '--version'], env=env).strip()
 	if version != f'testd {expected_version}':
@@ -744,6 +831,13 @@ def require_host_resolution(run, cli):
 	run.record('host-resolution', 'pass', 'the OS resolver resolves the host TLD')
 
 
+def isolated_environment(**values):
+	"""Do not pass operator tokens, host overrides, or provider settings to fixtures."""
+	env = {key: value for key, value in os.environ.items() if not key.upper().startswith('TESTD_')}
+	env.update(values)
+	return env
+
+
 class HostFixture:
 	"""A host the browser suite owns. An already-running host is left untouched."""
 
@@ -759,19 +853,17 @@ class HostFixture:
 		self.context = None
 
 	def __enter__(self):
-		try:
-			local_host_status(self.port)
-		except HostUnavailable:
-			self.started = True
-			self.start()
-			return self
-		raise RuntimeError('the browser suite found an existing host; stop it and rerun with the candidate CLI')
+		# Do not send even a status request to an unrelated listener.
+		check_ports([self.port])
+		self.started = True
+		self.start()
+		return self
 
 	def start(self):
 		name = 'host-fixture' if self.starts == 0 else f'host-fixture-restart-{self.starts}'
 		self.starts += 1
 		# The daemon's startup sweep must never invoke a real tunnel provider.
-		env = dict(os.environ, TESTD_TUNNEL=str(self.run.output))
+		env = isolated_environment(TESTD_TUNNEL=str(self.run.output))
 		self.context = self.run.serve(name, [str(self.cli), 'host'], env=env, stop_signal=signal.SIGINT)
 		self.process, self.output = self.context.__enter__()
 		try:
@@ -874,7 +966,7 @@ def browser(run):
 		url = f'https://app.releasecheck.test:{run.args.edge_port}/'
 		print(f'Open {url} in each browser. Do not bypass certificate warnings.\n'
 			'Run the checks and save the JSON report using the page. Ctrl+C stops only the fixtures.', flush=True)
-		env = dict(os.environ, TESTD_BROWSER_REPORT=str(run.output), TESTD_BROWSER_PORT=str(run.args.port),
+		env = isolated_environment(TESTD_BROWSER_REPORT=str(run.output), TESTD_BROWSER_PORT=str(run.args.port),
 			TESTD_BROWSER_TLD='test', TESTD_BROWSER_EDGE_PORT=str(run.args.edge_port))
 		command = [str(cli), 'run', '--host', f'127.0.0.1:{run.args.intake_port}',
 			f'app.releasecheck:{run.args.port}', f'api.releasecheck:{run.args.port}',
@@ -931,8 +1023,18 @@ def require_fresh_desktop_user():
 
 
 def desktop(run):
+	require_owned_product_integration()
 	if not run.args.app:
 		raise RuntimeError('provide --app with the candidate .app, .AppImage, or NSIS installer')
+	if SYSTEM == 'Linux' and not getattr(run.args, 'bin', None):
+		raise RuntimeError('provide --bin with the candidate CLI for ownership-checked system cleanup')
+	if SYSTEM == 'Linux':
+		cli = pathlib.Path(run.args.bin).expanduser().resolve()
+		if not cli.is_file() or not os.access(cli, os.X_OK):
+			raise RuntimeError(f'the candidate CLI is missing or not executable: {cli}')
+		run.args.bin = cli
+		cli_digest = file_digest(cli)
+		run.metadata.setdefault('binaries', {})[str(cli)] = cli_digest
 	if not sys.stdin.isatty():
 		raise RuntimeError('the desktop suite needs an interactive terminal; run it directly, '
 			'not through a pipe or with stdin redirected')
@@ -943,11 +1045,13 @@ def desktop(run):
 	items = checklist_items((ROOT / 'tests/host/gui-checklist.md').read_text(encoding=ENCODING))
 	if not items:
 		raise RuntimeError('no desktop checklist items were found')
+	if SYSTEM == 'Linux':
+		check_ports([7737, 7740, 443], [7753])
 	if ask('Confirm this is a disposable host with a persisted full-system backup [y/N]: ') != 'y':
 		raise RuntimeError('desktop validation requires a disposable host and persisted full-system backup')
 	snapshot = system_snapshot(run, DESKTOP_TLD, interactive=True)
 	print('This suite requires a real desktop session and actual interaction. '
-		'The scoped integration snapshot is restored after the candidate is stopped.', flush=True)
+		'Cleanup removes only proven owned integration after candidate shutdown.', flush=True)
 	command = ['open', str(app)] if SYSTEM == 'Darwin' else [str(app)]
 	app_log = run.log_path('desktop-app')
 	app_process = None
@@ -955,8 +1059,7 @@ def desktop(run):
 		# The app must not inherit the checklist's stdin. Its daemon logs belong
 		# in the report, not on top of the next prompt.
 		with app_log.open('xb') as sink:
-			env = dict(os.environ, TESTD_TUNNEL=str(run.output))
-			env.pop('TESTD_HOST_TLD', None)
+			env = isolated_environment(TESTD_TUNNEL=str(run.output))
 			app_process = subprocess.Popen(
 				command, stdin=subprocess.DEVNULL, stdout=sink, stderr=subprocess.STDOUT, env=env)
 		print(f'Candidate app output: {app_log}', flush=True)
@@ -980,6 +1083,8 @@ def desktop(run):
 			detail = ask('Evidence or reason (required for fail/not applicable): ')
 			if answer in ['f', 'n'] and not detail:
 				raise RuntimeError('a reason is required')
+			if answer == 'n':
+				detail = 'not applicable: ' + detail
 			run.record(item, {'p': 'pass', 'f': 'fail', 'n': 'skip'}[answer], detail)
 	finally:
 		if app_process is not None and SYSTEM == 'Linux' and app_process.poll() is None:
@@ -996,7 +1101,25 @@ def desktop(run):
 			run.record('system-restore', 'skip', f'shutdown not confirmed; stop processes and use --restore-report {run.output}')
 			raise
 		if stopped:
-			system_restore(run, snapshot, DESKTOP_TLD, interactive=True)
+			try:
+				try:
+					if SYSTEM == 'Linux':
+						check_ports([7737, 7740, 443], [7753])
+				except Exception as error:
+					run.record('fixture-shutdown', 'fail', str(error))
+					raise
+				run.record('fixture-shutdown', 'pass', 'operator confirmed shutdown and fixture ports are available')
+				try:
+					if SYSTEM == 'Linux':
+						if file_digest(cli) != cli_digest:
+							raise RuntimeError('the candidate CLI changed; no system cleanup was attempted')
+						cleanup_owned_linux_integration(run, cli, pathlib.Path.home(), DESKTOP_TLD, interactive=True)
+				except Exception as error:
+					if not any(item['name'] == 'system-owned-cleanup' and item['status'] == 'fail' for item in run.results):
+						run.record('system-owned-cleanup', 'fail', str(error))
+					raise
+			finally:
+				system_restore(run, snapshot, DESKTOP_TLD, interactive=True)
 		else:
 			run.metadata['incomplete'] = True
 			run.record('system-restore', 'skip', f'shutdown not confirmed; stop processes and use --restore-report {run.output}')
@@ -1041,8 +1164,7 @@ def restore_report(directory):
 		raise SystemExit(f'no system snapshot in {directory}; system checks are only run by '
 			'tests/release/run.py host --system')
 	status = 0
-	# Newest first: each snapshot describes the state before its own run, so the
-	# oldest one restores last and wins.
+	# Newest first; conflicting or unowned state is never replaced.
 	for created, path, manifest in sorted(snapshots, key=lambda item: item[0], reverse=True):
 		if manifest['system'] != SYSTEM:
 			raise SystemExit(f'the snapshot at {path} belongs to {manifest["system"]}; run this on that host')
@@ -1056,10 +1178,13 @@ def restore_report(directory):
 		if problems:
 			status = 1
 	if status:
-		print('\nThe host is not fully restored. Fix the cause and rerun this command.', flush=True)
-	else:
-		print(f'Restored and verified against every snapshot in {directory}', flush=True)
-	return status
+		print('\nThe scoped state is not restored. Inspect conflicts or restore the full-system snapshot.', flush=True)
+		return status
+	print(f'Scoped state verified against every snapshot in {directory}', flush=True)
+	if SYSTEM in ('Linux', 'Darwin'):
+		print('Shared trust-store output and hooks still need comparison with the full-system snapshot.', flush=True)
+		return 2
+	return 0
 
 
 def interrupt(signum, frame):
@@ -1069,19 +1194,18 @@ def interrupt(signum, frame):
 def require_disposable_host(parser, args):
 	if args.suite == 'all':
 		return
-	changes_system = args.suite in ('browser', 'desktop', 'service') or \
+	changes_system = args.suite in ('artifacts', 'browser', 'desktop', 'service') or \
 		args.suite == 'host' and (args.system or args.service)
-	changes_system |= args.suite == 'artifacts' and (args.service or args.host and args.system)
 	if not changes_system:
 		return
 	if args.report is None:
-		parser.error('system, browser, desktop, and service checks require a new persisted --report')
+		parser.error('artifact, system, browser, desktop, and service checks require a new persisted --report')
 	if helper('all_checks').is_ephemeral(args.report):
-		parser.error('system, browser, desktop, and service checks require a report outside temporary directories')
+		parser.error('artifact, system, browser, desktop, and service checks require a report outside temporary directories')
 	if args.report.exists() or args.report.is_symlink():
 		parser.error(f'report path already exists: {args.report}')
 	if not sys.stdin.isatty():
-		parser.error('system, browser, desktop, and service checks require an interactive terminal')
+		parser.error('artifact, system, browser, desktop, and service checks require an interactive terminal')
 	try:
 		answer = input('Confirm a disposable host with a persisted full-system snapshot; type yes: ')
 	except (EOFError, KeyboardInterrupt):
@@ -1137,11 +1261,21 @@ def main(argv=None):
 	args = parser.parse_args(argv)
 	match_redirected_encoding()
 	if args.restore_report:
+		if not sys.stdin.isatty():
+			parser.error('restoring system state requires an interactive terminal')
+		try:
+			answer = input('Confirm the candidate is stopped and review the persisted full-system snapshot; type yes: ')
+		except (EOFError, KeyboardInterrupt):
+			parser.error('system recovery was not confirmed')
+		if answer.strip().lower() != 'yes':
+			parser.error('system recovery was not confirmed')
 		return restore_report(args.restore_report)
 	if not args.suite:
 		parser.error('a suite is required unless --restore-report is given')
 	if args.suite == 'artifacts' and not args.artifacts:
 		parser.error('artifacts requires --artifacts')
+	if args.suite in ('host', 'artifacts') and args.system and args.service:
+		parser.error('--system and --service require separate runs and restored snapshots')
 	if args.suite == 'all':
 		all_checks = helper('all_checks')
 		all_checks.validate(parser, args)

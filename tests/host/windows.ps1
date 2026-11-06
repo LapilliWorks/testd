@@ -5,17 +5,14 @@
 #   powershell -ExecutionPolicy Bypass -File tests\host\windows.ps1
 #
 # The script uses a throwaway %APPDATA% and a high edge port. NRPT and trust
-# checks need a snapshot, so they only run through the runner, which restores the
-# integration afterwards:
-#   python tests\release\run.py host --system   # from an elevated shell
+# checks are blocked until Windows integration proves ownership.
 
 $ErrorActionPreference = 'Stop'
 # The runner captures this script through pipes and decodes UTF-8, as do the
 # native tools whose output the checks read.
 . "$PSScriptRoot\..\release\utf8-output.ps1"
-if ($env:TESTD_HOST_TEST_SYSTEM -eq '1' -and
-	-not ($env:TESTD_HOST_SNAPSHOT -and (Test-Path (Join-Path $env:TESTD_HOST_SNAPSHOT 'manifest.json')))) {
-	throw 'Run system checks through tests/release/run.py host --system so the integration is snapshotted first'
+if ($env:TESTD_HOST_TEST_SYSTEM -eq '1') {
+	throw 'Windows system checks are blocked until resolver and trust ownership is enforced; no state was changed'
 }
 $Root = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 Set-Location $Root
@@ -57,12 +54,17 @@ function Wait-Log([string]$Pattern, [string]$Path, [int]$Seconds = 30) {
 	return $false
 }
 
-function Ensure-Daemon {
-	if ($script:Daemon -and -not $script:Daemon.HasExited) { return $true }
-	Write-Host '      daemon is not running; restarting it for the system checks'
-	$script:Daemon = Start-Process -FilePath $TestdBin -ArgumentList 'host' -PassThru -NoNewWindow `
-		-RedirectStandardOutput $DaemonLog -RedirectStandardError $DaemonErr
-	return (Wait-Tcp '127.0.0.1' 7737 30)
+function Stop-FixtureProcess($Process) {
+	if ($null -eq $Process) { return }
+	try {
+		if (-not $Process.HasExited) {
+			$Process.Kill()
+			if (-not $Process.WaitForExit(5000)) { throw 'fixture process did not stop' }
+		}
+	} catch {
+		if ($Process.HasExited) { return }
+		throw
+	}
 }
 
 function Curl-Get([string]$HostName, [string]$Path = '/') {
@@ -74,12 +76,6 @@ function Curl-Get([string]$HostName, [string]$Path = '/') {
 function Curl-Status([string]$HostName, [string]$Path = '/') {
 	$url = "https://${HostName}:$EdgePort$Path"
 	& curl.exe --silent --max-time 10 --noproxy '*' --insecure --ssl-no-revoke `
-		--output NUL --write-out '%{http_code}' --resolve "${HostName}:${EdgePort}:127.0.0.1" $url
-}
-
-function System-Status([string]$HostName, [string]$Path = '/') {
-	$url = "https://${HostName}:$EdgePort$Path"
-	& curl.exe --silent --max-time 10 --noproxy '*' --ssl-no-revoke `
 		--output NUL --write-out '%{http_code}' --resolve "${HostName}:${EdgePort}:127.0.0.1" $url
 }
 
@@ -195,6 +191,10 @@ $OutputRoot = if ($env:TESTD_HOST_OUTPUT_DIR) { $env:TESTD_HOST_OUTPUT_DIR } els
 	Join-Path $env:LOCALAPPDATA 'testd\host-checks'
 }
 function Set-TestEnvironment([string]$HomeDirectory) {
+	$allowed = @('TESTD_BIN', 'TESTD_HOST_TLD', 'TESTD_HOST_EDGE_PORT', 'TESTD_HOST_APP_PORT',
+		'TESTD_HOST_LAUNCH_PORT', 'TESTD_HOST_OUTPUT_DIR', 'TESTD_HOST_TEST_SYSTEM', 'TESTD_HOST_SNAPSHOT')
+	Get-ChildItem Env: | Where-Object { $_.Name -like 'TESTD_*' -and $_.Name -notin $allowed } |
+		ForEach-Object { Remove-Item -LiteralPath "Env:$($_.Name)" }
 	$appData = Join-Path $HomeDirectory 'AppData\Roaming'
 	New-Item -ItemType Directory -Path $appData -Force | Out-Null
 	$env:APPDATA = $appData
@@ -219,8 +219,10 @@ $AppStop = Join-Path $TestHome 'app.stop'
 $Daemon = $null
 $AppJob = $null
 $ClientProc = $null
+$AccessProc = $null
 $LaunchId = ''
 
+try {
 Section 'host'
 $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
 if ($os) {
@@ -494,7 +496,8 @@ if ($approve.ExitCode -eq 0) {
 	Fail "testd approve delivers the token: $($approve.Text)"
 }
 for ($i = 0; $i -lt 50 -and $AccessProc -and -not $AccessProc.HasExited; $i++) { Start-Sleep -Milliseconds 200 }
-if ($AccessProc -and -not $AccessProc.HasExited) { Stop-Process -Id $AccessProc.Id -Force -ErrorAction SilentlyContinue }
+Stop-FixtureProcess $AccessProc
+$AccessProc = $null
 $credential = Join-Path $AppData 'testd\credentials\access-test'
 if ((Test-Path $credential) -and (Get-Item $credential).Length -gt 0) {
 	Pass 'the leaf saves the issued token'
@@ -516,7 +519,8 @@ if ($revoke.ExitCode -eq 0) {
 	Fail "testd tokens --revoke withdraws the token: $($revoke.Text)"
 }
 
-if ($ClientProc) { Stop-Process -Id $ClientProc.Id -Force -ErrorAction SilentlyContinue; $ClientProc = $null }
+Stop-FixtureProcess $ClientProc
+$ClientProc = $null
 $removed = $false
 for ($i = 0; $i -lt 20; $i++) {
 	if (Test-NameRemoved "app.testdproj.$Tld") { $removed = $true; break }
@@ -615,104 +619,7 @@ if ($url.ExitCode -ne 0 -and $url.Text -match 'unknown testd action') {
 }
 
 Section 'NRPT and trust'
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-	[Security.Principal.WindowsBuiltInRole]::Administrator)
-$daemonUp = $true
-if ($env:TESTD_HOST_TEST_SYSTEM -eq '1' -and $isAdmin) {
-	$daemonUp = Ensure-Daemon
-	if ($daemonUp) { Pass 'daemon running for the system checks' } else { Fail 'daemon running for the system checks' }
-}
-if ($env:TESTD_HOST_TEST_SYSTEM -eq '1' -and $isAdmin -and $daemonUp) {
-	$curlPath = (Get-Command curl.exe -ErrorAction SilentlyContinue).Source
-	if ($curlPath) {
-		Write-Host "      curl: $curlPath"
-		(& $curlPath --version | Select-Object -First 1) | ForEach-Object { Write-Host "      $_" }
-	} else {
-		Write-Host '      curl.exe not found on PATH'
-	}
-	# Keep the JSON document and the diagnostics apart into separate streams.
-	$doctorErr = Join-Path $TestHome 'doctor.err.txt'
-	$doctor = Invoke-Captured $TestdBin 'doctor', '--fix', '--json' $doctorErr
-	if ($doctor.ExitCode -eq 0) {
-		Pass 'doctor --fix'
-	} else {
-		Fail 'doctor --fix'
-		Get-Content $doctorErr -Encoding utf8 -ErrorAction SilentlyContinue | Select-Object -First 80 |
-			ForEach-Object { Write-Host "      $_" }
-	}
-	try {
-		$checks = @{}
-		($doctor.Text | ConvertFrom-Json).checks | ForEach-Object { $checks[$_.name] = $_.ok }
-		if ($checks['resolver'] -eq $true -and $checks['resolution'] -eq $true -and $checks['edge'] -eq $true) {
-			Pass 'resolver, name resolution, and edge'
-		} else {
-			Fail "resolver, name resolution, or edge: $($checks.GetEnumerator() | Out-String)"
-		}
-	} catch {
-		Fail "resolver, name resolution, or edge: $_"
-	}
-	$rootPath = Join-Path $Pki 'root.crt'
-	if (Test-Path $rootPath) {
-		try {
-			$pem = Get-Content $rootPath -Raw -Encoding utf8
-			$pattern = '-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----'
-			$base64 = [regex]::Match($pem, $pattern, 'Singleline').Groups[1].Value
-			$der = [Convert]::FromBase64String(($base64 -replace '\s', ''))
-			$rootThumb = ([System.Security.Cryptography.X509Certificates.X509Certificate2]::new([byte[]]$der)).Thumbprint
-			# Look the certificate up in the store itself: certutil's text is
-			# localized and prints the hash in spaced pairs.
-			$storeName = [System.Security.Cryptography.X509Certificates.StoreName]::Root
-			$storePlace = [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine
-			$store = [System.Security.Cryptography.X509Certificates.X509Store]::new($storeName, $storePlace)
-			$store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
-			try {
-				$installed = $store.Certificates.Find(
-					[System.Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint, $rootThumb, $false)
-			} finally {
-				$store.Close()
-			}
-			if ($installed.Count -gt 0) {
-				Pass "current root installed ($rootThumb)"
-			} else {
-				Fail "current root missing from the machine store ($rootThumb)"
-			}
-		} catch {
-			Skip "current root thumbprint: $_"
-		}
-	}
-	$rules = Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.Namespace -eq ".$Tld" }
-	if ($rules) {
-		Pass 'NRPT rule'
-	} else {
-		Fail 'NRPT rule'
-		Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
-			Format-Table Namespace, NameServers, Name | Out-String | Write-Host
-	}
-	if ((certutil -store Root) -match 'testd root') { Pass 'root trust store' } else { Fail 'root trust store' }
-	# No --insecure here: a 200 response confirms Schannel accepted the chain.
-	$systemStatus = System-Status "testd.$Tld" '/ok.svg'
-	if ($systemStatus -eq '200') {
-		Pass 'system trust (TLS accepted without --insecure)'
-	} else {
-		Fail "system trust (TLS accepted without --insecure): $systemStatus"
-	}
-	$resolverUrl = Invoke-Captured $TestdBin 'url', 'testd://fix/resolver'
-	if ($resolverUrl.ExitCode -eq 0) {
-		Pass 'testd url forwards the resolver repair'
-	} else {
-		Fail "testd url forwards the resolver repair: $($resolverUrl.Text)"
-	}
-	$certificateUrl = Invoke-Captured $TestdBin 'url', 'testd://fix/certificate'
-	if ($certificateUrl.ExitCode -eq 0) {
-		Pass 'testd url forwards the certificate repair'
-	} else {
-		Fail "testd url forwards the certificate repair: $($certificateUrl.Text)"
-	}
-} elseif ($env:TESTD_HOST_TEST_SYSTEM -eq '1') {
-	Fail 'system checks requested, but this PowerShell is not elevated; open PowerShell as Administrator and rerun'
-} else {
-	Skip 'system checks disabled (set TESTD_HOST_TEST_SYSTEM=1 in an elevated shell to test NRPT and trust)'
-}
+Skip 'system checks blocked until Windows resolver and trust ownership is enforced'
 
 Section 'launch at login'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
@@ -727,23 +634,31 @@ if ($runValue) {
 	Skip 'launch at login not configured yet (start the tray once): HKCU\...\Run\dev.testd.host'
 }
 
-Section 'cleanup'
-if ($env:TESTD_HOST_SNAPSHOT) {
-	Write-Host "integration: restored from $env:TESTD_HOST_SNAPSHOT by tests/release/run.py after this script"
+} finally {
+	Section 'cleanup'
+	Write-Host "config:      $TestHome"
+	$cleanupErrors = @()
+	foreach ($process in @($AccessProc, $ClientProc)) {
+		try { Stop-FixtureProcess $process } catch { $cleanupErrors += $_.ToString() }
+	}
+	if ($AppJob) {
+		try {
+			if (-not (Test-Path -LiteralPath $AppStop)) {
+				New-Item -ItemType File -Path $AppStop | Out-Null
+			}
+			if (-not (Wait-Job $AppJob -Timeout 5)) { Stop-Job $AppJob }
+			Remove-Job $AppJob -Force
+		} catch { $cleanupErrors += $_.ToString() }
+	}
+	if ($LaunchId) {
+		try {
+			$null = Dashboard-Post '/api/local/launches/stop' (@{ id = $LaunchId } | ConvertTo-Json -Compress)
+			if ($LASTEXITCODE -ne 0) { throw 'the fixture launch could not be stopped' }
+		} catch { $cleanupErrors += $_.ToString() }
+	}
+	try { Stop-FixtureProcess $Daemon } catch { $cleanupErrors += $_.ToString() }
+	if ($cleanupErrors.Count -gt 0) { throw ('fixture cleanup incomplete: ' + ($cleanupErrors -join '; ')) }
 }
-Write-Host "config:      $TestHome"
-
-if ($ClientProc) { Stop-Process -Id $ClientProc.Id -Force -ErrorAction SilentlyContinue; $ClientProc = $null }
-if ($AppJob) {
-	Set-Content -LiteralPath $AppStop -Value 'stop' -ErrorAction SilentlyContinue
-	$null = Wait-Job $AppJob -Timeout 5
-	Remove-Job $AppJob -Force -ErrorAction SilentlyContinue
-	$AppJob = $null
-}
-if ($LaunchId) {
-	try { $null = Dashboard-Post '/api/local/launches/stop' (@{ id = $LaunchId } | ConvertTo-Json -Compress) } catch { }
-}
-if ($Daemon) { Stop-Process -Id $Daemon.Id -Force -ErrorAction SilentlyContinue }
 
 Write-Host "`npassed $Passed, failed $Failed, skipped $Skipped"
 if ($Failed -ne 0) { exit 1 }
