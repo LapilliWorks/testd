@@ -3,7 +3,7 @@
 //! The server listens on a local UDP port and responds to A record queries for
 //! registered domains. Unknown A names get NXDOMAIN; other types receive no answer.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -85,9 +85,9 @@ impl Resolver for DnsResolver {
 	fn apply(&self, names: &[ResolvedName]) -> io::Result<()> {
 		let mut map = HashMap::new();
 		// Built-in domain always resolves to the answer address too.
-		map.insert(format!("testd.{}", self.tld), self.answer_addr);
+		insert_domain(&mut map, &format!("testd.{}", self.tld), self.answer_addr)?;
 		for name in names {
-			map.insert(name.domain.clone(), name.address);
+			insert_domain(&mut map, &name.domain, name.address)?;
 		}
 
 		// Update the shared state. block_in_place is fine: the lock is uncontended.
@@ -105,6 +105,24 @@ impl Resolver for DnsResolver {
 
 	fn cleanup(&self) -> io::Result<()> {
 		self.apply(&[])
+	}
+}
+
+fn canonical_name(name: &str) -> String {
+	name.trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn insert_domain(domains: &mut HashMap<String, Ipv4Addr>, name: &str, address: Ipv4Addr) -> io::Result<()> {
+	match domains.entry(canonical_name(name)) {
+		Entry::Vacant(entry) => {
+			entry.insert(address);
+			Ok(())
+		},
+		Entry::Occupied(entry) if *entry.get() == address => Ok(()),
+		Entry::Occupied(entry) => Err(io::Error::new(
+			io::ErrorKind::InvalidInput,
+			format!("conflicting DNS addresses for {}: {} and {address}", entry.key(), entry.get()),
+		)),
 	}
 }
 
@@ -128,19 +146,25 @@ async fn handle_query(query_bytes: &[u8], domains: &DomainMap, tld: &str) -> Res
 	let mut response = query.into_reply();
 	response.set_flags(PacketFlag::AUTHORITATIVE_ANSWER);
 
-	let tld_suffix = format!(".{tld}");
+	let tld_suffix = format!(".{}", canonical_name(tld));
 	let mut unknown_name = false;
 
 	for question in response.questions.iter() {
-		// simple_dns omits the trailing dot; normalize to be safe.
-		let name = question.qname.to_string();
-		let name = name.trim_end_matches('.');
-
 		if question.qtype != QTYPE::TYPE(simple_dns::TYPE::A) || question.qclass != QCLASS::CLASS(simple_dns::CLASS::IN)
 		{
 			continue;
 		}
 
+		/* Display conversion must not merge label boundaries or replace invalid bytes. */
+		if question
+			.qname
+			.as_bytes()
+			.any(|label| label.contains(&b'.') || std::str::from_utf8(label).is_err())
+		{
+			unknown_name = true;
+			continue;
+		}
+		let name = canonical_name(&question.qname.to_string());
 		if !name.ends_with(&tld_suffix) {
 			// Not our zone: answer authoritatively with NXDOMAIN.
 			unknown_name = true;
@@ -149,7 +173,7 @@ async fn handle_query(query_bytes: &[u8], domains: &DomainMap, tld: &str) -> Res
 
 		let map = domains.read().await;
 
-		match map.get(name) {
+		match map.get(&name) {
 			Some(&ip) => push_a(&mut response.answers, question, ip),
 			None => unknown_name = true,
 		}
@@ -216,7 +240,7 @@ mod tests {
 		let domains: DomainMap = Arc::new(RwLock::new(HashMap::new()));
 		domains.write().await.insert("myapp.test".into(), Ipv4Addr::LOCALHOST);
 
-		for name in ["nope.test", "other.dev", "myapp.test.example", "myapptest"] {
+		for name in ["nope.test", "NOPE.TEST", "other.dev", "OTHER.DEV", "myapp.test.example", "myapptest"] {
 			let reply = handle_query(&query(name, TYPE::A, CLASS::IN), &domains, "test").await.unwrap();
 			let packet = Packet::parse(&reply).unwrap();
 			assert_eq!(packet.rcode(), RCODE::NameError, "{name}");
@@ -239,16 +263,98 @@ mod tests {
 	}
 
 	#[tokio::test]
-	#[ignore = "DNS lookup currently matches letter case; required before relying on mixed-case queries"]
 	async fn dns_labels_are_case_insensitive() {
 		let domains: DomainMap = Arc::new(RwLock::new(HashMap::new()));
 		domains.write().await.insert("myapp.test".into(), Ipv4Addr::LOCALHOST);
 
-		for name in ["myapp.test", "MYAPP.TEST", "MyApP.TeSt"] {
+		for name in ["myapp.test", "MYAPP.TEST", "MYAPP.test", "myapp.TEST", "MyApP.TeSt", "MyApP.TeSt."] {
 			let reply = handle_query(&query(name, TYPE::A, CLASS::IN), &domains, "test").await.unwrap();
 			let packet = Packet::parse(&reply).unwrap();
 			assert_eq!(packet.rcode(), RCODE::NoError, "{name}");
 			assert_eq!(packet.answers.len(), 1, "{name}");
+			assert_eq!(packet.answers[0].rdata, RData::A(A { address: u32::from(Ipv4Addr::LOCALHOST) }), "{name}");
+			assert_eq!(packet.questions[0].qname.to_string(), name.trim_end_matches('.'));
+			assert_eq!(packet.answers[0].name.to_string(), name.trim_end_matches('.'));
+		}
+	}
+
+	async fn resolver(tld: &str) -> DnsResolver {
+		let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		DnsResolver::start_with_socket(tld, Ipv4Addr::LOCALHOST, testd_setup::Elevation::Sudo, socket).unwrap()
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn applied_names_and_the_configured_zone_are_case_insensitive() {
+		let resolver = resolver("TeSt").await;
+		let address = Ipv4Addr::new(192, 0, 2, 42);
+		resolver
+			.apply(&[
+				ResolvedName::new("MyApp.TeSt", address),
+				ResolvedName::new("MYAPP.TEST", address),
+				ResolvedName::new("myapp.test.", address),
+			])
+			.unwrap();
+
+		for (name, expected) in [("myapp.test", address), ("MYAPP.TEST", address), ("TESTD.TEST", Ipv4Addr::LOCALHOST)]
+		{
+			let reply = handle_query(&query(name, TYPE::A, CLASS::IN), &resolver.domains, "TeSt")
+				.await
+				.unwrap();
+			let packet = Packet::parse(&reply).unwrap();
+			assert_eq!(packet.rcode(), RCODE::NoError, "{name}");
+			assert_eq!(packet.answers.len(), 1, "{name}");
+			assert_eq!(packet.answers[0].rdata, RData::A(A { address: u32::from(expected) }), "{name}");
+		}
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn conflicting_case_variants_leave_the_previous_state_unchanged() {
+		let resolver = resolver("test").await;
+		let first = Ipv4Addr::new(192, 0, 2, 1);
+		let second = Ipv4Addr::new(192, 0, 2, 2);
+		resolver.apply(&[ResolvedName::new("kept.test", first)]).unwrap();
+
+		for names in [
+			vec![ResolvedName::new("New.test", first), ResolvedName::new("NEW.TEST", second)],
+			vec![ResolvedName::new("TESTD.TEST", first)],
+		] {
+			let error = resolver.apply(&names).unwrap_err();
+			assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+			assert!(error.to_string().contains("conflicting DNS addresses"));
+			let reply = handle_query(&query("kept.test", TYPE::A, CLASS::IN), &resolver.domains, "test")
+				.await
+				.unwrap();
+			let packet = Packet::parse(&reply).unwrap();
+			assert_eq!(packet.rcode(), RCODE::NoError);
+			assert_eq!(packet.answers.len(), 1);
+			assert_eq!(packet.answers[0].rdata, RData::A(A { address: u32::from(first) }));
+			let map = resolver.domains.read().await;
+			assert_eq!(map.len(), 2);
+			assert_eq!(map.get("kept.test"), Some(&first));
+			assert_eq!(map.get("testd.test"), Some(&Ipv4Addr::LOCALHOST));
+		}
+	}
+
+	#[tokio::test]
+	async fn ambiguous_wire_labels_cannot_impersonate_mapped_names() {
+		let domains: DomainMap = Arc::new(RwLock::new(HashMap::new()));
+		domains.write().await.insert("myapp.test".into(), Ipv4Addr::LOCALHOST);
+		domains.write().await.insert("my\u{fffd}app.test".into(), Ipv4Addr::LOCALHOST);
+		for label_bytes in [vec![&b"myapp.test"[..]], vec![&b"my\xffapp"[..], &b"test"[..]]] {
+			let labels: Vec<_> = label_bytes.into_iter().map(simple_dns::Label::new_unchecked).collect();
+			let mut packet = Packet::new_query(1);
+			packet.questions.push(Question::new(
+				Name::new_with_labels(&labels),
+				QTYPE::TYPE(TYPE::A),
+				QCLASS::CLASS(CLASS::IN),
+				false,
+			));
+			let reply = handle_query(&packet.build_bytes_vec().unwrap(), &domains, "test")
+				.await
+				.unwrap();
+			let reply = Packet::parse(&reply).unwrap();
+			assert_eq!(reply.rcode(), RCODE::NameError, "{labels:?}");
+			assert!(reply.answers.is_empty(), "{labels:?}");
 		}
 	}
 

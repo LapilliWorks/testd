@@ -244,14 +244,20 @@ async fn exercise_lifecycle() {
 	let mut host = Host::start().await;
 	let upstream = host.add_upstream("first").await;
 	let name = host.name();
+	let uppercase_name = name.to_ascii_uppercase();
+	let mixed_case_name = format!("App.Example.{}", host.tld.to_ascii_uppercase());
 	let dashboard = format!("testd.{}", host.tld);
 	assert_eq!(dns_query(host.dns, &dashboard).await, (RCODE::NoError, vec![Ipv4Addr::LOCALHOST]));
+	assert_eq!(dns_query(host.dns, &dashboard.to_ascii_uppercase()).await, (RCODE::NoError, vec![Ipv4Addr::LOCALHOST]));
 	assert_eq!(dns_query(host.dns, &name).await, (RCODE::NameError, vec![]));
+	assert_eq!(dns_query(host.dns, &uppercase_name).await, (RCODE::NameError, vec![]));
 
 	let (mut owner, authentication) = Client::connect(host.intake, SECRET).await;
 	assert!(matches!(authentication, Response::Ok));
 	assert!(matches!(owner.register(upstream).await, Response::Ok));
-	assert_eq!(dns_query(host.dns, &name).await, (RCODE::NoError, vec![Ipv4Addr::LOCALHOST]));
+	for query in [&name, &uppercase_name, &mixed_case_name] {
+		assert_eq!(dns_query(host.dns, query).await, (RCODE::NoError, vec![Ipv4Addr::LOCALHOST]));
+	}
 	let response = https_request(&host, &name).await;
 	assert!(response.starts_with("HTTP/1.1 200"), "{response}");
 	assert!(response.contains(&format!("first GET /health?source=contract {name}:{}", host.edge.tls_addr.port())));
@@ -264,6 +270,7 @@ async fn exercise_lifecycle() {
 
 	drop(owner);
 	wait_for_name_removal(&host).await;
+	assert_eq!(dns_query(host.dns, &uppercase_name).await, (RCODE::NameError, vec![]));
 	assert!(tls_connect(&host, &name, Trust::LocalRoot).await.is_err(), "an unregistered name must not receive a leaf");
 	assert_eq!(dns_query(host.dns, &dashboard).await, (RCODE::NoError, vec![Ipv4Addr::LOCALHOST]));
 }
