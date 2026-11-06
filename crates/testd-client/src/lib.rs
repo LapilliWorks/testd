@@ -570,8 +570,8 @@ mod tests {
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let addr = listener.local_addr().unwrap();
 		let (registered, ready) = tokio::sync::oneshot::channel();
+		let (client_stopped, wait_for_stop) = tokio::sync::oneshot::channel();
 		let server = tokio::spawn(async move {
-			let mut registered = Some(registered);
 			for attempt in 0..2 {
 				let (stream, _) = listener.accept().await.unwrap();
 				let (reader, mut writer) = stream.into_split();
@@ -585,8 +585,10 @@ mod tests {
 						.unwrap();
 				} else {
 					protocol::send(&mut writer, &Response::Ok).await.unwrap();
-					registered.take().unwrap().send(()).unwrap();
-					let _: Option<Request> = protocol::recv(&mut reader).await.unwrap();
+					registered.send(()).unwrap();
+					/* Closing an unread reply may reset the socket instead of producing EOF. */
+					wait_for_stop.await.unwrap();
+					break;
 				}
 			}
 		});
@@ -611,6 +613,7 @@ mod tests {
 		// Stop may win while the second registration reply is still in flight.
 		assert!(matches!(outcome, LoopEnd::Stopped { .. }));
 		drop(outcome);
+		client_stopped.send(()).unwrap();
 		tokio::time::timeout(Duration::from_secs(5), server)
 			.await
 			.expect("server did not stop")
