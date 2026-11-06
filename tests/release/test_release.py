@@ -79,6 +79,23 @@ class ReleaseTests(unittest.TestCase):
 		self.assertIn("str(pathlib.Path('tests/release/browser.test.ts').resolve())", test_job)
 		self.assertNotIn('bun test tests/release/browser.test.ts', test_job)
 
+	@unittest.skipUnless(shutil.which('bun'), 'Bun is not installed')
+	def test_link_checker_uses_the_isolated_site_output(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			root = pathlib.Path(temporary).resolve()
+			(root / 'docs').mkdir()
+			(root / 'index.html').write_text('<a href="/docs/">Docs</a>', encoding='utf-8')
+			(root / 'docs/index.html').write_text('<h1 id="top">Docs</h1>', encoding='utf-8')
+			env = {**os.environ, 'TESTD_SITE_OUT_DIR': str(root)}
+			command = ['bun', str(ROOT / 'scripts/check-links.ts')]
+			result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True, timeout=30)
+			self.assertEqual(result.returncode, 0, result.stderr)
+			self.assertIn('2 pages ok', result.stdout)
+			(root / 'index.html').write_text('<a href="/missing">Missing</a>', encoding='utf-8')
+			result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True, timeout=30)
+			self.assertNotEqual(result.returncode, 0)
+			self.assertIn('/missing', result.stderr)
+
 	def test_release_core_runs_known_contracts_in_both_rust_test_modes(self):
 		for nextest in (True, False):
 			with self.subTest(nextest=nextest):
@@ -286,6 +303,15 @@ class PlatformSequenceTests(unittest.TestCase):
 			runner.audit(run)
 		self.assertEqual([call.args[0] for call in required.call_args_list], ['cargo', 'rustup', 'cargo-deny'])
 		self.assertEqual(run.command.call_args.args[1], ['cargo', '+stable', 'deny', '--workspace', '--locked', 'check'])
+
+	def test_service_suite_loads_its_helper_from_the_release_runner_directory(self):
+		run = Mock()
+		checks = Mock()
+		with patch.object(runner, 'helper', return_value=checks) as helper, \
+			patch.object(runner, 'binary', return_value=pathlib.Path('candidate')):
+			runner.service(run)
+		helper.assert_called_once_with('service')
+		checks.run_service.assert_called_once_with(run, pathlib.Path('candidate'), runner.SYSTEM)
 
 	def test_candidate_build_flags_distinguish_checkouts_and_preserve_existing_flags(self):
 		run = Mock(metadata={'commit': 'fixture'})
@@ -580,6 +606,38 @@ class SystemStateTests(unittest.TestCase):
 		with patch.object(state, 'Host', return_value=host), redirect_stdout(io.StringIO()):
 			problems = state.self_test('Linux')
 		self.assertTrue(any('already installed' in problem for problem in problems), problems)
+
+	def test_self_test_retains_a_new_workdir_and_restores_after_an_exception(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			host = FakeHost()
+			workdir = pathlib.Path(temporary) / 'persisted'
+			path = state.files(host)[0]['path']
+			def failed_install(host, directory, workdir):
+				host.files[path] = b'partial fixture'
+				raise RuntimeError('fixture failed')
+			with patch.object(state, 'Host', return_value=host), \
+				patch.object(state, 'install_fixture', side_effect=failed_install), redirect_stdout(io.StringIO()):
+				with self.assertRaisesRegex(RuntimeError, 'fixture failed'):
+					state.self_test('Linux', workdir=workdir)
+			self.assertNotIn(path, host.files)
+			self.assertTrue((workdir / 'system-before' / state.MANIFEST).is_file())
+			self.assertTrue((workdir / 'system-before' / state.RESTORED).is_file())
+
+	def test_self_test_never_reuses_an_existing_workdir(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			workdir = pathlib.Path(temporary) / 'existing'
+			workdir.mkdir()
+			marker = workdir / 'keep'
+			marker.write_text('existing evidence', encoding='utf-8')
+			with patch.object(state, 'Host', return_value=FakeHost()), self.assertRaises(FileExistsError):
+				state.self_test('Linux', workdir=workdir)
+			self.assertEqual(marker.read_text(encoding='utf-8'), 'existing evidence')
+
+	def test_self_test_cli_forwards_the_workdir(self):
+		workdir = pathlib.Path('persisted-self-test')
+		with patch.object(state, 'self_test', return_value=[]) as self_test, redirect_stdout(io.StringIO()):
+			self.assertEqual(state.main(['--self-test', '--workdir', str(workdir)]), 0)
+		self_test.assert_called_once_with(workdir=workdir)
 
 	def test_restore_targets_match_the_product(self):
 		"""The suite must restore the paths testd-setup writes, not a copy of them."""

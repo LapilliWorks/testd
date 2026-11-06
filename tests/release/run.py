@@ -625,8 +625,7 @@ def assert_preserved_config(before, after, section=''):
 
 
 def service(run):
-	import service as service_checks
-	service_checks.run_service(run, binary(run), SYSTEM)
+	helper('service').run_service(run, binary(run), SYSTEM)
 
 
 class HostUnavailable(RuntimeError):

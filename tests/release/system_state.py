@@ -491,7 +491,29 @@ def fixture_present(host, directory):
 	return []
 
 
-def self_test(system=None, tld=SELF_TEST_TLD):
+def self_test_in_workdir(host, workdir):
+	"""Keep the snapshot available even when a fixture or restore fails."""
+	directory = workdir / 'system-before'
+	print(f'host: {host.system}, snapshot: {directory}', flush=True)
+	snapshot(host, directory, self_test_artifacts(host))
+	present = occupied(directory)
+	if present:
+		return [f'{item} is already installed; the self-test needs a host without testd integration'
+			for item in present]
+	problems = []
+	try:
+		problems = install_fixture(host, directory, workdir)
+		if not problems:
+			problems = fixture_present(host, directory)
+	finally:
+		print('restoring the self-test snapshot', flush=True)
+		restore_problems = restore(host, directory)
+		for problem in restore_problems:
+			print(f'fail     restore: {problem}; snapshot: {directory}', flush=True)
+	return list(dict.fromkeys(problems + restore_problems))
+
+
+def self_test(system=None, tld=SELF_TEST_TLD, workdir=None):
 	"""Snapshot, install a fixture, restore, verify on a host with no integration.
 
 	This is the check CI runs on disposable runners: it exercises the real
@@ -500,33 +522,24 @@ def self_test(system=None, tld=SELF_TEST_TLD):
 	would replace a live root or route for the duration of the round trip.
 	"""
 	host = Host(system or platform.system(), tld)
+	if workdir is not None:
+		workdir = pathlib.Path(workdir)
+		workdir.mkdir(parents=True, mode=0o700, exist_ok=False)
+		return self_test_in_workdir(host, workdir)
 	with tempfile.TemporaryDirectory(prefix='testd-restore-') as temporary:
-		workdir = pathlib.Path(temporary)
-		directory = workdir / 'system-before'
-		print(f'host: {host.system}, snapshot: {directory}', flush=True)
-		snapshot(host, directory, self_test_artifacts(host))
-		present = occupied(directory)
-		if present:
-			return [f'{item} is already installed; the self-test needs a host without testd integration'
-				for item in present]
-		problems = install_fixture(host, directory, workdir)
-		if not problems:
-			problems = fixture_present(host, directory)
-		if problems:
-			# A fixture that only partly landed still has to be taken back out.
-			return list(dict.fromkeys(problems + restore(host, directory)))
-		print('fixture installed; restoring', flush=True)
-		return restore(host, directory)
+		return self_test_in_workdir(host, pathlib.Path(temporary))
 
 
 def main(argv=None):
 	parser = argparse.ArgumentParser(description=__doc__)
 	parser.add_argument('--self-test', action='store_true',
 		help='snapshot, fixture, restore, and verify the real integration paths')
+	parser.add_argument('--workdir', type=pathlib.Path,
+		help='new persisted directory in which to retain the self-test snapshot and fixtures')
 	args = parser.parse_args(argv)
 	if not args.self_test:
 		parser.error('nothing to do; pass --self-test')
-	problems = self_test()
+	problems = self_test(workdir=args.workdir)
 	for problem in problems:
 		print(f'fail     {problem}', flush=True)
 	if problems:

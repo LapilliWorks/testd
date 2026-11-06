@@ -2,7 +2,9 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = fileURLToPath(new URL('../dist', import.meta.url));
+const root = process.env.TESTD_SITE_OUT_DIR
+	? resolve(process.env.TESTD_SITE_OUT_DIR)
+	: fileURLToPath(new URL('../dist', import.meta.url));
 
 if (!existsSync(join(root, 'index.html'))) {
 	console.error('check-links: dist/index.html is missing; run `bun run build` first');
