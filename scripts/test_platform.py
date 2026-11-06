@@ -129,6 +129,24 @@ def runner_arguments(parser, args):
 	return command
 
 
+def require_compatible_runner(parser):
+	required = ('main', 'automated', 'contracts', 'audit', 'native_build_target',
+		'backup_build_candidate', 'candidate_build_environment')
+	missing = [name for name in required if not callable(getattr(runner, name, None))]
+	if missing:
+		parser.error('tests/release/run.py is out of sync with these scripts; update the entire checkout '
+			f'(missing: {", ".join(missing)})')
+
+
+def run_cli(arguments):
+	original_argv = sys.argv
+	try:
+		sys.argv = [original_argv[0], *arguments]
+		return runner.main()
+	finally:
+		sys.argv = original_argv
+
+
 def main(expected, arguments=None):
 	parser = parser_for(expected)
 	args = parser.parse_args(arguments)
@@ -136,4 +154,5 @@ def main(expected, arguments=None):
 	if actual != expected:
 		label = 'macOS' if expected == 'Darwin' else expected
 		parser.error(f'this script requires {label}; detected {actual}')
-	return runner.main(runner_arguments(parser, args))
+	require_compatible_runner(parser)
+	return run_cli(runner_arguments(parser, args))
