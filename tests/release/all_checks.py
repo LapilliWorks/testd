@@ -2,6 +2,7 @@
 
 import copy
 import ctypes
+import json
 import os
 import pathlib
 import platform
@@ -47,7 +48,11 @@ def is_ephemeral(path):
 
 def validate(parser, args):
 	if platform.system() not in ('Linux', 'Darwin', 'Windows'):
-		parser.error('all supports Linux, macOS, and Windows')
+		parser.error('all and ci support Linux, macOS, and Windows')
+	if args.suite == 'ci' and (args.system or args.interactive or args.app or args.artifacts or
+			args.previous_bin or args.no_previous_release or getattr(args, 'browser_engine', None) or
+			getattr(args, 'service', False) or getattr(args, 'host', False)):
+		parser.error('ci excludes system, service, artifact, desktop, and real-browser checks')
 	for name, port, maximum in [('port', args.port, 65534), ('edge-port', args.edge_port, 65535),
 			('intake-port', args.intake_port, 65535)]:
 		if not 1 <= port <= maximum:
@@ -66,7 +71,7 @@ def validate(parser, args):
 		parser.error('all --system requires an interactive terminal and a new persisted --report')
 	base = args.report or pathlib.Path(os.environ.get('LOCALAPPDATA', pathlib.Path.home() / '.local/share'))
 	if is_ephemeral(base):
-		parser.error('all needs a persisted report outside temporary directories')
+		parser.error('all and ci need a persisted report outside temporary directories')
 	if args.report:
 		args.report = args.report.expanduser().absolute()
 		if args.report.exists() or args.report.is_symlink():
@@ -114,7 +119,7 @@ class AllChecks:
 		cargo = ('cargo', 'rustup')
 		nextest = (*cargo, 'cargo-nextest')
 		output = self.api.NEXTEST_OUTPUT_OPTIONS if self.api else ()
-		return [
+		stages = [
 			Stage('format', self.command('format', ['cargo', '+stable', 'fmt', '--all', '--', '--check'], cargo)),
 			Stage('clippy-cli', self.command('clippy-cli', ['cargo', '+stable', 'clippy', '--workspace',
 				'--all-targets', '--exclude', 'testd-gui', '--locked', '--', '-D', 'warnings'], cargo)),
@@ -176,6 +181,7 @@ class AllChecks:
 				precondition=self.probe_available,
 				checkpoint='Use a separate, clean disposable host; the macOS probe changes resolver and trust state.'),
 		]
+		return [stage for stage in stages if self.args.suite != 'ci' or not stage.system]
 
 	def command(self, name, argv, tools, timeout=1200, environment=None, skip_pattern=None):
 		def action(child):
@@ -268,7 +274,10 @@ class AllChecks:
 		child.args.bin = self.require_candidate()
 		child.args.system = False
 		child.args.service = False
-		self.api.host(child)
+		if self.args.suite == 'ci':
+			self.api.host(child, scope='ci')
+		else:
+			self.api.host(child)
 
 	def artifacts_available(self):
 		if not self.args.artifacts:
@@ -494,10 +503,22 @@ class AllChecks:
 			self.boundary(f'========== END [{index:02d}/{total:02d}] {stage.name}: {status.upper()} ==========')
 
 	def summary(self):
-		self.boundary('\n========== ALL TESTS: SUMMARY ==========')
+		label = 'CI' if self.args.suite == 'ci' else 'ALL'
+		self.boundary(f'\n========== {label} TESTS: SUMMARY ==========')
 		for outcome in self.outcomes:
 			self.boundary(f'{outcome["status"].upper():14} {outcome["name"]}: {outcome["detail"]}')
 		self.boundary(f'Report: {self.run.output / "report.json"}')
+		if self.args.suite == 'ci':
+			self.write_ci_summary()
+
+	def write_ci_summary(self):
+		# Full reports can contain fixture credentials and keys; publish only allowlisted status metadata.
+		summary = {name: self.run.metadata.get(name) for name in ('os', 'python', 'commit', 'dirty')}
+		summary['suite'] = 'ci'
+		summary['stages'] = [{name: outcome[name] for name in ('name', 'status', 'seconds')}
+			for outcome in self.outcomes]
+		path = self.run.output / 'ci-summary.json'
+		path.write_text(json.dumps(summary, indent=2) + '\n', encoding='utf-8')
 
 	def execute(self):
 		with (self.run.output / 'boundaries.log').open('x', encoding='utf-8') as self.boundary_log:

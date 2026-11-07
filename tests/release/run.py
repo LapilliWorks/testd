@@ -560,7 +560,7 @@ def host_fixture_home(directory):
 	return candidates[0]
 
 
-def record_host_coverage(run, text):
+def record_host_coverage(run, text, *, scope='host'):
 	match = re.search(r'(?m)^passed (\d+), failed (\d+), skipped (\d+)\s*$', text)
 	if not match:
 		run.metadata['incomplete'] = True
@@ -584,12 +584,21 @@ def record_host_coverage(run, text):
 	uncovered = [reason for reason in reasons if reason not in separate]
 	if separate:
 		run.record('host-system-coverage', 'skip', 'not applicable: system checks are reported separately')
+	if scope == 'ci' and not run.args.system:
+		desktop = [reason for reason in uncovered if reason.startswith((
+			'launch at login not configured yet (start the tray once): ',
+			'launch-at-login entry not validated against the candidate ('))]
+		uncovered = [reason for reason in uncovered if reason not in desktop]
+		if desktop:
+			run.record('host-desktop-coverage', 'skip', 'not applicable: ci excludes actual tray and login validation')
 	if uncovered:
 		run.metadata['incomplete'] = True
 		run.record('host-coverage', 'skip', 'blocked: ' + '; '.join(uncovered))
 
 
-def host(run):
+def host(run, *, scope='host'):
+	if scope == 'ci' and run.args.system:
+		raise RuntimeError('ci host checks cannot change system integration')
 	if run.args.system:
 		require_owned_product_integration()
 	cli = binary(run)
@@ -619,7 +628,7 @@ def host(run):
 		# credential was validated on. Plain runs keep fixtures off the operator's
 		# stdin.
 		text = run.command('host-checks', command, 600, env, terminal=run.args.system)
-		record_host_coverage(run, text)
+		record_host_coverage(run, text, scope=scope)
 		if run.args.system:
 			if 'ok    doctor --fix' not in text:
 				raise RuntimeError('requested system checks did not run successfully')
@@ -1501,7 +1510,7 @@ def interrupt(signum, frame):
 
 
 def require_disposable_host(parser, args):
-	if args.suite == 'all':
+	if args.suite in ('all', 'ci'):
 		return
 	changes_system = args.suite in ('artifacts', 'browser', 'desktop', 'service') or \
 		args.suite == 'host' and (args.system or args.service)
@@ -1544,7 +1553,7 @@ def main(argv=None):
 		if hasattr(stream, 'reconfigure'):
 			stream.reconfigure(encoding=ENCODING)
 	parser = argparse.ArgumentParser(description=__doc__)
-	parser.add_argument('suite', nargs='?', choices=['automated', 'contracts', 'audit', 'all', 'core', 'host',
+	parser.add_argument('suite', nargs='?', choices=['automated', 'contracts', 'audit', 'all', 'ci', 'core', 'host',
 		'artifacts', 'browser', 'desktop', 'service'])
 	parser.add_argument('--report', type=pathlib.Path, help='new persisted report directory')
 	parser.add_argument('--include-git-diff', action='store_true',
@@ -1565,7 +1574,7 @@ def main(argv=None):
 	previous.add_argument('--previous-bin', type=pathlib.Path, help='previous CLI for artifact upgrade checks')
 	previous.add_argument('--no-previous-release', action='store_true', help='record upgrade checks as not applicable')
 	parser.add_argument('--interactive', action='store_true', help='include real browser, desktop, and manual checks')
-	parser.add_argument('--plan', action='store_true', help='list all stages without running them')
+	parser.add_argument('--plan', action='store_true', help='list all or ci stages without running them')
 	parser.add_argument('--port', type=int, default=19080)
 	parser.add_argument('--edge-port', type=int, default=443)
 	parser.add_argument('--intake-port', type=int, default=7737)
@@ -1591,14 +1600,14 @@ def main(argv=None):
 		parser.error('--browser-engine requires browser or all')
 	if args.suite in ('host', 'artifacts') and args.system and args.service:
 		parser.error('--system and --service require separate runs and restored snapshots')
-	if args.suite == 'all':
+	if args.suite in ('all', 'ci'):
 		all_checks = helper('all_checks')
 		all_checks.validate(parser, args)
 		if args.plan:
 			all_checks.print_plan(args)
 			return 0
 	elif args.interactive or args.plan or args.no_previous_release:
-		parser.error('--interactive, --plan, and --no-previous-release are only available for all')
+		parser.error('--interactive and --no-previous-release require all; --plan requires all or ci')
 	require_disposable_host(parser, args)
 	# A supervisor restarting or an operator stopping the run must still restore.
 	for number in ('SIGTERM', 'SIGHUP'):
@@ -1607,7 +1616,7 @@ def main(argv=None):
 	run = Run(args)
 	with run_transcript(run):
 		try:
-			if args.suite == 'all':
+			if args.suite in ('all', 'ci'):
 				all_suites(run)
 			else:
 				globals()[args.suite](run)

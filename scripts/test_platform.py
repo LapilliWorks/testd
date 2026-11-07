@@ -39,19 +39,19 @@ def parser_for(expected):
 		epilog='See tests/README.md and tests/manual/ for prerequisites, evidence, and known release blockers.',
 	)
 	parser.add_argument('suite', nargs='?', default='automated',
-		choices=('automated', 'all', 'contracts', 'audit', 'host', 'browser', 'desktop'),
-		help='automated (default), all checks, release contracts, dependency audit, host, browser, or desktop')
-	parser.add_argument('--gui', action='store_true', help='include the GUI workspace (already included in all)')
+		choices=('automated', 'all', 'ci', 'contracts', 'audit', 'host', 'browser', 'desktop'),
+		help='automated (default), all checks, unprivileged CI checks, contracts, audit, host, browser, or desktop')
+	parser.add_argument('--gui', action='store_true', help='include the GUI workspace (already included in all and ci)')
 	candidate = parser.add_mutually_exclusive_group()
-	candidate.add_argument('--bin', type=pathlib.Path, help='existing candidate CLI; all otherwise builds one')
-	candidate.add_argument('--build', action='store_true', help='build a candidate CLI (the default for all)')
+	candidate.add_argument('--bin', type=pathlib.Path, help='existing candidate CLI; all and ci otherwise build one')
+	candidate.add_argument('--build', action='store_true', help='build a candidate CLI (the default for all and ci)')
 	parser.add_argument('--app', type=pathlib.Path, help='candidate app or installer for desktop checks')
 	parser.add_argument('--artifacts', type=pathlib.Path, help='candidate assets and checksum manifest for all')
 	previous = parser.add_mutually_exclusive_group()
 	previous.add_argument('--previous-bin', type=pathlib.Path, help='previous CLI for upgrade and rollback checks')
 	previous.add_argument('--no-previous-release', action='store_true', help='mark prior-release checks not applicable')
 	parser.add_argument('--interactive', action='store_true', help='include real browser, desktop, and manual checks')
-	parser.add_argument('--plan', action='store_true', help='list all stages without running them')
+	parser.add_argument('--plan', action='store_true', help='list all or ci stages without running them')
 	parser.add_argument('--report', type=pathlib.Path, help='new persisted report directory')
 	parser.add_argument('--include-git-diff', action='store_true',
 		help='save sensitive tracked changes in the private report')
@@ -65,19 +65,20 @@ def parser_for(expected):
 
 
 def validate_options(parser, args):
-	if args.gui and args.suite not in ('automated', 'all'):
-		parser.error('--gui is only available for automated or all checks')
+	if args.gui and args.suite not in ('automated', 'all', 'ci'):
+		parser.error('--gui is only available for automated, all, or ci checks')
 	if args.system and args.suite not in ('host', 'browser', 'all'):
 		parser.error('--system is only available for host, browser, or all checks')
-	if args.bin is not None and args.suite not in ('host', 'browser', 'desktop', 'all'):
-		parser.error('--bin is only available for host, browser, desktop, or all checks')
-	if args.build and args.suite not in ('host', 'browser', 'all'):
-		parser.error('--build is only available for host, browser, or all checks')
+	if args.bin is not None and args.suite not in ('host', 'browser', 'desktop', 'all', 'ci'):
+		parser.error('--bin is only available for host, browser, desktop, all, or ci checks')
+	if args.build and args.suite not in ('host', 'browser', 'all', 'ci'):
+		parser.error('--build is only available for host, browser, all, or ci checks')
 	if args.app is not None and args.suite not in ('desktop', 'all'):
 		parser.error('--app is only available for desktop or all checks')
-	if args.suite != 'all' and (args.artifacts or args.previous_bin or args.no_previous_release or
-			args.interactive or args.plan):
-		parser.error('--artifacts, --previous-bin, --no-previous-release, --interactive, and --plan require all')
+	if args.suite != 'all' and (args.artifacts or args.previous_bin or args.no_previous_release or args.interactive):
+		parser.error('--artifacts, --previous-bin, --no-previous-release, and --interactive require all')
+	if args.plan and args.suite not in ('all', 'ci'):
+		parser.error('--plan requires all or ci')
 	if args.interactive and not args.system:
 		parser.error('--interactive requires --system and a disposable, backed-up host')
 	if args.suite == 'all' and args.app and not args.interactive:
@@ -121,7 +122,7 @@ def report_path(parser, args):
 	report = args.report.expanduser().absolute()
 	if report.exists() or report.is_symlink():
 		parser.error(f'report path already exists: {report}')
-	if (args.system or args.build or args.suite in ('browser', 'desktop', 'all')) and is_ephemeral_report(report):
+	if (args.system or args.build or args.suite in ('browser', 'desktop', 'all', 'ci')) and is_ephemeral_report(report):
 		parser.error(f'backups require a persisted report outside temporary directories: {report}')
 	return report
 
@@ -179,10 +180,10 @@ def runner_arguments(parser, args):
 def require_compatible_runner(parser, suite):
 	required = ('main', 'automated', 'contracts', 'audit', 'native_build_target',
 		'backup_build_candidate', 'candidate_build_environment')
-	if suite == 'all':
+	if suite in ('all', 'ci'):
 		required += ('all_suites',)
 	missing = [name for name in required if not callable(getattr(runner, name, None))]
-	if suite == 'all':
+	if suite in ('all', 'ci'):
 		for name in ('all_checks.py', 'doctest_output.py'):
 			if not (ROOT / 'tests/release' / name).is_file():
 				missing.append(name)

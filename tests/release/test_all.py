@@ -2,6 +2,7 @@ import argparse
 import contextlib
 import importlib.util
 import io
+import json
 import pathlib
 import sys
 import tempfile
@@ -82,6 +83,60 @@ def outcome(run, name):
 
 
 class AllChecksTests(unittest.TestCase):
+	def test_ci_runs_only_unprivileged_stages_without_prompting(self):
+		for system in ('Linux', 'Darwin', 'Windows'):
+			with self.subTest(system=system), tempfile.TemporaryDirectory() as temporary:
+				parent, api, _ = fixture(temporary, args=arguments(suite='ci'), system=system)
+				parent.metadata.update(os=system, python='3.14', commit='candidate', dirty=False,
+					credentials='private fixture credential')
+				with patch.object(checks.shutil, 'which', return_value='installed'), \
+						patch('builtins.input', side_effect=AssertionError('ci must not prompt')), \
+						contextlib.redirect_stdout(io.StringIO()):
+					checks.execute(parent, api)
+				self.assertEqual(len(parent.metadata['stages']), 20)
+				self.assertTrue(all(stage['status'] == 'pass' for stage in parent.metadata['stages']))
+				self.assertFalse(parent.metadata.get('incomplete', False))
+				api.host.assert_called_once()
+				self.assertEqual(api.host.call_args.kwargs, {'scope': 'ci'})
+				for operation in (api.service, api.artifacts, api.desktop, api.browser, api.system_snapshot):
+					operation.assert_not_called()
+				summary = json.loads((parent.output / 'ci-summary.json').read_text(encoding='utf-8'))
+				self.assertEqual(summary['suite'], 'ci')
+				self.assertEqual(summary['os'], system)
+				self.assertNotIn('credentials', summary)
+				self.assertTrue(all(set(stage) == {'name', 'status', 'seconds'} for stage in summary['stages']))
+
+	def test_ci_keeps_failures_and_unexpected_skips_visible(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			parent, api, _ = fixture(temporary, args=arguments(suite='ci'), failures=('contracts-msrv',))
+			api.host.side_effect = lambda child, **options: child.record('coverage', 'skip', 'missing fixture')
+			with patch.object(checks.shutil, 'which', return_value='installed'), \
+					contextlib.redirect_stdout(io.StringIO()):
+				checks.execute(parent, api)
+			self.assertEqual(outcome(parent, 'contracts-msrv')['status'], 'fail')
+			self.assertEqual(outcome(parent, 'host-unprivileged')['status'], 'blocked')
+			summary = json.loads((parent.output / 'ci-summary.json').read_text(encoding='utf-8'))
+			self.assertEqual(next(stage for stage in summary['stages'] if stage['name'] == 'contracts-msrv')['status'],
+				'fail')
+			self.assertNotIn('detail', summary['stages'][0])
+			self.assertTrue(parent.metadata['incomplete'])
+
+	def test_ci_rejects_sensitive_options_even_when_only_planning(self):
+		parser = argparse.ArgumentParser()
+		for option in ('system', 'interactive', 'app', 'artifacts', 'previous_bin', 'no_previous_release',
+				'browser_engine', 'service', 'host'):
+			with self.subTest(option=option), contextlib.redirect_stderr(io.StringIO()), \
+					self.assertRaises(SystemExit):
+				checks.validate(parser, arguments(suite='ci', plan=True, **{option: True}))
+
+	def test_ci_plan_does_not_include_system_or_interactive_stages(self):
+		output = io.StringIO()
+		with contextlib.redirect_stdout(output):
+			checks.print_plan(arguments(suite='ci'))
+		self.assertIn('20. host-unprivileged', output.getvalue())
+		self.assertNotIn('[disposable host]', output.getvalue())
+		self.assertNotIn('[interactive]', output.getvalue())
+
 	def test_all_stages_have_boundaries_and_continue_after_a_failure(self):
 		with tempfile.TemporaryDirectory() as temporary:
 			parent, api, commands = fixture(temporary, failures=('contracts-msrv',))
@@ -575,15 +630,17 @@ class AllChecksTests(unittest.TestCase):
 			self.assertIn('failure output', (report / '02-failing/00-failing.log').read_text())
 
 	def test_main_returns_failure_before_incomplete_and_never_treats_incomplete_as_success(self):
-		for failed, incomplete, expected in [(False, False, 0), (False, True, 2), (True, True, 1)]:
-			with self.subTest(failed=failed, incomplete=incomplete):
-				run = Mock(metadata={'incomplete': incomplete},
-					results=[{'status': 'fail' if failed else 'pass'}])
-				module = Mock()
-				with patch.object(runner, 'Run', return_value=run), patch.object(runner, 'helper', return_value=module), \
-					patch.object(runner, 'all_suites'), patch.object(runner, 'run_transcript', return_value=contextlib.nullcontext()), \
-					patch.object(runner.signal, 'signal'), patch.object(runner, 'match_redirected_encoding'):
-					self.assertEqual(runner.main(['all']), expected)
+		for suite in ('all', 'ci'):
+			for failed, incomplete, expected in [(False, False, 0), (False, True, 2), (True, True, 1)]:
+				with self.subTest(suite=suite, failed=failed, incomplete=incomplete):
+					run = Mock(metadata={'incomplete': incomplete},
+						results=[{'status': 'fail' if failed else 'pass'}])
+					module = Mock()
+					with patch.object(runner, 'Run', return_value=run), \
+							patch.object(runner, 'helper', return_value=module), patch.object(runner, 'all_suites'), \
+							patch.object(runner, 'run_transcript', return_value=contextlib.nullcontext()), \
+							patch.object(runner.signal, 'signal'), patch.object(runner, 'match_redirected_encoding'):
+						self.assertEqual(runner.main([suite]), expected)
 
 	def test_plan_lists_all_stages_without_executing_them(self):
 		output = io.StringIO()

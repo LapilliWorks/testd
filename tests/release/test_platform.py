@@ -106,6 +106,28 @@ class PlatformScriptsTests(unittest.TestCase):
 			self.assertEqual(self.script.main('Linux', ['all']), 2)
 			run.assert_called_once_with(['all'])
 
+	def test_ci_forwards_plan_and_build_options_without_confirmation(self):
+		with tempfile.TemporaryDirectory() as directory:
+			report = pathlib.Path(directory).resolve() / 'report'
+			with patch.object(self.script.platform, 'system', return_value='Linux'), \
+					patch.object(self.script, 'is_ephemeral_report', return_value=False), \
+					patch.object(self.script, 'confirm_system_checks') as confirm, \
+					patch.object(self.script, 'run_cli', return_value=0) as run:
+				self.script.main('Linux', ['ci', '--build', '--report', str(report)])
+				run.assert_called_with(['ci', '--report', str(report)])
+				self.script.main('Linux', ['ci', '--plan'])
+				run.assert_called_with(['ci', '--plan'])
+				confirm.assert_not_called()
+
+	def test_ci_rejects_system_and_interactive_options(self):
+		with patch.object(self.script.platform, 'system', return_value='Linux'), \
+				patch.object(self.script, 'run_cli') as run, contextlib.redirect_stderr(io.StringIO()):
+			for arguments in (['ci', '--system'], ['ci', '--interactive'], ['ci', '--artifacts', 'assets'],
+					['ci', '--app', 'candidate'], ['ci', '--browser-engine', 'chromium'], ['ci', '--port', '8443']):
+				with self.subTest(arguments=arguments), self.assertRaises(SystemExit):
+					self.script.main('Linux', arguments)
+			run.assert_not_called()
+
 	def test_all_forwards_candidates_artifacts_and_explicit_system_scope(self):
 		with tempfile.TemporaryDirectory() as directory:
 			root = pathlib.Path(directory).resolve()
@@ -133,6 +155,9 @@ class PlatformScriptsTests(unittest.TestCase):
 				self.script.main('Linux', ['all'])
 			self.assertEqual(error.exception.code, 2)
 			self.assertIn('out of sync', stderr.getvalue())
+			run.assert_not_called()
+			with self.assertRaises(SystemExit):
+				self.script.main('Linux', ['ci'])
 			run.assert_not_called()
 
 	def test_all_reports_a_missing_doctest_output_helper(self):

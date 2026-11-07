@@ -1290,6 +1290,32 @@ class HostSystemTests(unittest.TestCase):
 				else:
 					self.assertEqual(run.results, [])
 
+	def test_ci_host_scope_excludes_only_actual_desktop_evidence(self):
+		cases = (
+			('launch at login not configured yet (start the tray once): fixture', False),
+			('launch-at-login entry not validated against the candidate (fixture)', False),
+			('launch at login not configured', True),
+			('python is needed to start a quick launch in this check', True),
+		)
+		for reason, incomplete in cases:
+			with self.subTest(reason=reason), tempfile.TemporaryDirectory() as temporary:
+				run = self.create_run(temporary)
+				run.args.system = False
+				text = f'skip  {reason}\npassed 12, failed 0, skipped 1\n'
+				with redirect_stdout(io.StringIO()):
+					runner.record_host_coverage(run, text, scope='ci')
+				self.assertEqual(run.metadata.get('incomplete', False), incomplete)
+				self.assertEqual(run.results[0]['name'], 'host-coverage' if incomplete else 'host-desktop-coverage')
+
+	def test_ci_host_scope_cannot_enable_system_integration(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			with patch.object(runner, 'binary') as binary, patch.object(runner, 'system_snapshot') as snapshot, \
+					self.assertRaisesRegex(RuntimeError, 'cannot change system integration'):
+				runner.host(run, scope='ci')
+			binary.assert_not_called()
+			snapshot.assert_not_called()
+
 	def test_shutdown_port_check_retries_without_stopping_an_existing_listener(self):
 		with patch.object(runner, 'check_ports', side_effect=[RuntimeError('busy'), None]) as ports, \
 				patch.object(runner.time, 'sleep') as sleep:

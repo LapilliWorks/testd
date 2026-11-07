@@ -30,6 +30,23 @@ Never count an ignored, skipped, inapplicable, or unrun check as a pass. A succe
 
 `crates/testd-daemon/tests/product_flow.rs` composes the real registration engine, DNS server, and TLS edge on ephemeral loopback sockets. Its root is trusted only by the test client, and a resolver wrapper forbids system integration. It is not a full daemon process, OS trust test, browser test, or GUI test.
 
+## Unprivileged CI run
+
+The `ci` suite runs the automated stages of `all`: GUI and non-GUI compilation and tests, ignored release contracts, doctests, release-script and browser-server fixtures, dependency audit, version and website checks, a candidate CLI build, and the CLI/daemon host suite. It never installs system integration, executes installer artifacts, starts a supervised service, or collects desktop, real-browser, or manual evidence. Sensitive options are rejected rather than silently ignored.
+
+```sh
+python3 scripts/test-linux.py ci --report "$HOME/testd-reports/linux-ci"
+python3 scripts/test-macos.py ci --report "$HOME/testd-reports/macos-ci"
+```
+
+```powershell
+python scripts\test-windows.py ci --report "$HOME\testd-reports\windows-ci"
+```
+
+Use `ci --plan` to list the selected stages. The same prerequisites and new persisted report requirement as `all` apply. Missing tools, failures, and unexpected skips fail or block the run. Only the host suite's explicitly identified tray/login evidence is outside the CI scope; it is recorded as not applicable, not tested or passed. An ordinary `host` or `all` run still records that missing desktop evidence as incomplete.
+
+The report includes `ci-summary.json`, containing only OS/Python/source metadata and stage names, statuses, and durations. CI may publish that summary; full reports, fixture homes, profiles, keys, credentials, source patches, and raw command logs must remain private. A successful `ci` run establishes its unprivileged scope only and is not release approval.
+
 ## All-in-one platform run
 
 Run the matching script on each actual platform and architecture. The `all` suite runs GUI and non-GUI Rust checks, the ignored release contracts, doctests, release-script and browser-server fixtures, the full dependency audit, version verification, website checks, a candidate CLI build, and the unprivileged host suite. Each stage has explicit `BEGIN` and `END` markers, its own report and logs, and a final summary. Failed stages do not prevent independent checks from running.
@@ -89,6 +106,7 @@ The same options work on all three platforms:
 | Invocation | Checks |
 |---|---|
 | `all` | Every automated stage, plus explicitly enabled and prepared system, artifact, desktop, browser, and manual stages |
+| `ci` | All automated stages and the CLI/daemon host suite, excluding privileged, artifact, desktop, real-browser, and manual evidence |
 | `automated --gui` | Default automated checks plus the Rust 1.90 tray check and full-workspace tests; requires platform GUI prerequisites |
 | `contracts` | Release contracts including ignored cases |
 | `audit` | Full-workspace cargo-deny audit; requires `cargo-deny` |
