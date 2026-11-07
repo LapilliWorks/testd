@@ -98,7 +98,7 @@ A share is an explicit exposure decision.
 - `tailscale serve` exposes the name to the tailnet. Its privacy depends on tailnet membership and ACLs.
 - The provider sees the application traffic in both cases, including credentials the app sends.
 
-Stop a share when it is no longer needed. A share lives only as long as its registration, but a running dev server and a forgotten URL can outlive the reason for sharing.
+Stop a share when it is no longer needed. A share is bound to the owning connection and target; a reconnect or target change requires sharing again. Provider cleanup and crash recovery still require verification, and a running dev server and forgotten URL can outlive the reason for sharing.
 
 The provider binary is spawned from `PATH` or `TESTD_TUNNEL`. A compromised binary runs with the daemon's privileges and can read the host state.
 

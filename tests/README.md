@@ -23,7 +23,7 @@ Never count an ignored, skipped, inapplicable, or unrun check as a pass. A succe
 | TLS name and root validation, proxy routing and failures | `crates/testd-daemon/tests/edge.rs`, `product_flow.rs`, `testd-pki` tests | Installed system and browser trust; real browser behavior |
 | Preserve unowned resolver and trust state, report conflicts, remove only proven owned state | Linux ownership, resolver, and trust script fixtures in `crates/testd-setup` | Shared trust-store effects and concurrent privileged changes; real disposable-host checks; macOS and Windows ownership safeguards are incomplete |
 | Loopback dashboard, quick launches, and request protections | `engine.rs`, `tests/host/`, dashboard and launch unit tests | Real tray and browser; dashboard authentication and other local-user boundaries are not implemented |
-| Share lifecycle and provider exits | `crates/testd-daemon/tests/share.rs` and fake-provider reconciliation tests | Four claim and pending-start contracts currently fail and are ignored; actual provider termination, cleanup failures, and crash recovery remain unverified |
+| Share lifecycle and provider exits | Fake-provider claim, pending-start, replacement, cleanup-failure, and reconciliation tests in `daemon.rs`, `engine.rs`, and `crates/testd-daemon/tests/share.rs` | Actual provider termination, network-pause behavior, tailnet ownership, and crash recovery remain unverified |
 | Explicit network exposure and pause on network change | Default listener tests only | Separate controls, dashboard authorization, network-change pause, and share handling are not implemented |
 | Packaging, rollback, and reports | `tests/release/test_release.py`, release-script fixtures, and artifact runner | Candidate provenance, actual installation, signing, upgrade, and uninstall on each claimed platform |
 | Browser fixture | `tests/release/browser.test.ts` exercises the fixture server; an opt-in Playwright runner drives a real browser | Run the selected engine on each claimed OS/browser combination; fixtures alone do not prove browser behavior |
@@ -61,7 +61,7 @@ On macOS, use `scripts/test-macos.py` with the same options. Pass `--bin` for a 
 
 `--system` requires an interactive confirmation of the disposable host and full-system snapshot; each sensitive stage asks again. Artifact checks are sensitive because they execute candidate binaries. `--interactive` adds the desktop and browser runners and prompts for every manual checklist result and evidence. The browser stage refuses occupied fixture ports without contacting the listener and starts its own candidate daemon with real providers disabled. With `--browser-engine chromium`, `firefox`, or `webkit`, it drives the selected Playwright browser instead of collecting a manual browser report. Linux `--system` provisions a fixture-owned resolver and CA for the browser stage; other platforms remain blocked for product-managed system setup. Some checklists require separately restored snapshots, multiple machines, or separate browser runs; skip a stage and use another run on the appropriate VM. Network exposure and real providers still require explicit approval.
 
-Missing prerequisites, declined stages, unprovided artifacts, and skipped checks are recorded as blocked, not passed. Explicitly inapplicable platform fixtures remain recorded as skips without blocking the applicable fixture stage; system, browser, artifact, and other missing evidence remain separate blockers. Exit status is `1` for any failure, `2` for an incomplete run without failures, and `0` only when all applicable stages completed without failures. The Linux and macOS release-contract stages currently fail on four share-lifetime contracts. The full GUI audit has a narrow documented exception for an unmaintained build-time GTK macro; other advisories remain enforced. The Windows NRPT diagnostic and macOS resolver probe are blocked until their cleanup proves ownership.
+Missing prerequisites, declined stages, unprovided artifacts, and skipped checks are recorded as blocked, not passed. Explicitly inapplicable platform fixtures remain recorded as skips without blocking the applicable fixture stage; system, browser, artifact, and other missing evidence remain separate blockers. Exit status is `1` for any failure, `2` for an incomplete run without failures, and `0` only when all applicable stages completed without failures. The full GUI audit has a narrow documented exception for an unmaintained build-time GTK macro; other advisories remain enforced. The Windows NRPT diagnostic and macOS resolver probe are blocked until their cleanup proves ownership.
 
 Every suite writes a live UTF-8 `run.log` containing runner messages and emitted command stdout and stderr. The `all` transcript includes every stage boundary and summary; individual command logs retain the raw combined bytes. Rust nextest output includes passing and failing tests. The `all` doctest stages retain each executable's separate stdout and stderr and replay them into the transcript, including ignored tests. If an existing Cargo rustdoc flag or custom target runner prevents safe capture, the tests still run unchanged but doctest logging is marked blocked.
 
@@ -88,7 +88,7 @@ The same options work on all three platforms:
 |---|---|
 | `all` | Every automated stage, plus explicitly enabled and prepared system, artifact, desktop, browser, and manual stages |
 | `automated --gui` | Default automated checks plus the Rust 1.90 tray check and full-workspace tests; requires platform GUI prerequisites |
-| `contracts` | Release contracts including ignored cases; currently fails on known blockers |
+| `contracts` | Release contracts including ignored cases |
 | `audit` | Full-workspace cargo-deny audit; requires `cargo-deny` |
 | `host --bin <candidate> --report <new-report>` | Unprivileged candidate CLI and daemon checks |
 | `host --build --report <new-report>` | Build a candidate, then run the unprivileged host checks |
@@ -129,13 +129,7 @@ Use an absolute fixture path: Bun treats a relative path as a search pattern and
 
 The GUI requires its platform build prerequisites and separate Rust 1.90 checks. Run the full dependency policy against the selected release scope; a non-GUI or CI-scoped pass does not clear a GUI-only advisory. The cross-language browser-report fixture requires Bun. PowerShell parser and behavior fixtures are required on Windows; their absence on other platforms is inapplicable. A PowerShell fixture is not a Windows platform run.
 
-The four share contracts are deliberately ignored in the default Rust run because they currently fail. Run them explicitly to reproduce the known failures, then remove the ignore markers when the behavior is implemented. The release runner's `core` suite includes ignored tests, so it remains blocked by these failures. Stable version tags also run that gate in CI; prerelease tags and ordinary CI runs do not, and do not constitute release approval. These contracts use fake Unix providers and do not test the deferred grant-revocation race.
-
-```sh
-cargo +1.89.0 test -p testd-daemon --lib daemon::tests -- --ignored
-```
-
-After implementing them, run the complete non-GUI suite including ignored cases and require no unexplained skips:
+The release runner's `core` suite and stable version tags include ignored tests; prerelease tags and ordinary CI runs do not constitute release approval. Share-lifetime contracts use fake Unix providers and do not test the deferred grant-revocation race. Run the complete non-GUI suite including ignored cases and require no unexplained skips:
 
 ```sh
 cargo +1.89.0 nextest run --workspace --exclude testd-gui --locked --run-ignored all
