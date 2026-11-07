@@ -133,7 +133,7 @@ fn start_setup(app: tauri::AppHandle, rt: Arc<tokio::runtime::Runtime>) -> Resul
 		}
 
 		let result = match done_rx.recv() {
-			Ok(result) => result,
+			Ok(result) => result.map_err(|error| error.to_string()),
 			Err(_) => Err("the daemon did not start".to_owned()),
 		};
 		let _ = reply.send(result);
