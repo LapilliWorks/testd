@@ -1,6 +1,6 @@
 # Installation and artifact contracts
 
-Run on each OS, architecture, packaging format, and upgrade path selected for release. Use a disposable machine with a persisted full-system snapshot. A source build, archive checksum, or script fixture is not proof that the installed desktop package works.
+Run on each OS, architecture, packaging format, and upgrade path selected for release. Use a disposable machine with a persisted full-system snapshot. A source build, archive checksum, or script fixture is not proof that the installed desktop package works. The artifact smoke runner retains its isolated home and reports real uninstall and purge as blocked; verify them separately.
 
 ## Provenance
 

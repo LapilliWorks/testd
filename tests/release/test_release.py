@@ -285,10 +285,6 @@ class ArtifactInstallFixture:
 				(config / 'pki/root.crt').write_bytes(b'changed certificate')
 			elif self.rollback_change == 'key':
 				(config / 'pki/root.key').write_bytes(b'changed key')
-		elif name == 'uninstall-local-state':
-			if not (self.output / 'fresh-state-before-purge-0.tar.gz').exists():
-				raise AssertionError('purge ran without a persisted backup')
-			shutil.rmtree(config)
 		else:
 			raise AssertionError(f'unexpected command {name}')
 		return ''
@@ -480,14 +476,41 @@ class PlatformSequenceTests(unittest.TestCase):
 
 
 class ArtifactInstallTests(unittest.TestCase):
+	def test_artifact_smoke_does_not_run_system_cleanup(self):
+		with tempfile.TemporaryDirectory() as directory:
+			fixture = ArtifactInstallFixture(directory)
+			runner.fresh_install(fixture, fixture.cli, 0, fixture.version)
+			self.assertNotIn('uninstall-local-state', fixture.steps)
+			self.assertTrue((fixture.output / 'fresh-home-0').is_dir())
+			self.assertTrue(any(name == 'archive-init-and-reinit' and status == 'pass'
+				for name, status, _ in fixture.records))
+
+	def test_artifact_runner_marks_real_uninstall_blocked(self):
+		with tempfile.TemporaryDirectory() as directory:
+			fixture = ArtifactInstallFixture(directory)
+			assets = pathlib.Path(directory) / 'assets'
+			assets.mkdir()
+			(assets / f'testd-{fixture.version}-x86_64-unknown-linux-gnu.tar.gz').touch()
+			fixture.args.artifacts = assets
+			fixture.args.require_checksums = False
+			fixture.args.host = fixture.args.service = fixture.args.system = False
+			def extract(_archive, destination):
+				destination.mkdir()
+				(destination / 'testd').write_bytes(b'candidate')
+			with patch.object(runner, 'SYSTEM', 'Linux'), patch.object(runner, 'extract_archive', side_effect=extract):
+				runner.artifacts(fixture)
+			self.assertNotIn('uninstall-local-state', fixture.steps)
+			self.assertTrue(any(name == 'uninstall' and status == 'skip' and detail.startswith('blocked:')
+				for name, status, detail in fixture.records))
+
 	def test_upgrade_and_rollback_preserve_state_with_backups(self):
 		with tempfile.TemporaryDirectory() as directory:
 			fixture = ArtifactInstallFixture(directory)
 			runner.fresh_install(fixture, fixture.cli, 0, fixture.version)
 			self.assertEqual(fixture.steps, [
-				'archive-version', 'upgrade-base-init', 're-init', 'rollback-init', 'uninstall-local-state',
+				'archive-version', 'upgrade-base-init', 're-init', 'rollback-init',
 			])
-			for step in ('upgrade', 'rollback', 'purge'):
+			for step in ('upgrade', 'rollback'):
 				with tarfile.open(fixture.output / f'fresh-state-before-{step}-0.tar.gz') as backup:
 					config = backup.extractfile('testd/config.toml').read()
 					self.assertIn(b'secret = "original"', config)
@@ -503,7 +526,7 @@ class ArtifactInstallTests(unittest.TestCase):
 			self.assertIn('fresh-init', fixture.steps)
 			self.assertNotIn('rollback-init', fixture.steps)
 			self.assertTrue((fixture.output / 'fresh-state-before-upgrade-0.tar.gz').is_file())
-			self.assertTrue((fixture.output / 'fresh-state-before-purge-0.tar.gz').is_file())
+			self.assertTrue((fixture.output / 'fresh-home-0').is_dir())
 
 	def test_artifact_loop_stops_after_incomplete_system_cleanup(self):
 		with tempfile.TemporaryDirectory() as temporary:

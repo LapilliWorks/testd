@@ -748,6 +748,8 @@ def artifacts(run):
 	for package in sorted(directory.glob('*.deb')):
 		run.command('deb-metadata', [require('dpkg-deb'), '-I', str(package)])
 		run.command('deb-contents', ['dpkg-deb', '-c', str(package)])
+	run.record('uninstall', 'skip',
+		'blocked: real uninstall and purge require separate disposable-host system validation')
 
 
 def fresh_install(run, cli, index, expected_version):
@@ -780,12 +782,7 @@ def fresh_install(run, cli, index, expected_version):
 			raise RuntimeError(f'rollback changed configuration: {error}') from error
 		assert_root_unchanged(pki, root_before, 'rollback')
 		run.record('rollback', 'pass', 'configuration and root material preserved')
-	backup_fresh_state(run, self_config, index, 'purge')
-	run.command('uninstall-local-state',
-		[str(cli), 'uninstall', '--purge', '--keep-resolver', '--keep-certificate'], env=env)
-	if self_config.exists():
-		raise RuntimeError('purge left the local config directory')
-	run.record('fresh-install-and-uninstall', 'pass', version)
+	run.record('archive-init-and-reinit', 'pass', version)
 
 
 def backup_fresh_state(run, directory, index, step):

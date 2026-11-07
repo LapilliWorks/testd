@@ -276,6 +276,23 @@ class AllChecksTests(unittest.TestCase):
 				self.assertTrue(api.artifacts.call_args.args[0].args.require_checksums)
 				self.assertTrue(api.artifacts.call_args.args[0].args.host)
 
+	def test_blocked_artifact_uninstall_blocks_later_system_stages(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			args = arguments(system=True, artifacts=pathlib.Path(temporary), no_previous_release=True)
+			parent, api, _ = fixture(temporary, args=args)
+			api.artifacts.side_effect = lambda child: child.record('uninstall', 'skip', 'blocked: real cleanup not run')
+			run = checks.AllChecks(parent, api, args)
+			run.system_confirmed = True
+			run.boundary_log = io.StringIO()
+			artifact = next(item for item in run.stages() if item.name == 'artifacts')
+			later = next(item for item in run.stages() if item.name == 'system-restore-self-test')
+			with patch.object(run, 'confirm', return_value=True), contextlib.redirect_stdout(io.StringIO()):
+				run.stage(1, 2, artifact)
+				run.stage(2, 2, later)
+			self.assertEqual(outcome(parent, 'artifacts')['status'], 'blocked')
+			self.assertEqual(outcome(parent, 'system-restore-self-test')['status'], 'blocked')
+			self.assertTrue(run.system_unsafe)
+
 	def test_artifacts_never_execute_without_disposable_host_confirmation(self):
 		with tempfile.TemporaryDirectory() as temporary:
 			args = arguments(artifacts=pathlib.Path(temporary))
