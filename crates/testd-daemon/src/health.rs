@@ -262,7 +262,10 @@ impl RootAuthority for PkiRoot {
 	}
 
 	fn auto_trust_allowed(&self) -> bool {
-		!self.pki_dir.join(AUTO_TRUST_DISABLED).exists()
+		matches!(
+			std::fs::symlink_metadata(self.pki_dir.join(AUTO_TRUST_DISABLED)),
+			Err(error) if error.kind() == io::ErrorKind::NotFound
+		)
 	}
 }
 
@@ -664,6 +667,16 @@ mod tests {
 		assert!(set_auto_trust(&pki, true).is_err());
 		assert!(std::fs::symlink_metadata(marker).unwrap().is_symlink());
 		assert_eq!(std::fs::read_to_string(target).unwrap(), "keep this file");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn a_dangling_trust_marker_prevents_automatic_trust() {
+		let dir = tempfile::tempdir().unwrap();
+		let pki = dir.path().join("pki");
+		std::fs::create_dir(&pki).unwrap();
+		std::os::unix::fs::symlink(dir.path().join("missing"), pki.join(AUTO_TRUST_DISABLED)).unwrap();
+		assert!(!PkiRoot::new(pki).auto_trust_allowed());
 	}
 
 	#[cfg(unix)]
