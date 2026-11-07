@@ -629,11 +629,17 @@ pub fn start_daemon(
 							}
 						},
 						MenuAction::StopShare(name) => {
-							if node_daemon.shares().stop(&name).await {
-								trace(&format!("share stopped: {name}"));
-								shares = node_daemon.shares().list().await;
-								rebuild = true;
+							match node_daemon.shares().stop(&name).await {
+								Ok(true) => trace(&format!("share stopped: {name}")),
+								Ok(false) => trace(&format!("share {name} is gone")),
+								Err(error) => {
+									let message = format!("could not stop share {name}: {error:#}");
+									eprintln!("[error]  {message}");
+									trace(&message);
+								},
 							}
+							shares = node_daemon.shares().list().await;
+							rebuild = true;
 						},
 					}
 				},
