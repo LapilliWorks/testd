@@ -1312,6 +1312,19 @@ class HostSystemTests(unittest.TestCase):
 			self.assertTrue(command.call_args.kwargs['terminal'])
 			self.assertTrue(owner.is_file())
 
+	def test_cleanup_keeps_the_candidate_path_representation(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			run = self.create_run(temporary)
+			home = pathlib.Path(temporary) / 'fixture-home'
+			owner = home / '.config/testd/system-ownership-id'
+			owner.parent.mkdir(parents=True)
+			owner.write_text('fixture-owner', encoding='utf-8')
+			for cli in (pathlib.PurePosixPath('/fixture/candidate'),
+					pathlib.PureWindowsPath('C:/fixture/candidate.exe')):
+				with self.subTest(path=str(cli)), patch.object(run, 'command') as command:
+					runner.cleanup_owned_linux_integration(run, cli, home, 'testdcheck', True)
+					self.assertEqual(command.call_args.args[1], [str(cli), 'uninstall'])
+
 	@unittest.skipIf(os.name == 'nt', 'not applicable: Linux ownership cleanup uses Unix paths')
 	def test_linux_cleanup_refuses_a_linked_ownership_path(self):
 		with tempfile.TemporaryDirectory() as temporary:
