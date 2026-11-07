@@ -103,7 +103,7 @@ class AllChecksTests(unittest.TestCase):
 				summary = json.loads((parent.output / 'ci-summary.json').read_text(encoding='utf-8'))
 				self.assertEqual(summary['suite'], 'ci')
 				self.assertEqual(summary['os'], system)
-				self.assertNotIn('credentials', summary)
+				self.assertEqual(set(summary), {'os', 'python', 'commit', 'dirty', 'suite', 'stages'})
 				self.assertTrue(all(set(stage) == {'name', 'status', 'seconds'} for stage in summary['stages']))
 
 	def test_ci_keeps_failures_and_unexpected_skips_visible(self):
