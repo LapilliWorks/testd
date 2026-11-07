@@ -66,6 +66,8 @@ struct Harness {
 	engine: Arc<HostEngine>,
 	resolver: Arc<RecordingResolver>,
 	registrations: testd_daemon::engine::Registrations,
+	#[cfg(unix)]
+	shares: Option<Arc<testd_daemon::share::Shares>>,
 	access: Arc<Access>,
 	token: String,
 	stop: Option<oneshot::Sender<()>>,
@@ -76,6 +78,10 @@ const SECRET: &str = "test-secret";
 const LOCAL_TOKEN: &str = "local-test-token";
 
 async fn start() -> Harness {
+	start_with_shares(None).await
+}
+
+async fn start_with_shares(provider: Option<std::path::PathBuf>) -> Harness {
 	let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let addr = listener.local_addr().unwrap();
 
@@ -103,8 +109,19 @@ async fn start() -> Harness {
 	let access = Arc::new(Access::load(dir.path().join("tokens.json")).unwrap());
 	let mut engine = HostEngine::new(config, resolver.clone(), Arc::clone(&access));
 	engine.set_local_token(LOCAL_TOKEN.into());
-	let engine = Arc::new(engine);
 	let registrations = engine.registrations();
+	let shares = provider.map(|provider| {
+		Arc::new(testd_daemon::share::Shares::new(
+			testd_daemon::share::Provider::Cloudflared,
+			Some(provider),
+			None,
+			registrations.clone(),
+		))
+	});
+	if let Some(shares) = &shares {
+		engine.set_shares(Arc::clone(shares));
+	}
+	let engine = Arc::new(engine);
 	let (stop, mut stopped) = oneshot::channel::<()>();
 	let serving = Arc::clone(&engine);
 	tokio::spawn(async move {
@@ -114,7 +131,18 @@ async fn start() -> Harness {
 		}
 	});
 
-	Harness { addr, engine, resolver, registrations, access, token: SECRET.to_owned(), stop: Some(stop), _dir: dir }
+	Harness {
+		addr,
+		engine,
+		resolver,
+		registrations,
+		#[cfg(unix)]
+		shares,
+		access,
+		token: SECRET.to_owned(),
+		stop: Some(stop),
+		_dir: dir,
+	}
 }
 
 impl Drop for Harness {
@@ -177,6 +205,236 @@ async fn wait_for_target(harness: &Harness, domain: &str, target: Option<&str>) 
 	})
 	.await
 	.expect("claim did not reach the expected target");
+}
+
+#[cfg(unix)]
+mod share_lifetime {
+	use super::*;
+	use std::os::unix::fs::PermissionsExt;
+	use testd_daemon::share::Shares;
+
+	fn provider(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+		let directory = tempfile::tempdir().unwrap();
+		let path = directory.path().join("provider");
+		std::fs::write(&path, body).unwrap();
+		std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+		(directory, path)
+	}
+
+	async fn start_fixture(body: &str) -> (tempfile::TempDir, Harness, Arc<Shares>) {
+		let (directory, provider) = provider(body);
+		let harness = start_with_shares(Some(provider)).await;
+		let shares = Arc::clone(harness.shares.as_ref().unwrap());
+		(directory, harness, shares)
+	}
+
+	async fn start_share(shares: &Shares, _harness: &Harness) {
+		shares.start("app", "app.test", None).await.unwrap();
+	}
+
+	async fn wait_for_file(path: &std::path::Path) {
+		tokio::time::timeout(std::time::Duration::from_secs(5), async {
+			while !path.exists() {
+				tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("provider did not reach its startup barrier");
+	}
+
+	#[tokio::test]
+	async fn ownership_changes_stop_shares_but_idempotent_claims_do_not() {
+		let (_directory, harness, shares) =
+			start_fixture("#!/bin/sh\necho https://fixture.trycloudflare.com >&2\nexec sleep 30\n").await;
+		let mut alice = Client::connect(harness.addr, &harness.token).await;
+		let mut bob = Client::connect(harness.addr, &harness.token).await;
+		assert!(matches!(alice.request(register("app", "3000", false)).await, Response::Ok));
+		start_share(&shares, &harness).await;
+		assert!(matches!(alice.request(register("app", "3000", false)).await, Response::Ok));
+		assert_eq!(shares.list().await.len(), 1);
+		assert!(matches!(bob.request(register("app", "3000", true)).await, Response::Ok));
+		assert!(shares.list().await.is_empty(), "the previous owner's share survived takeover");
+		start_share(&shares, &harness).await;
+		drop(alice);
+		assert!(matches!(bob.request(register("app", "3000", false)).await, Response::Ok));
+		tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+		assert_eq!(shares.list().await.len(), 1, "the former owner stopped a replacement share");
+		assert!(matches!(bob.request(register("app", "4000", false)).await, Response::Ok));
+		assert!(shares.list().await.is_empty(), "a target change kept the old share");
+	}
+
+	#[tokio::test]
+	async fn disconnect_and_same_target_reconnect_require_resharing() {
+		let (_directory, harness, shares) =
+			start_fixture("#!/bin/sh\necho https://fixture.trycloudflare.com >&2\nexec sleep 30\n").await;
+		let mut alice = Client::connect(harness.addr, &harness.token).await;
+		assert!(matches!(alice.request(register("app", "3000", false)).await, Response::Ok));
+		start_share(&shares, &harness).await;
+		drop(alice);
+		wait_for_target(&harness, "app.test", None).await;
+		tokio::time::timeout(std::time::Duration::from_secs(5), async {
+			while !shares.list().await.is_empty() {
+				tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("disconnect left the share active");
+		let _ = shares.stop("app").await.unwrap();
+		let mut bob = Client::connect(harness.addr, &harness.token).await;
+		assert!(matches!(bob.request(register("app", "3000", false)).await, Response::Ok));
+		assert!(shares.list().await.is_empty(), "reconnect must not reactivate the old share");
+		start_share(&shares, &harness).await;
+		assert!(shares.stop("app").await.unwrap());
+	}
+
+	#[tokio::test]
+	async fn stopping_the_owning_leaf_closes_its_share() {
+		let (_directory, harness, shares) =
+			start_fixture("#!/bin/sh\necho https://fixture.trycloudflare.com >&2\nexec sleep 30\n").await;
+		let mut client = Client::connect(harness.addr, &harness.token).await;
+		assert!(matches!(client.request(register("app", "3000", false)).await, Response::Ok));
+		start_share(&shares, &harness).await;
+		harness
+			.engine
+			.operator(OperatorAction::Stop { domain: "app.test".into() })
+			.await
+			.unwrap();
+		assert!(shares.list().await.is_empty());
+		assert!(harness.registrations.lock().await.claim("app.test").is_none());
+	}
+
+	#[tokio::test]
+	async fn a_failed_idempotent_registration_keeps_its_share() {
+		let (_directory, harness, shares) =
+			start_fixture("#!/bin/sh\necho https://fixture.trycloudflare.com >&2\nexec sleep 30\n").await;
+		let mut client = Client::connect(harness.addr, &harness.token).await;
+		assert!(matches!(client.request(register("app", "3000", false)).await, Response::Ok));
+		start_share(&shares, &harness).await;
+		harness.resolver.fail_next.store(true, Ordering::SeqCst);
+		assert!(matches!(client.request(register("app", "3000", false)).await, Response::Error { .. }));
+		assert_eq!(shares.list().await.len(), 1, "an idempotent rollback must keep its share");
+		assert!(shares.stop("app").await.unwrap());
+	}
+
+	#[tokio::test]
+	async fn a_failed_rebind_does_not_restore_the_previous_share() {
+		let (_directory, harness, shares) =
+			start_fixture("#!/bin/sh\necho https://fixture.trycloudflare.com >&2\nexec sleep 30\n").await;
+		let mut client = Client::connect(harness.addr, &harness.token).await;
+		assert!(matches!(client.request(register("app", "3000", false)).await, Response::Ok));
+		start_share(&shares, &harness).await;
+		harness.resolver.fail_next.store(true, Ordering::SeqCst);
+		assert!(matches!(client.request(register("app", "4000", false)).await, Response::Error { .. }));
+		assert_eq!(
+			harness
+				.registrations
+				.lock()
+				.await
+				.claim("app.test")
+				.unwrap()
+				.registration
+				.target,
+			"127.0.0.1:3000"
+		);
+		assert!(shares.list().await.is_empty(), "rollback must not reactivate an old share");
+		start_share(&shares, &harness).await;
+		assert!(shares.stop("app").await.unwrap());
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+	async fn rollback_cancels_a_share_started_for_the_provisional_owner() {
+		let (_directory, harness, shares) =
+			start_fixture("#!/bin/sh\necho https://fixture.trycloudflare.com >&2\nexec sleep 30\n").await;
+		let mut alice = Client::connect(harness.addr, &harness.token).await;
+		let mut bob = Client::connect(harness.addr, &harness.token).await;
+		assert!(matches!(alice.request(register("app", "3000", false)).await, Response::Ok));
+		start_share(&shares, &harness).await;
+		let (started, resume) = harness.resolver.gate_next(Err("fixture failure"));
+		let takeover = tokio::spawn(async move { bob.request(register("app", "4000", true)).await });
+		tokio::time::timeout(std::time::Duration::from_secs(5), started)
+			.await
+			.unwrap()
+			.unwrap();
+		assert!(shares.list().await.is_empty(), "the prior owner's share survived the takeover");
+		start_share(&shares, &harness).await;
+		assert_eq!(shares.list().await[0].target, "127.0.0.1:4000");
+		resume.send(()).unwrap();
+		let response = tokio::time::timeout(std::time::Duration::from_secs(5), takeover)
+			.await
+			.unwrap()
+			.unwrap();
+		assert!(matches!(response, Response::Error { .. }));
+		assert!(shares.list().await.is_empty(), "the provisional owner's share survived rollback");
+		assert_eq!(
+			harness
+				.registrations
+				.lock()
+				.await
+				.claim("app.test")
+				.unwrap()
+				.registration
+				.target,
+			"127.0.0.1:3000"
+		);
+	}
+
+	#[tokio::test]
+	async fn takeover_cancels_a_pending_share_before_the_new_owner_is_acknowledged() {
+		let (directory, harness, shares) = start_fixture(
+			"#!/bin/sh\ndir=$(dirname \"$0\")\n: > \"$dir/ready\"\nwhile [ ! -e \"$dir/go\" ]; do sleep 0.02; done\necho https://fixture.trycloudflare.com >&2\nexec sleep 30\n",
+		).await;
+		let mut alice = Client::connect(harness.addr, &harness.token).await;
+		let mut bob = Client::connect(harness.addr, &harness.token).await;
+		assert!(matches!(alice.request(register("app", "3000", false)).await, Response::Ok));
+		let starting = Arc::clone(&shares);
+		let task = tokio::spawn(async move { starting.start("app", "app.test", None).await });
+		wait_for_file(&directory.path().join("ready")).await;
+		let response =
+			tokio::time::timeout(std::time::Duration::from_secs(5), bob.request(register("app", "3000", true)))
+				.await
+				.unwrap();
+		assert!(matches!(response, Response::Ok));
+		assert!(
+			tokio::time::timeout(std::time::Duration::from_secs(5), task)
+				.await
+				.unwrap()
+				.unwrap()
+				.is_err()
+		);
+		assert!(shares.list().await.is_empty());
+		std::fs::write(directory.path().join("go"), "").unwrap();
+		start_share(&shares, &harness).await;
+		assert!(shares.stop("app").await.unwrap());
+	}
+
+	#[tokio::test]
+	async fn deregistration_cancels_a_pending_start_before_the_same_claim_returns() {
+		let (directory, harness, shares) = start_fixture(
+			"#!/bin/sh\ndir=$(dirname \"$0\")\n: > \"$dir/ready\"\nwhile [ ! -e \"$dir/go\" ]; do sleep 0.02; done\necho https://fixture.trycloudflare.com >&2\nexec sleep 30\n",
+		).await;
+		let mut client = Client::connect(harness.addr, &harness.token).await;
+		assert!(matches!(client.request(register("app", "3000", false)).await, Response::Ok));
+		let starting = Arc::clone(&shares);
+		let task = tokio::spawn(async move { starting.start("app", "app.test", None).await });
+		wait_for_file(&directory.path().join("ready")).await;
+		let request = Request::Deregister { domain: "app".into() };
+		let response = tokio::time::timeout(std::time::Duration::from_secs(5), client.request(request))
+			.await
+			.unwrap();
+		assert!(matches!(response, Response::Ok));
+		assert!(
+			tokio::time::timeout(std::time::Duration::from_secs(5), task)
+				.await
+				.unwrap()
+				.unwrap()
+				.is_err()
+		);
+		assert!(shares.list().await.is_empty());
+		std::fs::write(directory.path().join("go"), "").unwrap();
+		assert!(matches!(client.request(register("app", "3000", false)).await, Response::Ok));
+		start_share(&shares, &harness).await;
+		assert!(shares.stop("app").await.unwrap());
+	}
 }
 
 #[tokio::test]

@@ -556,10 +556,10 @@ async fn handle_unshare<W: AsyncWriteExt + Unpin>(writer: &mut W, ctx: &HttpCont
 	let Some(shares) = &ctx.shares else {
 		return respond(writer, "503 Service Unavailable", "text/plain", b"Sharing is not available.").await;
 	};
-	if shares.stop(name).await {
-		respond(writer, "200 OK", "text/plain", b"ok").await
-	} else {
-		respond(writer, "404 Not Found", "text/plain", b"No such share.").await
+	match shares.stop(name).await {
+		Ok(true) => respond(writer, "200 OK", "text/plain", b"ok").await,
+		Ok(false) => respond(writer, "404 Not Found", "text/plain", b"No such share.").await,
+		Err(error) => respond(writer, "500 Internal Server Error", "text/plain", error.to_string().as_bytes()).await,
 	}
 }
 

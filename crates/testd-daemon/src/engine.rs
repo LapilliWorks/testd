@@ -95,6 +95,7 @@ impl HostEngine {
 
 	/// Attach the share manager. Only the dashboard and the status API use it.
 	pub fn set_shares(&mut self, shares: Arc<crate::share::Shares>) {
+		assert!(Arc::ptr_eq(&self.registrations, shares.registrations()), "shares must use the engine's registry");
 		self.shares = Some(shares);
 	}
 
@@ -178,6 +179,7 @@ impl HostEngine {
 			resolver: self.resolver.clone(),
 			apply_lock: Mutex::new(()),
 			access: Arc::clone(&self.access),
+			shares: self.shares.clone(),
 			event_tx: self.event_tx.clone(),
 			resolver_checked: AtomicBool::new(false),
 			answer_addr: self.config.answer_addr,
@@ -248,16 +250,68 @@ pub enum OperatorAction {
 	DeleteGrant { domain: String },
 }
 
+fn same_claim(left: &Claim, right: &Claim) -> bool {
+	left.connection == right.connection && left.registration == right.registration
+}
+
+/// Acquire after the registry lock and before making a claim mutation.
+async fn claim_transition(shared: &Shared) -> Option<crate::share::ClaimTransition<'_>> {
+	match &shared.shares {
+		Some(shares) => Some(shares.claim_transition().await),
+		None => None,
+	}
+}
+
+fn detach_changed_shares(
+	transition: Option<&mut crate::share::ClaimTransition<'_>>,
+	registrations: &mut Registry,
+	before: Option<&Claim>,
+	after: Option<&Claim>,
+) -> crate::share::DetachedShares {
+	let Some(previous) = before else { return crate::share::DetachedShares::default() };
+	if after.is_some_and(|current| same_claim(previous, current)) {
+		return crate::share::DetachedShares::default();
+	}
+	match transition {
+		Some(transition) => transition.detach_claims(registrations, std::slice::from_ref(previous)),
+		None => crate::share::DetachedShares::default(),
+	}
+}
+
+async fn finish_changed_shares(shared: &Shared, detached: crate::share::DetachedShares) -> Result<(), String> {
+	let result = match &shared.shares {
+		Some(shares) => shares
+			.finish_detached(detached)
+			.await
+			.map_err(|error| format!("share cleanup failed: {error:#}")),
+		None => Ok(()),
+	};
+	if let Err(error) = &result {
+		eprintln!("[error]  {error}");
+	}
+	result
+}
+
 /// Stop the leaf that publishes `fqdn` and unpublish the names it holds.
 async fn stop_leaf(shared: &Shared, fqdn: &str) -> Result<(), String> {
-	let (closing, evicted) = {
+	let (closing, evicted, detached) = {
 		let mut registrations = shared.registrations.lock().await;
 		let connection = registrations
 			.claim(fqdn)
 			.map(|claim| claim.connection)
 			.ok_or_else(|| format!("{fqdn} is not registered"))?;
+		let claims: Vec<Claim> = registrations
+			.claims()
+			.into_iter()
+			.filter(|claim| claim.connection == connection)
+			.collect();
+		let mut transition = claim_transition(shared).await;
 		let evicted = registrations.release(connection);
-		(shared.connections.take(connection), evicted)
+		let detached = transition
+			.as_mut()
+			.map(|transition| transition.detach_claims(&mut registrations, &claims))
+			.unwrap_or_default();
+		(shared.connections.take(connection), evicted, detached)
 	};
 	for registration in &evicted {
 		eprintln!("[evict]  {} (leaf stopped)", registration.domain);
@@ -267,9 +321,11 @@ async fn stop_leaf(shared: &Shared, fqdn: &str) -> Result<(), String> {
 	if let Some(connection) = closing {
 		connection.close(Some(Response::Stopped { domain: fqdn.to_owned() }));
 	}
+	let cleanup = finish_changed_shares(shared, detached).await;
 	apply(shared)
 		.await
 		.map_err(|e| format!("{fqdn} was stopped, but the edge could not be updated: {e}"))?;
+	cleanup?;
 	eprintln!("[stop]   {fqdn} (dashboard)");
 	Ok(())
 }
@@ -307,9 +363,14 @@ async fn delete_grant(shared: &Shared, fqdn: &str) -> Result<(), String> {
 		.remove_name(&grant, fqdn, &live)
 		.map_err(|e| format!("could not delete the grant: {e}"))?;
 	// Unpublish only this name; the connection and its other names stay.
-	let removed = {
+	let (removed, detached) = {
 		let mut registrations = shared.registrations.lock().await;
-		withdraw_granted_claim(&mut registrations, &claim)
+		let before = registrations.claim(fqdn).cloned();
+		let mut transition = claim_transition(shared).await;
+		let removed = withdraw_granted_claim(&mut registrations, &claim);
+		let after = registrations.claim(fqdn).cloned();
+		let detached = detach_changed_shares(transition.as_mut(), &mut registrations, before.as_ref(), after.as_ref());
+		(removed, detached)
 	};
 	if removed && let Some(out) = shared.connections.outbox(claim.connection) {
 		let notice = Response::NameRevoked { domain: fqdn.to_owned() };
@@ -320,9 +381,11 @@ async fn delete_grant(shared: &Shared, fqdn: &str) -> Result<(), String> {
 			}
 		}
 	}
+	let cleanup = finish_changed_shares(shared, detached).await;
 	apply(shared)
 		.await
 		.map_err(|e| format!("{fqdn} was deleted, but the edge could not be updated: {e}"))?;
+	cleanup?;
 	eprintln!("[grant]  {fqdn} deleted (dashboard)");
 	Ok(())
 }
@@ -337,9 +400,16 @@ fn withdraw_granted_claim(registrations: &mut Registry, claim: &Claim) -> bool {
 /// the second pass finds nothing left to do.
 async fn close_grant(shared: &Shared, grant: &str) {
 	let mut closing = Vec::new();
-	{
+	let detached = {
 		let mut registrations = shared.registrations.lock().await;
-		for connection in shared.connections.with_token(grant) {
+		let owners = shared.connections.with_token(grant);
+		let claims: Vec<Claim> = registrations
+			.claims()
+			.into_iter()
+			.filter(|claim| owners.contains(&claim.connection))
+			.collect();
+		let mut transition = claim_transition(shared).await;
+		for connection in owners {
 			if let Some(closing_connection) = shared.connections.take(connection) {
 				closing.push(closing_connection);
 			}
@@ -347,10 +417,15 @@ async fn close_grant(shared: &Shared, grant: &str) {
 				eprintln!("[evict]  {} (grant deleted)", registration.domain);
 			}
 		}
-	}
+		transition
+			.as_mut()
+			.map(|transition| transition.detach_claims(&mut registrations, &claims))
+			.unwrap_or_default()
+	};
 	for connection in closing {
 		connection.close(Some(Response::GrantRevoked));
 	}
+	let _ = finish_changed_shares(shared, detached).await;
 	if let Err(e) = apply(shared).await {
 		eprintln!("[error]  grant deletion could not update the edge: {e}");
 	}
@@ -364,6 +439,7 @@ struct Shared {
 	/// Resolver snapshots must be applied in the order they are taken.
 	apply_lock: Mutex<()>,
 	access: Arc<Access>,
+	shares: Option<Arc<crate::share::Shares>>,
 	event_tx: broadcast::Sender<EngineEvent>,
 	resolver_checked: AtomicBool,
 	answer_addr: std::net::Ipv4Addr,
@@ -667,12 +743,17 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 					let registration = Registration { domain: fqdn.clone(), target: target.clone() };
 
 					let reserved: Vec<&str> = reserved.iter().map(String::as_str).collect();
-					let result =
-						shared
-							.registrations
-							.lock()
-							.await
-							.register(connection, registration.clone(), force, &reserved);
+					let (result, detached) = {
+						let mut regs = shared.registrations.lock().await;
+						let before = regs.claim(&fqdn).cloned();
+						let mut transition = claim_transition(&shared).await;
+						let result = regs.register(connection, registration.clone(), force, &reserved);
+						let after = regs.claim(&fqdn).cloned();
+						let detached =
+							detach_changed_shares(transition.as_mut(), &mut regs, before.as_ref(), after.as_ref());
+						(result, detached)
+					};
+					let cleanup = finish_changed_shares(&shared, detached).await;
 
 					match result {
 						Err(RegisterError::Duplicate { owner }) => {
@@ -693,12 +774,23 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 						Ok(registered) => {
 							ensure_resolver_for(&shared, addr).await;
 							if let Err(e) = apply(&shared).await {
-								let mut regs = shared.registrations.lock().await;
-								let previous = registered
-									.displaced
-									.filter(|claim| shared.connections.contains(claim.connection));
-								regs.restore(connection, &fqdn, previous);
-								drop(regs);
+								let detached = {
+									let mut regs = shared.registrations.lock().await;
+									let before = regs.claim(&fqdn).cloned();
+									let mut transition = claim_transition(&shared).await;
+									let previous = registered
+										.displaced
+										.filter(|claim| shared.connections.contains(claim.connection));
+									regs.restore(connection, &fqdn, previous);
+									let after = regs.claim(&fqdn).cloned();
+									detach_changed_shares(
+										transition.as_mut(),
+										&mut regs,
+										before.as_ref(),
+										after.as_ref(),
+									)
+								};
+								let _ = finish_changed_shares(&shared, detached).await;
 								let message = rollback_error(&shared, e).await;
 								eprintln!("[error]  {fqdn} apply failed: {message}");
 								if reply(&out, Response::error(message)).await.is_err() {
@@ -709,7 +801,11 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 									eprintln!("[warn]   {fqdn}: {}", validate::SINGLE_LABEL_HINT);
 								}
 								eprintln!("[reg]    {fqdn} -> {target}");
-								if reply(&out, Response::Ok).await.is_err() {
+								let response = match cleanup {
+									Ok(()) => Response::Ok,
+									Err(error) => Response::error(format!("{fqdn} registered, but {error}")),
+								};
+								if reply(&out, response).await.is_err() {
 									break;
 								}
 							}
@@ -726,24 +822,49 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 					}
 
 					let fqdn = format!("{domain}.{}", shared.tld);
-					let removed = shared.registrations.lock().await.deregister(connection, &fqdn);
+					let (removed, detached) = {
+						let mut regs = shared.registrations.lock().await;
+						let before = regs.claim(&fqdn).cloned();
+						let mut transition = claim_transition(&shared).await;
+						let removed = regs.deregister(connection, &fqdn);
+						let after = regs.claim(&fqdn).cloned();
+						let detached =
+							detach_changed_shares(transition.as_mut(), &mut regs, before.as_ref(), after.as_ref());
+						(removed, detached)
+					};
+					let cleanup = finish_changed_shares(&shared, detached).await;
 
 					let error = match removed {
 						Ok(registration) => match apply(&shared).await {
 							Ok(()) => {
 								eprintln!("[dereg]  {fqdn}");
-								if reply(&out, Response::Ok).await.is_err() {
+								let response = match cleanup {
+									Ok(()) => Response::Ok,
+									Err(error) => Response::error(format!("{fqdn} deregistered, but {error}")),
+								};
+								if reply(&out, response).await.is_err() {
 									break;
 								}
 								continue;
 							},
 							Err(e) => {
 								// Restore the entry if it could not be unpublished.
-								let mut regs = shared.registrations.lock().await;
-								if shared.connections.contains(connection) {
-									let _ = regs.register(connection, registration.clone(), false, &[]);
-								}
-								drop(regs);
+								let detached = {
+									let mut regs = shared.registrations.lock().await;
+									let before = regs.claim(&fqdn).cloned();
+									let mut transition = claim_transition(&shared).await;
+									if shared.connections.contains(connection) {
+										let _ = regs.register(connection, registration.clone(), false, &[]);
+									}
+									let after = regs.claim(&fqdn).cloned();
+									detach_changed_shares(
+										transition.as_mut(),
+										&mut regs,
+										before.as_ref(),
+										after.as_ref(),
+									)
+								};
+								let _ = finish_changed_shares(&shared, detached).await;
 								let message = rollback_error(&shared, e).await;
 								eprintln!("[error]  {fqdn} apply failed: {message}");
 								message
@@ -768,11 +889,23 @@ async fn handle_connection(stream: PeekedStream, addr: SocketAddr, shared: Arc<S
 	};
 
 	// Removing the connection and its claims is atomic with a failed takeover's rollback.
-	let evicted = {
+	let (evicted, detached) = {
 		let mut registrations = shared.registrations.lock().await;
+		let claims: Vec<Claim> = registrations
+			.claims()
+			.into_iter()
+			.filter(|claim| claim.connection == connection)
+			.collect();
+		let mut transition = claim_transition(&shared).await;
 		drop(guard);
-		registrations.release(connection)
+		let evicted = registrations.release(connection);
+		let detached = transition
+			.as_mut()
+			.map(|transition| transition.detach_claims(&mut registrations, &claims))
+			.unwrap_or_default();
+		(evicted, detached)
 	};
+	let _ = finish_changed_shares(&shared, detached).await;
 	if !evicted.is_empty() {
 		for registration in &evicted {
 			eprintln!("[evict]  {}", registration.domain);

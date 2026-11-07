@@ -87,9 +87,8 @@ impl Daemon {
 
 		// Providers that cannot reach a container or LAN target point at the plain
 		// edge listener instead; the edge learns the share's name as an alias.
-		let front =
-			crate::share::Front { registry: engine.registrations(), plain_addr: local_client_addr(config.http_addr) };
-		let shares = Arc::new(crate::share::Shares::from_env(Some(front)));
+		let front = crate::share::Front { plain_addr: local_client_addr(config.http_addr) };
+		let shares = Arc::new(crate::share::Shares::from_env(Some(front), engine.registrations()));
 		engine.set_shares(Arc::clone(&shares));
 
 		// `tailscale serve --bg` survives this process while the alias that made
@@ -99,10 +98,10 @@ impl Daemon {
 			tokio::spawn(async move { shares.reclaim().await });
 		}
 
-		// A share belongs to its name: when the registration goes, the tunnel goes.
+		// Shares are reconciled against their owning registration and target.
 		{
 			let shares = Arc::clone(&shares);
-			tokio::spawn(retain_shares(shares, engine.subscribe(), engine.registrations(), tld.clone()));
+			tokio::spawn(retain_shares(shares, engine.subscribe()));
 		}
 
 		let control = match ControlServer::start(
@@ -229,9 +228,20 @@ impl Daemon {
 		crate::control::client_config()
 	}
 
-	/// Stop supervised launches before the process exits.
+	/// Stop supervised launches and shares before the process exits.
 	pub async fn shutdown(&self) {
+		if let Err(error) = self.shutdown_checked().await {
+			eprintln!("[error]  {error}");
+		}
+	}
+
+	/// Stop supervised launches and shares, returning an incomplete provider cleanup.
+	pub async fn shutdown_checked(&self) -> Result<(), String> {
 		self.launches.shutdown().await;
+		self.shares
+			.shutdown()
+			.await
+			.map_err(|error| format!("share shutdown was incomplete: {error:#}"))
 	}
 
 	/// Repair a prerequisite. Runs the privileged helper off the runtime.
@@ -256,33 +266,21 @@ impl Daemon {
 async fn retain_shares(
 	shares: Arc<crate::share::Shares>,
 	mut events: tokio::sync::broadcast::Receiver<crate::engine::EngineEvent>,
-	registry: crate::engine::Registrations,
-	tld: String,
 ) {
 	loop {
 		match events.recv().await {
 			Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
 			Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
 		}
-		reconcile_shares(&shares, &registry, &tld).await;
+		reconcile_shares(&shares).await;
 	}
 }
 
-async fn reconcile_shares(shares: &crate::share::Shares, registry: &crate::engine::Registrations, tld: &str) {
-	// An older event can arrive after a newer claim; its snapshot is not authoritative.
-	let registrations = registry.lock().await.snapshot();
-	let suffix = format!(".{tld}");
-	let names: Vec<String> = registrations
-		.into_iter()
-		.map(|registration| {
-			registration
-				.domain
-				.strip_suffix(&suffix)
-				.unwrap_or(&registration.domain)
-				.to_owned()
-		})
-		.collect();
-	shares.retain(&names).await;
+async fn reconcile_shares(shares: &crate::share::Shares) {
+	// An older event can arrive after a newer claim; only the live registry is authoritative.
+	if let Err(error) = shares.reconcile().await {
+		eprintln!("[error]  could not reconcile shares: {error:#}");
+	}
 }
 
 /// Announce each newly waiting request through the desktop notifier.
@@ -367,8 +365,8 @@ mod tests {
 		let provider = dir.path().join("provider");
 		std::fs::write(&provider, "#!/bin/sh\necho 'https://fixture.trycloudflare.com' >&2\nexec sleep 30\n").unwrap();
 		std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o700)).unwrap();
-		let shares = Shares::new(Provider::Cloudflared, Some(provider), None);
 		let registry = Arc::new(tokio::sync::Mutex::new(crate::registry::Registry::default()));
+		let shares = Shares::new(Provider::Cloudflared, Some(provider), None, Arc::clone(&registry));
 		let (owner, replacement) = {
 			let mut registry = registry.lock().await;
 			let owner = registry.connection_id();
@@ -376,7 +374,7 @@ mod tests {
 			registry.register(owner, claim("127.0.0.1:3000"), false, &[]).unwrap();
 			(owner, replacement)
 		};
-		shares.start("app", "127.0.0.1:3000", None).await.unwrap();
+		shares.start("app", "app.test", None).await.unwrap();
 		let mut revisions = shares.state_changes();
 		revisions.borrow_and_update();
 		{
@@ -392,13 +390,13 @@ mod tests {
 			}
 			.unwrap();
 		}
-		reconcile_shares(&shares, &registry, "test").await;
+		reconcile_shares(&shares).await;
 		let outcome = ShareOutcome {
 			is_listed: shares.list().await.iter().any(|share| share.name == "app"),
 			did_notify: revisions.has_changed().unwrap(),
 		};
 		if outcome.is_listed {
-			assert!(shares.stop("app").await);
+			assert!(shares.stop("app").await.unwrap());
 		}
 		outcome
 	}
@@ -416,13 +414,11 @@ mod tests {
 	}
 
 	#[tokio::test]
-	#[ignore = "share lifetime is not yet bound to its registered target"]
 	async fn changing_a_claim_target_stops_its_share() {
 		assert_eq!(share_after_change(ClaimChange::Target).await, ShareOutcome { is_listed: false, did_notify: true });
 	}
 
 	#[tokio::test]
-	#[ignore = "share lifetime is not yet bound to its owning connection"]
 	async fn forced_takeover_stops_the_previous_owners_share() {
 		assert_eq!(
 			share_after_change(ClaimChange::Takeover).await,
@@ -431,7 +427,6 @@ mod tests {
 	}
 
 	#[tokio::test]
-	#[ignore = "share lifetime is not yet bound to its owning connection"]
 	async fn reconnecting_with_the_same_target_stops_the_previous_share() {
 		assert_eq!(
 			share_after_change(ClaimChange::Reconnect).await,
@@ -440,7 +435,6 @@ mod tests {
 	}
 
 	#[tokio::test]
-	#[ignore = "pending provider starts are not yet cancelled when a claim disappears"]
 	async fn a_pending_share_start_cannot_outlive_its_claim() {
 		let dir = tempfile::tempdir().unwrap();
 		let provider = dir.path().join("provider");
@@ -455,8 +449,8 @@ mod tests {
 		)
 		.unwrap();
 		std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o700)).unwrap();
-		let shares = Arc::new(Shares::new(Provider::Cloudflared, Some(provider), None));
 		let registry = Arc::new(tokio::sync::Mutex::new(crate::registry::Registry::default()));
+		let shares = Arc::new(Shares::new(Provider::Cloudflared, Some(provider), None, Arc::clone(&registry)));
 		let owner = {
 			let mut registry = registry.lock().await;
 			let owner = registry.connection_id();
@@ -464,7 +458,7 @@ mod tests {
 			owner
 		};
 		let starting = Arc::clone(&shares);
-		let mut task = tokio::spawn(async move { starting.start("app", "127.0.0.1:3000", None).await });
+		let mut task = tokio::spawn(async move { starting.start("app", "app.test", None).await });
 		let reached = tokio::time::timeout(std::time::Duration::from_secs(5), async {
 			while !dir.path().join("ready").exists() {
 				tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -477,7 +471,7 @@ mod tests {
 		}
 		assert!(!task.is_finished(), "the provider must still be waiting at the startup barrier");
 		assert_eq!(registry.lock().await.release(owner).len(), 1);
-		reconcile_shares(&shares, &registry, "test").await;
+		reconcile_shares(&shares).await;
 		std::fs::write(dir.path().join("continue"), "").unwrap();
 		let result = match tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await {
 			Ok(result) => result.unwrap(),
@@ -488,7 +482,7 @@ mod tests {
 		};
 		let listed = shares.list().await.iter().any(|share| share.name == "app");
 		if listed {
-			assert!(shares.stop("app").await);
+			assert!(shares.stop("app").await.unwrap());
 		}
 		assert!(
 			result.is_err() && !listed,
@@ -502,24 +496,29 @@ mod tests {
 		let provider = dir.path().join("provider");
 		std::fs::write(&provider, "#!/bin/sh\necho 'https://fixture.trycloudflare.com' >&2\nexec sleep 30\n").unwrap();
 		std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o700)).unwrap();
-		let shares = Arc::new(Shares::new(Provider::Cloudflared, Some(provider), None));
-		shares.start("keep.example", "127.0.0.1:3000", None).await.unwrap();
-		shares.start("stale.example", "127.0.0.1:3001", None).await.unwrap();
 		let registry = Arc::new(tokio::sync::Mutex::new(crate::registry::Registry::default()));
-		{
+		let shares = Arc::new(Shares::new(Provider::Cloudflared, Some(provider), None, Arc::clone(&registry)));
+		let owner = {
 			let mut registry = registry.lock().await;
 			let connection = registry.connection_id();
-			registry
-				.register(
-					connection,
-					testd_core::Registration { domain: "keep.example.test".into(), target: "127.0.0.1:3000".into() },
-					false,
-					&[],
-				)
-				.unwrap();
-		}
+			for (domain, target) in [("keep.example.test", "127.0.0.1:3000"), ("stale.example.test", "127.0.0.1:3001")]
+			{
+				registry
+					.register(
+						connection,
+						testd_core::Registration { domain: domain.into(), target: target.into() },
+						false,
+						&[],
+					)
+					.unwrap();
+			}
+			connection
+		};
+		shares.start("keep.example", "keep.example.test", None).await.unwrap();
+		shares.start("stale.example", "stale.example.test", None).await.unwrap();
+		registry.lock().await.deregister(owner, "stale.example.test").unwrap();
 		let (sender, receiver) = tokio::sync::broadcast::channel(1);
-		let task = tokio::spawn(retain_shares(Arc::clone(&shares), receiver, registry, "test".into()));
+		let task = tokio::spawn(retain_shares(Arc::clone(&shares), receiver));
 		sender.send(EngineEvent::Changed(Vec::new())).unwrap();
 		tokio::time::timeout(std::time::Duration::from_secs(5), async {
 			while shares.list().await.iter().any(|share| share.name == "stale.example") {
@@ -531,7 +530,7 @@ mod tests {
 		let active = shares.list().await;
 		assert_eq!(active.len(), 1);
 		assert_eq!(active[0].name, "keep.example");
-		assert!(shares.stop("keep.example").await);
+		assert!(shares.stop("keep.example").await.unwrap());
 		drop(sender);
 		task.await.unwrap();
 	}
@@ -542,14 +541,21 @@ mod tests {
 		let provider = dir.path().join("provider");
 		std::fs::write(&provider, "#!/bin/sh\necho 'https://fixture.trycloudflare.com' >&2\nexec sleep 30\n").unwrap();
 		std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o700)).unwrap();
-		let shares = Arc::new(Shares::new(Provider::Cloudflared, Some(provider), None));
-		shares.start("app", "127.0.0.1:3000", None).await.unwrap();
 		let registry = Arc::new(tokio::sync::Mutex::new(crate::registry::Registry::default()));
+		let shares = Arc::new(Shares::new(Provider::Cloudflared, Some(provider), None, Arc::clone(&registry)));
+		let owner = {
+			let mut registry = registry.lock().await;
+			let owner = registry.connection_id();
+			registry.register(owner, claim("127.0.0.1:3000"), false, &[]).unwrap();
+			owner
+		};
+		shares.start("app", "app.test", None).await.unwrap();
+		registry.lock().await.release(owner);
 		let (sender, receiver) = tokio::sync::broadcast::channel(1);
 		for _ in 0..3 {
 			sender.send(EngineEvent::Changed(Vec::new())).unwrap();
 		}
-		let task = tokio::spawn(retain_shares(Arc::clone(&shares), receiver, registry, "test".into()));
+		let task = tokio::spawn(retain_shares(Arc::clone(&shares), receiver));
 		tokio::time::timeout(std::time::Duration::from_secs(3), async {
 			while !shares.list().await.is_empty() {
 				tokio::task::yield_now().await;

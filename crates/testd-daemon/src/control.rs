@@ -396,11 +396,14 @@ impl ControlServer {
 		access: Arc<Access>,
 		tld: String,
 	) -> io::Result<Self> {
+		if !Arc::ptr_eq(&registrations, shares.registrations()) {
+			return Err(io::Error::new(io::ErrorKind::InvalidInput, "shares must use the control registry"));
+		}
 		let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
 		let addr = listener.local_addr()?;
 		let token = random_token();
 		write_control_file(&path, addr, client_addr, &token)?;
-		tokio::spawn(accept_loop(listener, token.clone(), health, shares, registrations, access, tld));
+		tokio::spawn(accept_loop(listener, token.clone(), health, shares, access, tld));
 		Ok(Self { path, token })
 	}
 
@@ -442,7 +445,6 @@ async fn accept_loop(
 	token: String,
 	health: Arc<HealthMonitor>,
 	shares: Arc<Shares>,
-	registrations: Registrations,
 	access: Arc<Access>,
 	tld: String,
 ) {
@@ -454,7 +456,6 @@ async fn accept_loop(
 					token.clone(),
 					Arc::clone(&health),
 					Arc::clone(&shares),
-					registrations.clone(),
 					Arc::clone(&access),
 					tld.clone(),
 				));
@@ -472,7 +473,6 @@ async fn handle(
 	token: String,
 	health: Arc<HealthMonitor>,
 	shares: Arc<Shares>,
-	registrations: Registrations,
 	access: Arc<Access>,
 	tld: String,
 ) {
@@ -496,27 +496,17 @@ async fn handle(
 					// caller used, without it.
 					let bare = strip_tld(&name, &tld).to_owned();
 					let fqdn = format!("{bare}.{tld}");
-					let target = registrations
-						.lock()
-						.await
-						.snapshot()
-						.into_iter()
-						.find(|registration| registration.domain == fqdn || registration.domain == bare)
-						.map(|registration| registration.target);
-					match target {
-						None => Response::err(format!("{bare} is not registered on this host")),
-						Some(target) => match shares.start(&bare, &target, provider).await {
-							Ok(url) => Response::started(url),
-							Err(e) => Response::err(format!("{e:#}")),
-						},
+					match shares.start(&bare, &fqdn, provider).await {
+						Ok(url) => Response::started(url),
+						Err(e) => Response::err(format!("{e:#}")),
 					}
 				},
 				Request::Unshare { name, .. } => {
 					let bare = strip_tld(&name, &tld);
-					if shares.stop(bare).await {
-						Response::ok()
-					} else {
-						Response::err(format!("{bare} is not shared"))
+					match shares.stop(bare).await {
+						Ok(true) => Response::ok(),
+						Ok(false) => Response::err(format!("{bare} is not shared")),
+						Err(error) => Response::err(format!("{error:#}")),
 					}
 				},
 				Request::Shares { .. } => Response::listing(shares.list().await),
@@ -631,8 +621,8 @@ mod tests {
 	}
 
 	fn shares() -> (Arc<Shares>, Registrations) {
-		let shares = Arc::new(Shares::new(Provider::Cloudflared, None, None));
 		let registrations: Registrations = Arc::new(AsyncMutex::new(Registry::default()));
+		let shares = Arc::new(Shares::new(Provider::Cloudflared, None, None, registrations.clone()));
 		(shares, registrations)
 	}
 
@@ -645,6 +635,27 @@ mod tests {
 			NEXT.fetch_add(1, Ordering::SeqCst)
 		));
 		Arc::new(Access::load(path).unwrap())
+	}
+
+	#[tokio::test]
+	async fn refuses_a_share_manager_with_a_different_registry() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join(CONTROL_FILE);
+		let (health, _) = monitor();
+		let (shares, _) = shares();
+		let registrations: Registrations = Arc::new(AsyncMutex::new(Registry::default()));
+		let result = ControlServer::start_at(
+			path.clone(),
+			health,
+			"127.0.0.1:1".parse().unwrap(),
+			shares,
+			registrations,
+			access(),
+			"test".into(),
+		)
+		.await;
+		assert_eq!(result.err().unwrap().kind(), io::ErrorKind::InvalidInput);
+		assert!(!path.exists());
 	}
 
 	#[tokio::test]
@@ -823,14 +834,17 @@ mod tests {
 
 		let dir = tempfile::tempdir().unwrap();
 		let provider = dir.path().join("fake-tunnel.sh");
-		std::fs::write(&provider, "#!/bin/sh\necho 'INF |  https://fake-name.trycloudflare.com  |' >&2\nsleep 30\n")
-			.unwrap();
+		std::fs::write(
+			&provider,
+			"#!/bin/sh\necho 'INF |  https://fake-name.trycloudflare.com  |' >&2\nexec sleep 30\n",
+		)
+		.unwrap();
 		std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
 
 		let path = dir.path().join(CONTROL_FILE);
 		let (health, _) = monitor();
-		let shares = Arc::new(Shares::new(Provider::Cloudflared, Some(provider), None));
 		let registrations: Registrations = Arc::new(AsyncMutex::new(Registry::default()));
+		let shares = Arc::new(Shares::new(Provider::Cloudflared, Some(provider), None, registrations.clone()));
 		{
 			let mut registry = registrations.lock().await;
 			let connection = registry.connection_id();
