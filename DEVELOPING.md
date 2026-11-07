@@ -229,11 +229,9 @@ OS.
 |---|---|---|
 | macOS | `~/Library/LaunchAgents/dev.testd.host.plist` | `plutil -lint`, and `launchctl print gui/$(id -u)/dev.testd.host` |
 | Linux | `~/.config/autostart/dev.testd.host.desktop` | has an `Exec=` line pointing at the tray binary |
-| Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `dev.testd.host` | `Get-ItemProperty` returns a command line naming the tray |
+| Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `dev.testd.host` | Read the entry without treating it as candidate evidence |
 
-The host scripts check the artifact when it exists and skip with the expected
-path when it does not, because the tray has not run in a CLI-only session. The GUI
-checklist covers the run and the toggle.
+The CLI-only host scripts cannot establish that an existing login entry belongs to the candidate GUI. Windows records an existing entry as unverified, not as a pass or failure. The GUI checklist covers the actual run and toggle.
 
 ### Browser validation
 
@@ -244,7 +242,7 @@ scripts stop at the HTTP layer on purpose; they cannot judge a padlock.
 
 ### GUI
 
-The tray is a public source build and an optional free release artifact. Run `python3 tests/release/run.py desktop --app <candidate>` to execute and record `tests/host/gui-checklist.md` against the same commit as the CLI. Attach/detach of existing processes is deferred and does not gate this release.
+The tray is a public source build and an optional free release artifact. On a backed-up disposable Linux desktop, run `python3 tests/release/run.py desktop --app <candidate> --bin <candidate-cli> --report <new-report>` to record `tests/host/gui-checklist.md`. The app and CLI must come from the intended source. macOS and Windows desktop runs remain blocked until system ownership is proven. Attach/detach of existing processes is deferred and does not gate this release.
 
 ### Packaging and signing
 
