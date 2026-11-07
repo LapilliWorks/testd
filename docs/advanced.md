@@ -141,7 +141,7 @@ Overrides:
 | `TESTD_TUNNEL_PROVIDER` | Default provider when `--provider` is omitted |
 | `TESTD_TUNNEL` | Path to a provider binary outside `PATH` |
 
-One share per registered name. A share ends when its owner or target changes, including a reconnect to the same target. Repeating the same owner's unchanged registration keeps it. Stopping a share leaves the name registered; removing the name closes the share. Tailscale serve permits one share at a time. If provider cleanup cannot be verified, testd reports the error and refuses a replacement for the rest of that daemon run; an unverified Tailscale cleanup blocks other Tailscale shares too. Inspect provider state before restarting; a restart does not prove cleanup.
+One share per registered name. A share ends when its owner or target changes, including a reconnect to the same target. Repeating the same owner's unchanged registration keeps it. A failed change keeps the share only when the original claim is restored without an intervening successful change. Stopping a share leaves the name registered; removing the name closes the share. Tailscale serve permits one share at a time. If provider cleanup cannot be verified, testd reports the error and refuses a replacement for the rest of that daemon run; an unverified Tailscale cleanup blocks other Tailscale shares too. Inspect provider state before restarting; a restart does not prove cleanup.
 
 A public provider makes the app reachable by anyone with the URL. The provider terminates TLS, so the browser trusts the provider's certificate, not the testd root. Share only what you intend to expose.
 

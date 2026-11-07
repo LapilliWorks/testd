@@ -146,7 +146,7 @@ testd share --stop app.example
 | `ngrok` | Public internet | `ngrok` on `PATH`; run `ngrok config add-authtoken` once |
 | `tailscale` | Your tailnet | `tailscale` on `PATH`; uses the plain edge listener |
 
-The daemon owns the tunnel, not the CLI process, so closing the terminal does not close the share. A share ends when its owning connection or target changes, including a reconnect to the same target; share it again after reconnecting. Repeating an unchanged registration on the same connection keeps the share. The dashboard's Shares card and the tray menu provide the same controls.
+The daemon owns the tunnel, not the CLI process, so closing the terminal does not close the share. A share ends when its owning connection or target changes, including a reconnect to the same target; share it again after reconnecting. Repeating an unchanged registration on the same connection keeps the share. A failed change also keeps it only when the original claim is restored without an intervening successful change. The dashboard's Shares card and the tray menu provide the same controls.
 
 A public share is a public route to the app. A tailnet share is only as private as the tailnet.
 
