@@ -180,7 +180,19 @@ class ReleaseTests(unittest.TestCase):
 			self.assertEqual(command[command.index('--run-ignored') + 1], 'all')
 		for job, following in (('bundle', 'sbom'), ('sbom', 'release')):
 			section = workflow.split(f'\n  {job}:\n', 1)[1].split(f'\n  {following}:\n', 1)[0]
-			self.assertIn('needs: [test, fedora]', section)
+			self.assertIn('needs: [test, fedora, system-state-fixtures, site]', section)
+
+	def test_manual_ci_builds_packages_without_publishing_a_release(self):
+		workflow = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
+		for job, following in (('bundle', 'sbom'), ('sbom', 'release')):
+			section = workflow.split(f'\n  {job}:\n', 1)[1].split(f'\n  {following}:\n', 1)[0]
+			self.assertIn("github.event_name == 'workflow_dispatch'", section)
+		bundle = workflow.split('\n  bundle:\n', 1)[1].split('\n  sbom:\n', 1)[0]
+		self.assertIn('steps.version.outputs.version', bundle)
+		self.assertIn('path: ~/.cargo/bin/cargo-tauri*', bundle)
+		release_job = workflow.split('\n  release:\n', 1)[1]
+		condition = next(line.strip() for line in release_job.splitlines() if line.strip().startswith('if:'))
+		self.assertEqual(condition, "if: startsWith(github.ref, 'refs/tags/v')")
 
 	def test_notification_dependency_is_not_downgraded_to_4_17(self):
 		manifest = release.tomllib.loads((ROOT / 'crates/testd-daemon/Cargo.toml').read_text())

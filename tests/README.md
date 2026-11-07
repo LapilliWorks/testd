@@ -51,6 +51,8 @@ The report includes `ci-summary.json`, containing only OS/Python/source metadata
 
 The workflow installs Python 3.14 on hosted VMs, uses Fedora's system Python, and installs stable Rust, Rust 1.89.0 and 1.90.0, cargo tools, Bun, and checkout dependencies. Linux libraries are installed explicitly; the macOS and Windows runner images supply their native build prerequisites. Manual and system-changing checks require separate restorable infrastructure and remain outside hosted CI.
 
+A manual workflow dispatch also builds the CLI archives and native desktop packages for every release target and generates the workspace SBOMs after all test gates pass. It uses the workspace version, retains unsigned build artifacts, and never creates a tag or publishes a release. Release publishing remains restricted to version tags. Package creation is not installer, signing, or uninstall evidence.
+
 ## All-in-one platform run
 
 Run the matching script on each actual platform and architecture. The `all` suite runs GUI and non-GUI Rust checks, the ignored release contracts, doctests, release-script and browser-server fixtures, the full dependency audit, version verification, website checks, a candidate CLI build, and the unprivileged host suite. Each stage has explicit `BEGIN` and `END` markers, its own report and logs, and a final summary. Failed stages do not prevent independent checks from running.

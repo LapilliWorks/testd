@@ -175,8 +175,9 @@ jobs:
 
   bundle:
     name: bundle (${{ matrix.target }})
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, fedora]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: [test, fedora, system-state-fixtures, site]
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -210,21 +211,28 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python scripts/release.py verify-version "${GITHUB_REF_NAME#v}"
+      - name: Verify tag or workspace candidate version
+        id: version
+        run: |
+          version="$(python -c 'import pathlib, tomllib;
+          print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["package"]["version"])')"
+          if [[ "$GITHUB_REF_TYPE" == 'tag' ]]; then version="${GITHUB_REF_NAME#v}"; fi
+          python scripts/release.py verify-version "$version"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
       # The CLI compiles from source on every target. Bump the cache key when
       # moving to a new Tauri major.
       - id: tauri-cli
         uses: actions/cache@v4
         with:
-          path: ~/.cargo/bin/tauri-cli*
-          key: tauri-cli-v2-${{ runner.os }}-${{ runner.arch }}
+          path: ~/.cargo/bin/cargo-tauri*
+          key: cargo-tauri-v2-${{ runner.os }}-${{ runner.arch }}
       - if: steps.tauri-cli.outputs.cache-hit != 'true'
         run: cargo install tauri-cli --locked --version '^2'
       - run: cargo build --release --bin testd --locked --target ${{ matrix.target }}
       - run: cargo tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
       - name: Package archives and validate bundle selection without installing
         run: >-
-          python scripts/release.py package --version "${GITHUB_REF_NAME#v}"
+          python scripts/release.py package --version "${{ steps.version.outputs.version }}"
           --target ${{ matrix.target }} --build-dir target/${{ matrix.target }}/release --output dist
       # Installer smoke tests require a separately backed-up, interactive VM.
       - uses: actions/upload-artifact@v4
@@ -234,9 +242,10 @@ jobs:
           if-no-files-found: error
 
   sbom:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, fedora]
-    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: [test, fedora, system-state-fixtures, site]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
