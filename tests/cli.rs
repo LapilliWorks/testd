@@ -73,6 +73,17 @@ fn cli_does_not_offer_a_hosts_helper_command() {
 }
 
 #[test]
+fn uninstall_help_offers_only_purge() {
+	let home = TempDir::new().unwrap();
+	let out = testd(home.path(), &["uninstall", "--help"]);
+	assert!(out.status.success());
+	let help = String::from_utf8_lossy(&out.stdout);
+	assert!(help.contains("--purge"), "{help}");
+	assert!(!help.contains("--keep-resolver"), "{help}");
+	assert!(!help.contains("--keep-certificate"), "{help}");
+}
+
+#[test]
 fn init_is_idempotent() {
 	let home = TempDir::new().unwrap();
 
@@ -195,7 +206,7 @@ fn init_reports_an_already_configured_resolver() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn uninstall_does_not_remove_a_configured_hosts_helper_path() {
+fn uninstall_keeps_data_and_legacy_paths_when_root_certificate_is_missing() {
 	let home = TempDir::new().unwrap();
 	let unrelated = home.path().join("unrelated-file");
 	std::fs::write(&unrelated, "keep this file").unwrap();
@@ -203,26 +214,7 @@ fn uninstall_does_not_remove_a_configured_hosts_helper_path() {
 	std::fs::create_dir_all(config.parent().unwrap()).unwrap();
 	std::fs::write(&config, format!("[host]\nhosts_helper_path = {:?}\n", unrelated.to_str().unwrap())).unwrap();
 	let (path, log) = fake_sudo(home.path());
-	let out = testd_command(home.path(), &["uninstall", "--keep-resolver", "--keep-certificate"])
-		.env("PATH", path)
-		.env("TESTD_SUDO_LOG", &log)
-		.output()
-		.unwrap();
-	assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-	assert_eq!(std::fs::read_to_string(unrelated).unwrap(), "keep this file");
-	let calls = std::fs::read_to_string(log).unwrap_or_default();
-	assert!(calls.is_empty(), "uninstall must not remove helper files or sudoers rules: {calls}");
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn uninstall_keeps_data_when_root_certificate_is_missing() {
-	let home = TempDir::new().unwrap();
-	let data = config_dir(home.path()).join("keep-me");
-	std::fs::create_dir_all(data.parent().unwrap()).unwrap();
-	std::fs::write(&data, "local data").unwrap();
-	let (path, log) = fake_sudo(home.path());
-	let out = testd_command(home.path(), &["uninstall", "--purge", "--keep-resolver"])
+	let out = testd_command(home.path(), &["uninstall", "--purge"])
 		.env("PATH", path)
 		.env("TESTD_SUDO_LOG", &log)
 		.output()
@@ -230,20 +222,30 @@ fn uninstall_keeps_data_when_root_certificate_is_missing() {
 	let stderr = String::from_utf8_lossy(&out.stderr);
 	assert!(!out.status.success(), "missing certificate must be reported: {stderr}");
 	assert!(stderr.contains("missing") && stderr.contains("trust was not removed"), "{stderr}");
-	assert_eq!(std::fs::read_to_string(data).unwrap(), "local data");
+	assert!(config.is_file(), "local data must survive incomplete cleanup");
+	assert_eq!(std::fs::read_to_string(unrelated).unwrap(), "keep this file");
 	let calls = std::fs::read_to_string(log).unwrap_or_default();
-	assert!(!calls.contains("testd-root.crt"), "unidentified trust must remain: {calls}");
+	assert!(calls.is_empty(), "unowned state and obsolete helper paths must not be changed: {calls}");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
-fn uninstall_purge_removes_local_data_without_system_changes() {
+fn uninstall_refuses_invalid_config_before_system_cleanup() {
 	let home = TempDir::new().unwrap();
-	assert!(init(home.path()).status.success());
-	assert!(config_dir(home.path()).join("config.toml").exists());
-
-	let out = testd(home.path(), &["uninstall", "--purge", "--keep-resolver", "--keep-certificate"]);
-	assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-	assert!(!config_dir(home.path()).exists());
+	let config = config_dir(home.path()).join("config.toml");
+	std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+	std::fs::write(&config, "[host]\npki_dir = [\n").unwrap();
+	let (path, log) = fake_sudo(home.path());
+	let out = testd_command(home.path(), &["uninstall", "--purge"])
+		.env("PATH", path)
+		.env("TESTD_SUDO_LOG", &log)
+		.output()
+		.unwrap();
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(!out.status.success(), "an invalid config must be reported: {stderr}");
+	assert!(stderr.contains("cannot load the host configuration"), "{stderr}");
+	assert_eq!(std::fs::read_to_string(config).unwrap(), "[host]\npki_dir = [\n");
+	assert!(std::fs::read_to_string(log).unwrap_or_default().is_empty());
 }
 
 #[test]

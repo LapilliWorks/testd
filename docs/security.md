@@ -84,7 +84,7 @@ The testd root is a local certificate authority. Anything that trusts it accepts
 - If the root key is exposed, rebuild the PKI, reinstall trust on every browser machine, and restart the host.
 - If the root key is moved offline, restore it before the intermediate expires; the intermediate renews with it.
 
-Installing the root on a browser machine is a real trust change. Remove it with `testd uninstall` when the machine no longer uses testd. Removing the desktop app does not remove the root or the resolver route.
+Installing the root on a browser machine is a real trust change. On Linux, use `testd uninstall` to remove owned trust and resolver integration when the machine no longer uses testd. macOS and Windows uninstall is blocked until ownership can be verified; other resolver and trust actions on those platforms do not yet have equivalent ownership safeguards. Removing the desktop app does not remove the root or the resolver route.
 
 On Linux, testd checks the distro's system CA bundle and uses an already trusted root without adopting its source. Setup reports a conflict rather than overwriting a different certificate at its system anchor path. Removal requires the installation's private ownership ID, its system ownership record, and an unchanged anchor and certificate; if ownership cannot be established, the anchor is left in place and the conflict is reported. The Linux DNS route uses the same ownership rule for its resolver drop-in. Inspect and back up existing files before making any changes.
 
@@ -141,7 +141,7 @@ The root-managed systemd unit grants only `CAP_NET_BIND_SERVICE` and keeps `NoNe
 4. If the root or intermediate key leaked, rebuild the PKI, reinstall trust everywhere, and restart.
 5. Remove any exposure at the firewall, tunnel, or tailnet layer.
 6. Check `~/.config/testd/tokens.json` and the dashboard Access card for unexpected grants.
-7. When the host is retired, run `testd uninstall` and remove the config directory.
+7. When a Linux host is retired, run `testd uninstall --purge` after reviewing the data to be deleted. macOS and Windows cleanup remains blocked until ownership can be verified.
 
 ## What testd does not do
 

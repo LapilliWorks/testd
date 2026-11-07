@@ -194,7 +194,7 @@ The tray:
 - Lists saved quick launches with start and stop actions
 - Provides share controls
 
-Unticking **Launch at login** is final until you tick it again, even if the login item is removed outside the tray. Removing the app with the OS uninstaller does not remove the DNS route or the trusted root; run `testd uninstall` first.
+Unticking **Launch at login** is final until you tick it again, even if the login item is removed outside the tray. Removing the app with the OS uninstaller does not remove the DNS route or the trusted root. On Linux, run `testd uninstall` first; macOS and Windows uninstall is blocked until system ownership can be verified.
 
 Notifications and OS URL-scheme launches share one action grammar:
 
@@ -253,10 +253,8 @@ Stop the daemon first, then remove system integration:
 ```sh
 testd uninstall
 testd uninstall --purge
-testd uninstall --keep-resolver
-testd uninstall --keep-certificate
 ```
 
-`uninstall` removes the OS resolver route and the trusted root. `--purge` also deletes `~/.config/testd`, including the PKI, tokens, and local state, but only after system cleanup succeeds. `--keep-resolver` and `--keep-certificate` preserve either system change. If the local root certificate is missing, testd skips trust removal and reports incomplete cleanup; restore the certificate before retrying or use `--keep-certificate` to retain trust intentionally.
+On Linux, `uninstall` removes owned resolver and trust integration and retains local data. `--purge` also deletes the configuration directory, including its default PKI and tokens, but only after system cleanup succeeds. A custom PKI outside that directory is not deleted. Unowned or changed system state is left untouched and conflicts are reported. If the local root certificate is missing, trust removal and purge are incomplete; restore the certificate before retrying.
 
-On Linux, testd leaves unowned or changed resolver and trust state in place. Purging with either `--keep-resolver` or `--keep-certificate` deletes `system-ownership-id`; back it up first if testd should remove its owned system state later. For retained trust, also back up `pki/root.crt`.
+Uninstall is blocked on macOS and Windows until resolver and trust ownership can be verified. It does not remove the executable or desktop app.

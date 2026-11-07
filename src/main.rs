@@ -139,18 +139,12 @@ enum Command {
 	},
 	/// Print a Caddyfile that routes every name to the built-in edge.
 	ExportCaddyfile,
-	/// Remove system integration: the OS resolver route and trusted root.
+	/// Remove owned system resolver and trust integration.
 	/// Local data stays unless --purge is passed. Stop the daemon first.
 	Uninstall {
-		/// Also delete the config directory, including the PKI and local state.
+		/// Also delete the config directory, including its default PKI and local state.
 		#[arg(long)]
 		purge: bool,
-		/// Leave the OS resolver route in place.
-		#[arg(long)]
-		keep_resolver: bool,
-		/// Leave the trusted root certificate in place.
-		#[arg(long)]
-		keep_certificate: bool,
 	},
 }
 
@@ -233,9 +227,7 @@ async fn main() -> anyhow::Result<()> {
 		Command::Deny { id } => deny(&id),
 		Command::Tokens { revoke } => tokens(revoke.as_deref()),
 		Command::ExportCaddyfile => export_caddyfile(),
-		Command::Uninstall { purge, keep_resolver, keep_certificate } => {
-			uninstall(purge, keep_resolver, keep_certificate)
-		},
+		Command::Uninstall { purge } => uninstall(purge),
 	}
 }
 
@@ -1077,77 +1069,335 @@ fn export_caddyfile() -> anyhow::Result<()> {
 	Ok(())
 }
 
-fn uninstall(purge: bool, keep_resolver: bool, keep_certificate: bool) -> anyhow::Result<()> {
-	let config = testd_core::config::load_host_config().ok();
+#[derive(Clone, Copy)]
+enum LocalDataAction {
+	Keep,
+	Purge,
+}
+
+fn uninstall(purge: bool) -> anyhow::Result<()> {
+	require_owned_uninstall(std::env::consts::OS)?;
+	let config = load_uninstall_config()?;
 	let tld = testd_core::config::host_tld();
+	let dir = testd_core::config::config_dir();
+	let local_data = if purge { LocalDataAction::Purge } else { LocalDataAction::Keep };
+	uninstall_with(
+		local_data,
+		&dir,
+		|| {
+			eprintln!("removing the OS resolver route for .{tld}");
+			testd_setup::teardown_os_resolver(tld)
+		},
+		|| remove_trusted_root(config.as_ref()),
+	)
+}
+
+fn require_owned_uninstall(system: &str) -> anyhow::Result<()> {
+	match system {
+		"linux" => Ok(()),
+		"macos" | "windows" => anyhow::bail!(
+			"uninstall is blocked on {system} until resolver and trust ownership can be verified; \
+			 system and local state were left untouched"
+		),
+		_ => anyhow::bail!("uninstall is not supported on {system}; system and local state were left untouched"),
+	}
+}
+
+fn load_uninstall_config() -> anyhow::Result<Option<testd_core::config::HostConfig>> {
+	let path = testd_core::config::config_path();
+	match std::fs::symlink_metadata(&path) {
+		Ok(_) => Ok(Some(
+			testd_core::config::load_host_config()
+				.context("cannot load the host configuration; system and local state were left untouched")?,
+		)),
+		Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+		Err(error) => Err(error).with_context(|| format!("cannot inspect {}", path.display())),
+	}
+}
+
+fn uninstall_with(
+	local_data: LocalDataAction,
+	dir: &std::path::Path,
+	remove_resolver: impl FnOnce() -> std::io::Result<()>,
+	remove_certificate: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+	let local_snapshot = match local_data {
+		LocalDataAction::Keep => None,
+		LocalDataAction::Purge => snapshot_local_data(dir)?,
+	};
 	let mut errors = Vec::new();
-
-	if !keep_resolver {
-		eprintln!("removing the OS resolver route for .{tld}");
-		if let Err(e) = testd_setup::teardown_os_resolver(tld) {
-			errors.push(format!("resolver: {e}"));
-		}
+	if let Err(error) = remove_resolver() {
+		errors.push(format!("resolver: {error}"));
 	}
-
-	if !keep_certificate {
-		remove_trusted_root(config.as_ref(), &mut errors);
+	if let Err(error) = remove_certificate() {
+		errors.push(format!("certificate: {error:#}"));
 	}
-
-	if purge {
+	if matches!(local_data, LocalDataAction::Purge) {
 		if errors.is_empty() {
-			remove_local_data(&mut errors);
+			if let Err(error) = remove_local_data(dir, local_snapshot) {
+				errors.push(format!("local data: {error:#}"));
+			}
 		} else {
 			eprintln!("local data kept because system cleanup failed; fix the errors and run again");
 		}
 	}
-
 	if !errors.is_empty() {
 		anyhow::bail!("uninstall is incomplete:\n  - {}", errors.join("\n  - "));
 	}
-
-	eprintln!("testd system integration removed");
-	if !purge {
-		eprintln!("local data kept in {}; pass --purge to remove it", testd_core::config::config_dir().display());
+	eprintln!("testd-owned system integration removed");
+	if matches!(local_data, LocalDataAction::Keep) {
+		eprintln!("local data kept in {}; pass --purge to remove it", dir.display());
 	}
 	Ok(())
 }
 
-fn remove_trusted_root(config: Option<&testd_core::config::HostConfig>, errors: &mut Vec<String>) {
+fn remove_trusted_root(config: Option<&testd_core::config::HostConfig>) -> anyhow::Result<()> {
 	let pki_dir = config
 		.map(|config| config.pki_dir.clone())
 		.unwrap_or_else(|| testd_core::config::config_dir().join("pki"));
 	let path = pki_dir.join("root.crt");
-	let mut removed = false;
-	match std::fs::read_to_string(&path) {
-		Ok(pem) => {
-			eprintln!("removing the trusted root {}", path.display());
-			match testd_setup::untrust_root(&pem) {
-				Ok(()) => removed = true,
-				Err(e) => errors.push(format!("certificate: {e}")),
-			}
+	let pem = match std::fs::read_to_string(&path) {
+		Ok(pem) => pem,
+		Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+			anyhow::bail!("{} is missing; cannot identify the trusted root, so trust was not removed", path.display())
 		},
-		Err(e) if e.kind() == std::io::ErrorKind::NotFound => errors.push(format!(
-			"certificate: {} is missing; cannot identify the trusted root, so trust was not removed",
-			path.display()
-		)),
-		Err(e) => errors.push(format!("certificate: read {}: {e}", path.display())),
+		Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+	};
+	eprintln!("removing the trusted root {}", path.display());
+	testd_setup::untrust_root(&pem)?;
+	if pki_dir.exists() || config.is_some() {
+		testd_daemon::health::set_auto_trust(&pki_dir, false)?;
 	}
+	Ok(())
+}
 
-	if removed
-		&& (pki_dir.exists() || config.is_some())
-		&& let Err(e) = testd_daemon::health::set_auto_trust(&pki_dir, false)
+fn snapshot_local_data(dir: &std::path::Path) -> anyhow::Result<Option<std::fs::File>> {
+	let metadata = match std::fs::symlink_metadata(dir) {
+		Ok(metadata) if metadata.is_dir() => metadata,
+		Ok(_) => anyhow::bail!("{} is not a directory; left untouched", dir.display()),
+		Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+		Err(error) => return Err(error).with_context(|| format!("inspect {}", dir.display())),
+	};
+	// Keep the directory open until deletion so its identity cannot be reused during cleanup.
+	let directory = std::fs::File::open(dir).with_context(|| format!("open {}", dir.display()))?;
+	if !same_local_directory(&metadata, &directory.metadata()?) {
+		anyhow::bail!("{} changed before cleanup; left untouched", dir.display());
+	}
+	Ok(Some(directory))
+}
+
+fn same_local_directory(first: &std::fs::Metadata, second: &std::fs::Metadata) -> bool {
+	#[cfg(unix)]
 	{
-		errors.push(format!("certificate: {e}"));
+		use std::os::unix::fs::MetadataExt;
+		first.is_dir() && second.is_dir() && first.dev() == second.dev() && first.ino() == second.ino()
+	}
+	#[cfg(not(unix))]
+	{
+		// Uninstall remains blocked until this platform has a verified directory identity check.
+		let _ = (first, second);
+		false
 	}
 }
 
-fn remove_local_data(errors: &mut Vec<String>) {
-	let dir = testd_core::config::config_dir();
-	if !dir.exists() {
-		return;
-	}
+fn remove_local_data(dir: &std::path::Path, snapshot: Option<std::fs::File>) -> anyhow::Result<()> {
+	let current = match std::fs::symlink_metadata(dir) {
+		Ok(metadata) => Some(metadata),
+		Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+		Err(error) => return Err(error).with_context(|| format!("inspect {}", dir.display())),
+	};
+	let directory = match (snapshot, current) {
+		(None, None) => return Ok(()),
+		(Some(directory), Some(metadata)) if same_local_directory(&directory.metadata()?, &metadata) => directory,
+		_ => anyhow::bail!("{} changed during system cleanup; left untouched", dir.display()),
+	};
 	eprintln!("removing local data {}", dir.display());
-	if let Err(e) = std::fs::remove_dir_all(&dir) {
-		errors.push(format!("local data: {e}"));
+	let result = std::fs::remove_dir_all(dir).with_context(|| format!("remove {}", dir.display()));
+	drop(directory);
+	result
+}
+
+#[cfg(test)]
+mod uninstall_tests {
+	use super::*;
+	use std::cell::RefCell;
+	use std::path::PathBuf;
+
+	fn local_state() -> (tempfile::TempDir, PathBuf) {
+		let fixture = tempfile::tempdir().unwrap();
+		let dir = fixture.path().join("testd");
+		std::fs::create_dir(&dir).unwrap();
+		std::fs::write(dir.join("data"), "preserve until cleanup succeeds").unwrap();
+		(fixture, dir)
+	}
+
+	#[test]
+	fn selective_keep_options_are_rejected_before_dispatch() {
+		for flag in ["--keep-resolver", "--keep-certificate"] {
+			for args in [vec!["testd", "uninstall", flag], vec!["testd", "uninstall", "--purge", flag]] {
+				let error = Cli::try_parse_from(args).err().expect("removed option must be rejected");
+				assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+			}
+		}
+	}
+
+	#[test]
+	fn platforms_without_ownership_guards_cannot_uninstall() {
+		assert!(require_owned_uninstall("linux").is_ok());
+		for system in ["macos", "windows", "freebsd"] {
+			let error = require_owned_uninstall(system).unwrap_err().to_string();
+			assert!(error.contains("left untouched"), "{error}");
+		}
+	}
+
+	#[test]
+	fn bare_uninstall_keeps_local_data() {
+		let (_fixture, dir) = local_state();
+		let calls = RefCell::new(Vec::new());
+		uninstall_with(
+			LocalDataAction::Keep,
+			&dir,
+			|| {
+				calls.borrow_mut().push("resolver");
+				Ok(())
+			},
+			|| {
+				calls.borrow_mut().push("certificate");
+				Ok(())
+			},
+		)
+		.unwrap();
+		assert_eq!(*calls.borrow(), ["resolver", "certificate"]);
+		assert_eq!(std::fs::read_to_string(dir.join("data")).unwrap(), "preserve until cleanup succeeds");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn purge_removes_local_data_after_both_cleanups() {
+		let (_fixture, dir) = local_state();
+		let calls = RefCell::new(Vec::new());
+		uninstall_with(
+			LocalDataAction::Purge,
+			&dir,
+			|| {
+				assert!(dir.join("data").exists());
+				calls.borrow_mut().push("resolver");
+				Ok(())
+			},
+			|| {
+				assert!(dir.join("data").exists());
+				calls.borrow_mut().push("certificate");
+				Ok(())
+			},
+		)
+		.unwrap();
+		assert_eq!(*calls.borrow(), ["resolver", "certificate"]);
+		assert!(!dir.exists());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn failed_cleanups_report_both_errors_and_keep_local_data() {
+		let (_fixture, dir) = local_state();
+		let error = uninstall_with(
+			LocalDataAction::Purge,
+			&dir,
+			|| Err(std::io::Error::other("resolver failure")),
+			|| anyhow::bail!("certificate failure"),
+		)
+		.unwrap_err()
+		.to_string();
+		assert!(error.contains("resolver: resolver failure"), "{error}");
+		assert!(error.contains("certificate: certificate failure"), "{error}");
+		assert!(dir.join("data").is_file());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn missing_root_certificate_prevents_purge() {
+		let (_fixture, dir) = local_state();
+		let mut config: testd_core::config::HostConfig = toml::from_str("").unwrap();
+		config.pki_dir = dir.join("pki");
+		let error = uninstall_with(LocalDataAction::Purge, &dir, || Ok(()), || remove_trusted_root(Some(&config)))
+			.unwrap_err()
+			.to_string();
+		assert!(error.contains("missing") && error.contains("trust was not removed"), "{error}");
+		assert!(dir.join("data").is_file());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn purge_refuses_a_directory_created_during_cleanup() {
+		let fixture = tempfile::tempdir().unwrap();
+		let dir = fixture.path().join("testd");
+		let error = uninstall_with(
+			LocalDataAction::Purge,
+			&dir,
+			|| {
+				std::fs::create_dir(&dir)?;
+				std::fs::write(dir.join("data"), "unrelated data")?;
+				Ok(())
+			},
+			|| Ok(()),
+		)
+		.unwrap_err()
+		.to_string();
+		assert!(error.contains("changed during system cleanup"), "{error}");
+		assert_eq!(std::fs::read_to_string(dir.join("data")).unwrap(), "unrelated data");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn purge_refuses_a_directory_replaced_during_cleanup() {
+		let (fixture, dir) = local_state();
+		let original = fixture.path().join("original");
+		let replacement = fixture.path().join("replacement");
+		std::fs::create_dir(&replacement).unwrap();
+		std::fs::write(replacement.join("data"), "unrelated data").unwrap();
+		let error = uninstall_with(
+			LocalDataAction::Purge,
+			&dir,
+			|| {
+				std::fs::rename(&dir, &original)?;
+				std::fs::rename(&replacement, &dir)?;
+				Ok(())
+			},
+			|| Ok(()),
+		)
+		.unwrap_err()
+		.to_string();
+		assert!(error.contains("changed during system cleanup"), "{error}");
+		assert_eq!(std::fs::read_to_string(original.join("data")).unwrap(), "preserve until cleanup succeeds");
+		assert_eq!(std::fs::read_to_string(dir.join("data")).unwrap(), "unrelated data");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn purge_refuses_a_symlinked_config_directory() {
+		let fixture = tempfile::tempdir().unwrap();
+		let target = fixture.path().join("outside");
+		std::fs::create_dir(&target).unwrap();
+		std::fs::write(target.join("data"), "keep").unwrap();
+		let dir = fixture.path().join("testd");
+		std::os::unix::fs::symlink(&target, &dir).unwrap();
+		let calls = RefCell::new(Vec::new());
+		let error = uninstall_with(
+			LocalDataAction::Purge,
+			&dir,
+			|| {
+				calls.borrow_mut().push("resolver");
+				Ok(())
+			},
+			|| {
+				calls.borrow_mut().push("certificate");
+				Ok(())
+			},
+		)
+		.unwrap_err()
+		.to_string();
+		assert!(error.contains("left untouched"), "{error}");
+		assert!(calls.borrow().is_empty());
+		assert!(std::fs::symlink_metadata(&dir).unwrap().is_symlink());
+		assert_eq!(std::fs::read_to_string(target.join("data")).unwrap(), "keep");
 	}
 }

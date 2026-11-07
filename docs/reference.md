@@ -173,18 +173,12 @@ Writes the managed Caddyfile to `[host] caddyfile_path` and prints the `import` 
 ### uninstall
 
 ```text
-testd uninstall [--purge] [--keep-resolver] [--keep-certificate]
+testd uninstall [--purge]
 ```
 
-| Option | Meaning |
-|---|---|
-| `--purge` | Also delete the config directory, PKI, tokens, and local state |
-| `--keep-resolver` | Leave the OS resolver route in place |
-| `--keep-certificate` | Leave the trusted root in place |
+On Linux, remove owned resolver and trust integration while retaining local data. Stop the daemon first. `--purge` also deletes the configuration directory, including its default PKI, tokens, and local state, only after system cleanup succeeds. A custom PKI outside that directory is not deleted. Purge checks the configuration directory before cleanup and again before deletion; stop the daemon and avoid concurrent changes. Unowned or changed resolver and trust state is left untouched; conflicts and a root still trusted through another source are reported. If the local root certificate is missing, trust removal and purge are incomplete; restore the certificate before retrying.
 
-Stop the daemon first. `--purge` proceeds only when system cleanup succeeds. If the local root certificate is missing, trust removal is skipped and cleanup is incomplete; restore the certificate before retrying or use `--keep-certificate` to retain trust intentionally.
-
-On Linux, testd leaves unowned or changed resolver and trust state in place. If the root remains trusted through another source, cleanup reports it. Purging with either `--keep-resolver` or `--keep-certificate` deletes `system-ownership-id`; back it up first if testd should remove its owned system state later. For retained trust, also back up `pki/root.crt`.
+Uninstall is blocked on macOS and Windows until resolver and trust ownership can be verified. Other resolver and trust actions on those platforms do not yet have equivalent ownership safeguards. This command does not remove the executable or desktop app.
 
 ## Environment variables
 

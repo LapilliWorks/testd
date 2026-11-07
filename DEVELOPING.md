@@ -394,7 +394,7 @@ Artifacts: CLI `.tar.gz` (Linux/macOS) or `.zip` (Windows), `.dmg` containing `.
 
 Windows ships the NSIS installer only. It installs per user into `%LOCALAPPDATA%\Testd` and asks for no elevation. Tauri's MSI is always per machine (`Program Files`, HKLM uninstall key, UAC prompt) with no option to make it per user, so it is not produced; `src-tauri/tauri.windows.conf.json` narrows the Windows target list. An enterprise deployment that needs a machine-wide install can build one with `cargo tauri build --bundles msi` and install that `.msi` by hand.
 
-Removing the app does not remove the machine trust root or the DNS route. Run `testd uninstall` before uninstalling; add `--purge` to delete the local config directory.
+Removing the app does not remove the machine trust root or the DNS route. CLI uninstall is blocked on macOS and Windows until system ownership can be verified; do not remove unowned state. On Linux, run `testd uninstall` before removing the app; add `--purge` to delete the local config directory after system cleanup succeeds.
 
 ### Sign
 

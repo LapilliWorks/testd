@@ -190,9 +190,9 @@ Stop the daemon first, then remove the OS resolver route and the trusted root:
 testd uninstall
 ```
 
-`testd uninstall --purge` also deletes `~/.config/testd`, including the PKI and local state, after system cleanup succeeds. Pass `--keep-resolver` or `--keep-certificate` to leave either system change in place. If the local root certificate is missing, testd skips trust removal and reports incomplete cleanup. On Linux, resolver and trust cleanup leave unowned or changed state in place.
+On Linux, `testd uninstall` removes only owned resolver and trust integration and keeps local data. `testd uninstall --purge` also deletes `~/.config/testd`, including the default PKI and local state, after system cleanup succeeds. A custom PKI outside that directory is not deleted. Purge checks the configuration directory before cleanup and again before deletion; stop the daemon and avoid concurrent changes. Unowned or changed system state is left untouched and conflicts are reported; if the root certificate is missing, trust removal and purge are incomplete.
 
-Removing the tray app with the OS uninstaller does not remove the certificate or DNS route; run `testd uninstall` first.
+Uninstall is blocked on macOS and Windows until resolver and trust ownership can be verified; it leaves system and local state untouched. Other macOS and Windows resolver and trust actions do not yet have equivalent ownership safeguards. This command does not remove the executable or desktop app. Removing the app with the OS uninstaller does not remove the certificate or DNS route.
 
 ## URL actions
 
