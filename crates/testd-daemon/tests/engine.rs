@@ -232,6 +232,26 @@ mod share_lifetime {
 		shares.start("app", "app.test", None).await.unwrap();
 	}
 
+	const TRACKED_PROVIDER: &str = "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$0.${4##*:}.pid\"\n\
+		echo https://fixture.trycloudflare.com >&2\nexec sleep 30\n";
+
+	fn provider_pid(directory: &std::path::Path, port: u16) -> u32 {
+		let path = directory.join(format!("provider.{port}.pid"));
+		let pid = std::fs::read_to_string(path).unwrap().trim().parse::<u32>().unwrap();
+		assert!(pid > 1, "invalid fake provider pid: {pid}");
+		pid
+	}
+
+	fn is_process_running(pid: u32) -> bool {
+		std::process::Command::new("sh")
+			.args(["-c", "kill -0 \"$1\"", "check-provider", &pid.to_string()])
+			.stdout(std::process::Stdio::null())
+			.stderr(std::process::Stdio::null())
+			.status()
+			.unwrap()
+			.success()
+	}
+
 	async fn wait_for_file(path: &std::path::Path) {
 		tokio::time::timeout(std::time::Duration::from_secs(5), async {
 			while !path.exists() {
@@ -301,6 +321,79 @@ mod share_lifetime {
 			.unwrap();
 		assert!(shares.list().await.is_empty());
 		assert!(harness.registrations.lock().await.claim("app.test").is_none());
+	}
+
+	#[tokio::test]
+	async fn deleting_an_established_name_grant_stops_only_its_share() {
+		let (directory, harness, shares) = start_fixture(TRACKED_PROVIDER).await;
+		let (mut leaf, _token) = approved_leaf(&harness, &["app", "api"]).await;
+		assert!(matches!(leaf.request(register("app", "3000", false)).await, Response::Ok));
+		assert!(matches!(leaf.request(register("api", "4000", false)).await, Response::Ok));
+		shares.start("app", "app.test", None).await.unwrap();
+		shares.start("api", "api.test", None).await.unwrap();
+		let app_pid = provider_pid(directory.path(), 3000);
+		let api_pid = provider_pid(directory.path(), 4000);
+		assert!(is_process_running(app_pid) && is_process_running(api_pid));
+
+		harness
+			.engine
+			.operator(OperatorAction::DeleteGrant { domain: "app.test".into() })
+			.await
+			.unwrap();
+		let notice = tokio::time::timeout(std::time::Duration::from_secs(5), recv::<_, Response>(&mut leaf.reader))
+			.await
+			.expect("the leaf is told its name lost its grant")
+			.unwrap();
+		assert!(matches!(notice, Some(Response::NameRevoked { ref domain }) if domain == "app.test"), "{notice:?}");
+		assert!(!is_process_running(app_pid), "the removed share's provider is still running");
+		assert!(is_process_running(api_pid), "an unrelated share's provider was stopped");
+		assert!(harness.registrations.lock().await.claim("app.test").is_none());
+		let remaining = shares.list().await;
+		assert_eq!(remaining.len(), 1);
+		assert_eq!(remaining[0].name, "api");
+		assert!(matches!(leaf.request(register("api", "4000", false)).await, Response::Ok));
+		assert_eq!(shares.list().await, remaining);
+		assert!(shares.stop("api").await.unwrap());
+		assert!(!is_process_running(api_pid));
+	}
+
+	#[tokio::test]
+	async fn revoking_an_established_token_stops_only_its_shares() {
+		let (directory, harness, shares) = start_fixture(TRACKED_PROVIDER).await;
+		let (mut leaf, token) = approved_leaf(&harness, &["app"]).await;
+		let mut other = Client::connect(harness.addr, &harness.token).await;
+		assert!(matches!(leaf.request(register("app", "3000", false)).await, Response::Ok));
+		assert!(matches!(other.request(register("other", "5000", false)).await, Response::Ok));
+		shares.start("app", "app.test", None).await.unwrap();
+		shares.start("other", "other.test", None).await.unwrap();
+		let app_pid = provider_pid(directory.path(), 3000);
+		let other_pid = provider_pid(directory.path(), 5000);
+		assert!(is_process_running(app_pid) && is_process_running(other_pid));
+
+		let body = format!("{{\"id\":\"{}\"}}", token.id);
+		let page = http(harness.addr, &post("/api/local/tokens/revoke", &body)).await;
+		assert!(page.starts_with("HTTP/1.1 200"), "{page}");
+		let notice = tokio::time::timeout(std::time::Duration::from_secs(5), recv::<_, Response>(&mut leaf.reader))
+			.await
+			.expect("the leaf is told its credential was revoked")
+			.unwrap();
+		assert!(matches!(notice, Some(Response::GrantRevoked)), "{notice:?}");
+		wait_for_target(&harness, "app.test", None).await;
+		tokio::time::timeout(std::time::Duration::from_secs(5), async {
+			while is_process_running(app_pid) || shares.list().await.iter().any(|share| share.name == "app") {
+				tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the revoked share and provider did not stop");
+		assert!(is_process_running(other_pid), "an unrelated share's provider was stopped");
+		let remaining = shares.list().await;
+		assert_eq!(remaining.len(), 1);
+		assert_eq!(remaining[0].name, "other");
+		assert!(matches!(other.request(register("other", "5000", false)).await, Response::Ok));
+		assert_eq!(shares.list().await, remaining);
+		assert!(shares.stop("other").await.unwrap());
+		assert!(!is_process_running(other_pid));
 	}
 
 	#[tokio::test]
