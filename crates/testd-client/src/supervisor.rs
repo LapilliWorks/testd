@@ -816,7 +816,7 @@ mod tests {
 	use super::*;
 	use std::sync::{Arc, Mutex};
 	use testd_core::protocol::Auth;
-	use tokio::net::TcpListener;
+	use tokio::net::{TcpListener, TcpSocket};
 	use tokio::sync::mpsc::Receiver;
 
 	struct FakeHost {
@@ -928,6 +928,14 @@ mod tests {
 		let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
 		let addr = listener.local_addr().unwrap().to_string();
 		(listener, addr)
+	}
+
+	fn unavailable_target() -> (TcpSocket, String) {
+		// Reserve the port without listening so another test cannot take it during the probe.
+		let socket = TcpSocket::new_v4().unwrap();
+		socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+		let addr = socket.local_addr().unwrap().to_string();
+		(socket, addr)
 	}
 
 	fn spec(target: &str) -> LaunchSpec {
@@ -1154,12 +1162,7 @@ mod tests {
 	async fn failed_rebind_keeps_the_old_target() {
 		let host = fake_host().await;
 		let (_listener, first) = target().await;
-		let dead = {
-			let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-			let addr = listener.local_addr().unwrap().to_string();
-			drop(listener);
-			addr
-		};
+		let (reservation, dead) = unavailable_target();
 		let mut spec = spec_with_args(&first);
 		spec.probe_timeout = Duration::from_millis(600);
 		let mut launch = launch(spec, config(&host.addr)).await.unwrap();
@@ -1175,17 +1178,24 @@ mod tests {
 		}
 		assert_eq!(host.requests(), vec![format!("register app {first}")]);
 		launch.stop().await.unwrap();
+		drop(reservation);
+	}
+
+	#[tokio::test]
+	async fn unavailable_target_stays_reserved() {
+		let (reservation, target) = unavailable_target();
+		assert!(TcpListener::bind(&target).await.is_err(), "{target} was not reserved");
+		let result = tokio::time::timeout(Duration::from_secs(5), wait_for_target(&target, Duration::from_millis(100)))
+			.await
+			.expect("probe did not finish");
+		assert!(result.is_err(), "{target} unexpectedly accepted a connection");
+		drop(reservation);
 	}
 
 	#[tokio::test]
 	async fn probe_failure_does_not_register_or_leave_the_child_running() {
 		let host = fake_host().await;
-		let dead = {
-			let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-			let addr = listener.local_addr().unwrap().to_string();
-			drop(listener);
-			addr
-		};
+		let (reservation, dead) = unavailable_target();
 		let mut spec = spec_with_args(&dead);
 		spec.probe_timeout = Duration::from_millis(500);
 		let mut launch = launch(spec, config(&host.addr)).await.unwrap();
@@ -1205,5 +1215,6 @@ mod tests {
 		.await
 		.expect("timed out waiting for exit");
 		assert!(host.requests().is_empty());
+		drop(reservation);
 	}
 }
