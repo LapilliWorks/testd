@@ -55,15 +55,19 @@ fi
 
 changed=$(git diff --name-only "$BASE" HEAD)
 
-for name in rust release site; do
-	declare -n globs=$name
-	filtered=false
+# macOS ships Bash 3.2, so pass each glob list without namerefs.
+filter_changes() {
+	local name=$1 filtered=false file
+	shift
 	while IFS= read -r file; do
-		if [[ -n $file ]] && matches "$file" "${globs[@]}"; then
+		if [[ -n $file ]] && matches "$file" "$@"; then
 			filtered=true
 			break
 		fi
 	done <<< "$changed"
 	printf '%s=%s\n' "$name" "$filtered" >> "$GITHUB_OUTPUT"
-	unset -n globs
-done
+}
+
+filter_changes rust "${rust[@]}"
+filter_changes release "${release[@]}"
+filter_changes site "${site[@]}"

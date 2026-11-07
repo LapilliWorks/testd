@@ -306,14 +306,16 @@ class AllChecksTests(unittest.TestCase):
 			('no result summary', 'blocked'),
 		)
 		for output, expected in cases:
-			with self.subTest(output=output), tempfile.TemporaryDirectory() as temporary:
-				parent, api, _ = fixture(temporary, outputs={'release-script-fixtures': output})
-				run = checks.AllChecks(parent, api, parent.args)
-				run.boundary_log = io.StringIO()
-				stage = next(item for item in run.stages() if item.name == 'release-script-fixtures')
-				with contextlib.redirect_stdout(io.StringIO()):
-					run.stage(1, 1, stage)
-				self.assertEqual(outcome(parent, 'release-script-fixtures')['status'], expected)
+			for newline in ('\n', '\r\n'):
+				with self.subTest(output=output, newline=newline), tempfile.TemporaryDirectory() as temporary:
+					text = output.replace('\n', newline)
+					parent, api, _ = fixture(temporary, outputs={'release-script-fixtures': text})
+					run = checks.AllChecks(parent, api, parent.args)
+					run.boundary_log = io.StringIO()
+					stage = next(item for item in run.stages() if item.name == 'release-script-fixtures')
+					with contextlib.redirect_stdout(io.StringIO()):
+						run.stage(1, 1, stage)
+					self.assertEqual(outcome(parent, 'release-script-fixtures')['status'], expected)
 
 	def test_artifact_checks_distinguish_missing_and_inapplicable_prior_releases(self):
 		for no_previous, expected in [(False, 'blocked'), (True, 'pass')]:

@@ -195,6 +195,7 @@ class AllChecks:
 	def release_script_fixtures(self, child):
 		output = child.command('release-script-fixtures', [sys.executable, '-m', 'unittest', 'discover',
 			'-s', 'tests/release', '-p', 'test_*.py', '-v'], 300)
+		output = output.replace('\r\n', '\n')
 		ran = re.search(r'(?m)^Ran (\d+) tests? in ', output)
 		summaries = re.findall(r'(?m)^OK(?: \(([^\n]*)\))?[ \t]*$', output)
 		if not ran or int(ran[1]) == 0 or not summaries:

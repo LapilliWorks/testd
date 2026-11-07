@@ -101,20 +101,23 @@ fn readme_host_configuration_uses_supported_keys() {
 	let config: testd_core::config::HostConfig = toml::from_str("").unwrap();
 	let value = toml::Value::try_from(config).unwrap();
 	let host = value.as_table().unwrap();
-	let section = include_str!("../README.md")
-		.split_once("Useful `[host]` keys:")
-		.expect("host configuration table exists")
-		.1
-		.split_once("\n\nClient state")
-		.expect("host configuration table ends before client state")
-		.0;
-	let mut keys = 0;
-	for line in section.lines().filter(|line| line.starts_with("| `")) {
-		let key = line.split('`').nth(1).unwrap();
-		assert!(host.contains_key(key), "README documents unsupported host setting {key}");
-		keys += 1;
+	let readme = include_str!("../README.md").replace("\r\n", "\n");
+	for readme in [readme.clone(), readme.replace('\n', "\r\n")] {
+		let section = readme
+			.split_once("Useful `[host]` keys:")
+			.expect("host configuration table exists")
+			.1
+			.split_once("Client state")
+			.expect("host configuration table ends before client state")
+			.0;
+		let mut keys = 0;
+		for line in section.lines().filter(|line| line.starts_with("| `")) {
+			let key = line.split('`').nth(1).unwrap();
+			assert!(host.contains_key(key), "README documents unsupported host setting {key}");
+			keys += 1;
+		}
+		assert!(keys > 0, "host configuration table is empty");
 	}
-	assert!(keys > 0, "host configuration table is empty");
 }
 
 #[test]

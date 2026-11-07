@@ -1570,6 +1570,36 @@ class UnixHostContractTests(unittest.TestCase):
 			self.assertEqual(result.returncode, 0, result.stderr)
 			self.assertEqual(result.stdout, 'unset|unset|unset|testdcheck')
 
+	def test_quick_launch_definition_pins_the_fixture_interpreter(self):
+		script = 'source tests/host/common.sh; quick_launch_definition'
+		result = subprocess.run(['bash', '-c', script], cwd=ROOT, env={**os.environ, 'LAUNCH_PORT': '18081'},
+			capture_output=True, text=True, timeout=15, check=True)
+		definition = json.loads(result.stdout)
+		interpreter = subprocess.check_output(['python3', '-c', 'import sys; print(sys.executable)'],
+			text=True, timeout=15).strip()
+		self.assertEqual(definition['program'], interpreter)
+		self.assertTrue(pathlib.Path(definition['program']).is_absolute())
+		self.assertEqual(definition['args'], ['-m', 'http.server', '18081', '--bind', '127.0.0.1'])
+		self.assertEqual(definition['entries'], [{'domain': 'launch.testdproj', 'target': '127.0.0.1:18081'}])
+
+	def test_quick_launch_diagnostics_are_bounded_and_omit_definition_credentials(self):
+		private = 'private fixture credential'
+		launch = {'id': 'fixture', 'error': 'launch failed', 'env': [['TOKEN', private]],
+			'states': [{'state': 'unavailable', 'error': 'no listener', 'private': private}],
+			'logs': [{'line': str(index), 'private': private} for index in range(8)]}
+		script = '''
+source tests/host/common.sh
+dashboard_get() { printf '%s' "$FIXTURE_LAUNCHES"; }
+quick_launch_diagnostics fixture
+'''
+		result = subprocess.run(['bash', '-c', script], cwd=ROOT,
+			env={**os.environ, 'FIXTURE_LAUNCHES': json.dumps([launch])},
+			capture_output=True, text=True, timeout=15, check=True)
+		self.assertEqual(json.loads(result.stderr), {'error': 'launch failed',
+			'states': [{'state': 'unavailable', 'error': 'no listener'}], 'output': ['3', '4', '5', '6', '7']})
+		self.assertNotIn(private, result.stderr)
+		self.assertEqual(result.stdout, '')
+
 	def test_macos_system_scripts_refuse_before_touching_the_host(self):
 		with tempfile.TemporaryDirectory() as temporary:
 			root = pathlib.Path(temporary)
@@ -1585,22 +1615,35 @@ class UnixHostContractTests(unittest.TestCase):
 					self.assertEqual(marker.read_text(encoding='utf-8'), 'existing data')
 					self.assertFalse((root / 'output').exists())
 
-	def test_test_contract_documents_trigger_the_ci_test_job(self):
+	def test_change_filter_classifies_platform_job_inputs(self):
+		self.assertNotIn('declare -n', (ROOT / 'scripts/ci-changes.sh').read_text())
+		cases = (
+			('README.md', (True, False, False)),
+			('tests/README.md', (True, False, False)),
+			('tests/manual/browser.md', (True, False, False)),
+			('tests/host/gui-checklist.md', (True, False, False)),
+			('scripts/test-linux.py', (False, True, False)),
+			('docs/usage.md', (False, False, True)),
+			('.github/workflows/ci.yml', (True, True, True)),
+			('README.md\ndocs/usage.md', (True, False, True)),
+			('unrelated.txt', (False, False, False)),
+		)
 		with tempfile.TemporaryDirectory() as directory:
 			fake_git = pathlib.Path(directory) / 'git'
 			fake_git.write_text("#!/bin/sh\ncase \"$1\" in\n"
 				"  cat-file) exit 0 ;;\n  diff) printf '%s\\n' \"$CHANGED_FILE\" ;;\n  *) exit 1 ;;\nesac\n",
 				encoding='utf-8')
 			fake_git.chmod(0o700)
-			for index, path in enumerate(['README.md', 'tests/README.md', 'tests/manual/browser.md',
-				'tests/host/gui-checklist.md']):
+			for index, (path, flags) in enumerate(cases):
 				with self.subTest(path=path):
 					output = pathlib.Path(directory) / f'output-{index}'
 					env = {**os.environ, 'PATH': f'{directory}{os.pathsep}{os.environ.get("PATH", "")}',
 						'EVENT': 'push', 'BASE': 'fixture', 'GITHUB_REF': 'refs/heads/master',
 						'GITHUB_OUTPUT': str(output), 'CHANGED_FILE': path}
 					subprocess.run(['bash', 'scripts/ci-changes.sh'], cwd=ROOT, env=env, timeout=5, check=True)
-					self.assertEqual(output.read_text(), 'rust=true\nrelease=false\nsite=false\n')
+					expected = ''.join(f'{name}={str(value).lower()}\n'
+						for name, value in zip(('rust', 'release', 'site'), flags))
+					self.assertEqual(output.read_text(), expected)
 
 	def test_system_trust_requires_a_successful_dashboard_response(self):
 		script = '''

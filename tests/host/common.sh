@@ -375,6 +375,33 @@ check_sharing() {
 	fi
 }
 
+quick_launch_definition() {
+	python3 - "$LAUNCH_PORT" <<'PY'
+import json
+import sys
+
+port = sys.argv[1]
+print(json.dumps({
+	'label': 'host check',
+	'program': sys.executable,
+	'args': ['-m', 'http.server', port, '--bind', '127.0.0.1'],
+	'entries': [{'domain': 'launch.testdproj', 'target': f'127.0.0.1:{port}'}],
+}))
+PY
+}
+
+quick_launch_diagnostics() {
+	dashboard_get /api/local/launches | python3 -c '
+import json, sys
+launch = next(item for item in json.load(sys.stdin) if item["id"] == sys.argv[1])
+print(json.dumps({
+	"error": launch["error"],
+	"states": [{key: state[key] for key in ("state", "error")} for state in launch["states"]],
+	"output": [log["line"] for log in launch["logs"][-5:]],
+}))
+' "$1" >&2
+}
+
 # A saved launch with an explicit target: the daemon starts the command, probes
 # the target, registers the name, and stops both on request.
 check_quick_launch() {
@@ -385,15 +412,7 @@ check_quick_launch() {
 	fi
 
 	local body id saved
-	body="$(cat <<EOF
-{
-	"label": "host check",
-	"program": "python3",
-	"args": ["-m", "http.server", "$LAUNCH_PORT", "--bind", "127.0.0.1"],
-	"entries": [{"domain": "launch.testdproj", "target": "127.0.0.1:$LAUNCH_PORT"}]
-}
-EOF
-)"
+	body="$(quick_launch_definition)"
 	if ! saved="$(dashboard_post /api/local/launches/save "$body")"; then
 		fail 'dashboard saves a quick launch'
 		return
@@ -432,6 +451,7 @@ assert any(state["state"] == "confirmed" for state in launch["states"])
 		pass 'quick launch reaches confirmed'
 	else
 		fail 'quick launch reaches confirmed'
+		if ! quick_launch_diagnostics "$id"; then fail 'quick launch diagnostics'; fi
 	fi
 	if wait_for_proxy "launch.testdproj.$TLD" 20; then
 		pass 'quick launch name is proxied'
