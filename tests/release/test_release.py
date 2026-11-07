@@ -1774,6 +1774,279 @@ class BrowserTests(unittest.TestCase):
 		with redirect_stdout(io.StringIO()):
 			return runner.Run(args)
 
+	def test_playwright_report_requires_exact_candidate_and_browser_evidence(self):
+		certificate = {'subjectName': 'app.releasecheck.test', 'issuer': 'testd intermediate',
+			'validFrom': time.time() - 60, 'validTo': time.time() + 86400}
+		result = {'status': 'pass', 'engine': 'chromium', 'cleanupComplete': True,
+			'origin': 'https://app.releasecheck.test:8443',
+			'commit': 'fixture-commit', 'candidate': 'a' * 64, 'rootSha256': 'b' * 64,
+			'checks': list(runner.PLAYWRIGHT_CHECKS), 'firstFingerprint': 'c' * 64,
+			'secondFingerprint': 'd' * 64, 'firstCertificate': certificate, 'secondCertificate': certificate,
+			'userAgent': 'fixture browser'}
+		arguments = ('chromium', 8443, 'fixture-commit', 'a' * 64, 'b' * 64)
+		self.assertIsNone(runner.playwright_report_error(result, *arguments))
+		for change in ({'candidate': 'e' * 64}, {'rootSha256': 'e' * 64}, {'origin': 'https://other.test'},
+				{'checks': result['checks'][:-1]}, {'checks': [result['checks'][0]] * len(result['checks'])},
+				{'secondFingerprint': result['firstFingerprint']}, {'firstCertificate': None},
+				{'secondCertificate': {**certificate, 'validTo': float('nan')}}, {'cleanupComplete': False},
+				{'userAgent': ''}, {'status': 'fail'}):
+			with self.subTest(change=change):
+				self.assertIsNotNone(runner.playwright_report_error({**result, **change}, *arguments))
+
+	def test_browser_system_tls_evidence_must_match_each_browser_leaf(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			result = {'firstFingerprint': 'a' * 64, 'secondFingerprint': 'b' * 64}
+			for stage, fingerprint in (('before', result['firstFingerprint']), ('after', result['secondFingerprint'])):
+				evidence = {'host': 'app.releasecheck.test', 'port': 443, 'addresses': ['127.0.0.1'],
+					'leafSha256': fingerprint, 'openssl': 'fixture TLS'}
+				(run.output / f'browser-system-tls-{stage}.json').write_text(json.dumps(evidence), encoding='utf-8')
+			self.assertIsNone(runner.browser_system_tls_error(run, result))
+			path = run.output / 'browser-system-tls-after.json'
+			evidence['addresses'] = ['192.0.2.1']
+			path.write_text(json.dumps(evidence), encoding='utf-8')
+			self.assertIn('non-loopback', runner.browser_system_tls_error(run, result))
+			evidence['addresses'] = ['127.0.0.1']
+			evidence['leafSha256'] = 'c' * 64
+			path.write_text(json.dumps(evidence), encoding='utf-8')
+			self.assertIn('does not match', runner.browser_system_tls_error(run, result))
+
+	def test_missing_playwright_blocks_before_starting_any_candidate(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			run.args.browser_engine = 'chromium'
+			result = SimpleNamespace(returncode=2, stdout=b'', stderr=b'install Playwright')
+			with patch.object(runner, 'SYSTEM', 'Windows'), patch.object(runner, 'require', return_value='bun'), \
+					patch.object(runner.subprocess, 'run', return_value=result), patch.object(runner, 'binary') as binary, \
+					patch.object(run, 'serve') as serve, redirect_stdout(io.StringIO()):
+				runner.browser(run)
+			binary.assert_not_called()
+			serve.assert_not_called()
+			self.assertTrue(run.metadata['incomplete'])
+			self.assertEqual(run.results[-1]['status'], 'skip')
+
+	def test_playwright_prerequisite_timeout_retains_partial_output(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			error = subprocess.TimeoutExpired(['bun'], 30, output=b'partial output', stderr=b'partial error')
+			with patch.object(runner, 'SYSTEM', 'Windows'), patch.object(runner, 'require', return_value='bun'), \
+					patch.object(runner.subprocess, 'run', side_effect=error), redirect_stdout(io.StringIO()):
+				with self.assertRaisesRegex(RuntimeError, 'prerequisite check timed out'):
+					runner.playwright_available(run, 'chromium')
+			self.assertEqual(run.results[-1]['status'], 'fail')
+			self.assertEqual(next(run.output.glob('*playwright-prerequisite.log')).read_bytes(),
+				b'partial outputpartial error')
+
+	def test_playwright_requires_network_isolation_before_starting_a_candidate(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			run.args.browser_engine = 'chromium'
+			terminal = Mock()
+			terminal.isatty.return_value = True
+			with patch.object(runner, 'require'), patch.object(runner, 'playwright_available', return_value=True), \
+					patch.object(runner.sys, 'stdin', terminal), patch.object(runner, 'ask', return_value='n'), \
+					patch.object(runner, 'binary') as binary, redirect_stdout(io.StringIO()):
+				runner.browser(run)
+			binary.assert_not_called()
+			self.assertTrue(run.metadata['incomplete'])
+			self.assertIn('isolated network egress', run.results[-1]['detail'])
+
+	def test_system_browser_refuses_unowned_platforms_before_starting_a_candidate(self):
+		for system in ('Darwin', 'Windows'):
+			with self.subTest(system=system), tempfile.TemporaryDirectory() as directory:
+				run = self.create_run(directory)
+				run.args.system = True
+				with patch.object(runner, 'SYSTEM', system), patch.object(runner, 'require'), \
+						patch.object(runner, 'binary') as binary, patch.object(runner, 'system_snapshot') as snapshot, \
+						self.assertRaisesRegex(RuntimeError, 'ownership is enforced'):
+					runner.browser(run)
+				binary.assert_not_called()
+				snapshot.assert_not_called()
+
+	@unittest.skipIf(os.name == 'nt', 'not applicable: Linux browser integration uses Unix file operations')
+	def test_system_browser_initializes_a_private_isolated_home(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			home = run.output / 'browser-home'
+			home.mkdir()
+			config = home / '.config/testd/config.toml'
+			def initialize(name, command, timeout, env=None):
+				self.assertEqual(name, 'browser-init')
+				self.assertEqual(env['HOME'], str(home))
+				self.assertNotIn('TESTD_TOKEN', env)
+				config.parent.mkdir(parents=True)
+				config.write_text('[host]\nsecret = "fixture"\n', encoding='utf-8')
+			with patch.dict(os.environ, {'TESTD_TOKEN': 'operator-secret'}), \
+					patch.object(run, 'command', side_effect=initialize):
+				env = runner.initialize_browser_home(run, pathlib.Path('candidate'), home)
+			table = runner.tomllib.loads(config.read_text(encoding='utf-8'))
+			self.assertEqual(table['host']['listen_addr'], '127.0.0.1:7737')
+			self.assertEqual(table['host']['edge_addr'], '127.0.0.1:443')
+			self.assertEqual(table['host']['http_addr'], '127.0.0.1:7740')
+			self.assertEqual(table['host']['secret'], 'fixture')
+			self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+			self.assertTrue((run.output / 'browser-config-before.toml').is_file())
+			self.assertEqual(env['TESTD_TUNNEL'], str(run.output))
+
+	@unittest.skipIf(os.name == 'nt', 'not applicable: Linux browser integration uses Unix file operations')
+	def test_system_browser_does_not_replace_a_changed_fixture_config(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			home = run.output / 'browser-home'
+			home.mkdir()
+			config = home / '.config/testd/config.toml'
+			def initialize(*args, **kwargs):
+				config.parent.mkdir(parents=True)
+				config.write_text('[host]\nsecret = "fixture"\n', encoding='utf-8')
+			with patch.object(run, 'command', side_effect=initialize), \
+					patch.object(runner, 'file_digest', return_value='changed'):
+				with self.assertRaisesRegex(RuntimeError, 'config changed'):
+					runner.initialize_browser_home(run, pathlib.Path('candidate'), home)
+			self.assertEqual(config.read_text(encoding='utf-8'), '[host]\nsecret = "fixture"\n')
+			self.assertTrue((run.output / 'browser-config-before.toml').is_file())
+
+	def test_system_browser_cleans_owned_state_after_a_failed_session(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			run.args.system = True
+			run.args.browser_engine = 'chromium'
+			cli = pathlib.Path(directory) / 'candidate'
+			cli.write_bytes(b'candidate fixture')
+			terminal = Mock()
+			terminal.isatty.return_value = True
+			backup = pathlib.Path(directory) / 'snapshot'
+			events = []
+			def snapshot(*args, **kwargs):
+				events.append('snapshot')
+				return backup
+			def initialize(*args):
+				events.append('initialize')
+				return {'HOME': str(args[2])}
+			def session(*args):
+				events.append('browser')
+				raise RuntimeError('fixture browser failed')
+			with patch.object(runner, 'SYSTEM', 'Linux'), patch.object(runner, 'require'), \
+					patch.object(runner, 'playwright_available', return_value=True), \
+					patch.object(runner.sys, 'stdin', terminal), patch.object(runner, 'ask', return_value='y'), \
+					patch.object(runner, 'check_ports'), patch.object(runner, 'wait_for_fixture_ports'), \
+					patch.object(runner, 'binary', return_value=cli), \
+					patch.object(runner, 'system_snapshot', side_effect=snapshot), \
+					patch.object(runner, 'initialize_browser_home', side_effect=initialize), \
+					patch.object(runner, 'browser_session', side_effect=session), \
+					patch.object(runner, 'cleanup_owned_linux_integration', side_effect=lambda *a, **k: events.append('cleanup')), \
+					patch.object(runner, 'system_restore', side_effect=lambda *a, **k: events.append('restore')), \
+					redirect_stdout(io.StringIO()):
+				with self.assertRaisesRegex(RuntimeError, 'fixture browser failed'):
+					runner.browser(run)
+			self.assertEqual(events, ['snapshot', 'initialize', 'browser', 'cleanup', 'restore'])
+			self.assertEqual(run.results[-1]['name'], 'fixture-shutdown')
+			self.assertEqual(run.results[-1]['status'], 'pass')
+
+	def test_browser_cleanup_defers_when_restart_watcher_is_active(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			run.metadata['browser_watcher_active'] = True
+			with patch.object(runner, 'cleanup_owned_linux_integration') as cleanup, \
+					patch.object(runner, 'system_restore') as restore, redirect_stdout(io.StringIO()):
+				with self.assertRaisesRegex(RuntimeError, 'watcher is still running'):
+					runner.cleanup_browser_system(run, pathlib.Path('candidate'), pathlib.Path('home'),
+						pathlib.Path('snapshot'), [7737], [7753], 'fixture')
+			cleanup.assert_not_called()
+			restore.assert_not_called()
+			self.assertEqual(run.results[-2]['name'], 'fixture-shutdown')
+			self.assertEqual(run.results[-2]['status'], 'fail')
+			self.assertEqual(run.results[-1]['status'], 'skip')
+
+	def test_browser_cleanup_defers_when_playwright_cleanup_is_unverified(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			run.metadata['browser_cleanup_unverified'] = True
+			with patch.object(runner, 'cleanup_owned_linux_integration') as cleanup, \
+					patch.object(runner, 'system_restore') as restore, redirect_stdout(io.StringIO()):
+				with self.assertRaisesRegex(RuntimeError, 'browser process cleanup is unverified'):
+					runner.cleanup_browser_system(run, pathlib.Path('candidate'), pathlib.Path('home'),
+						pathlib.Path('snapshot'), [7737], [7753], 'fixture')
+			cleanup.assert_not_called()
+			restore.assert_not_called()
+			self.assertEqual(run.results[-2]['status'], 'fail')
+			self.assertEqual(run.results[-1]['status'], 'skip')
+
+	def test_interrupted_playwright_without_cleanup_evidence_is_not_assumed_stopped(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			cli = pathlib.Path(directory) / 'candidate'
+			run.metadata['binaries'] = {str(cli): 'a' * 64}
+			thread = Mock()
+			thread.is_alive.return_value = False
+			@contextlib.contextmanager
+			def serve(*args, **kwargs):
+				yield Mock(), Mock()
+			with patch.object(runner.threading, 'Thread', return_value=thread), \
+					patch.object(run, 'serve', side_effect=serve), patch.object(runner, 'browser_system_tls'), \
+					patch.object(run, 'command', side_effect=RuntimeError('driver interrupted')):
+				with self.assertRaisesRegex(RuntimeError, 'driver interrupted'):
+					runner.browser_fixture(run, cli, Mock(), 'chromium', pathlib.Path('root.crt'), None)
+			self.assertTrue(run.metadata['browser_cleanup_unverified'])
+
+	def test_playwright_uses_scoped_fixtures_and_retains_real_evidence(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			run.args.browser_engine = 'chromium'
+			config = pathlib.Path(directory) / 'config'
+			root = config / 'pki/root.crt'
+			root.parent.mkdir(parents=True)
+			root.write_bytes(b'public fixture root')
+			root_digest = runner.file_digest(root)
+			cli = pathlib.Path(directory) / 'candidate'
+			candidate = 'a' * 64
+			run.metadata['binaries'] = {str(cli): candidate}
+			host = SimpleNamespace(status={'tld': 'test'}, started=True)
+			process = Mock()
+			terminal = Mock()
+			terminal.isatty.return_value = True
+			thread = Mock()
+			thread.is_alive.return_value = False
+			@contextlib.contextmanager
+			def serve(*args, **kwargs):
+				yield process, Mock()
+			def system_tls(run, stage, env):
+				value = {'host': 'app.releasecheck.test', 'port': 443, 'addresses': ['127.0.0.1'],
+					'leafSha256': ('b' if stage == 'before' else 'c') * 64, 'openssl': 'fixture TLS'}
+				(run.output / f'browser-system-tls-{stage}.json').write_text(json.dumps(value), encoding='utf-8')
+			def command(name, argv, timeout, env, **kwargs):
+				self.assertEqual(name, 'playwright-browser')
+				self.assertEqual(env['TESTD_BROWSER_ROOT'], str(root))
+				self.assertEqual(env['TESTD_BROWSER_CANDIDATE'], candidate)
+				for name in ('TESTD_TOKEN', 'HTTPS_PROXY', 'http_proxy', 'SSL_CERT_FILE', 'NODE_TLS_REJECT_UNAUTHORIZED'):
+					self.assertNotIn(name, env)
+				certificate = {'subjectName': 'app.releasecheck.test', 'issuer': 'testd intermediate',
+					'validFrom': time.time() - 60, 'validTo': time.time() + 86400}
+				result = {'status': 'pass', 'engine': 'chromium', 'cleanupComplete': True,
+					'origin': 'https://app.releasecheck.test:443',
+					'commit': run.metadata['commit'], 'candidate': candidate, 'rootSha256': root_digest,
+					'checks': list(runner.PLAYWRIGHT_CHECKS), 'firstFingerprint': 'b' * 64,
+					'secondFingerprint': 'c' * 64, 'firstCertificate': certificate,
+					'secondCertificate': certificate, 'userAgent': 'fixture browser'}
+				(run.output / 'playwright-chromium.json').write_text(json.dumps(result), encoding='utf-8')
+				return ''
+			with patch.dict(os.environ, {'TESTD_TOKEN': 'secret', 'HTTPS_PROXY': 'https://proxy.invalid',
+					'http_proxy': 'http://proxy.invalid', 'SSL_CERT_FILE': '/untrusted',
+					'NODE_TLS_REJECT_UNAUTHORIZED': '0'}), patch.object(runner, 'require'), \
+					patch.object(runner, 'playwright_available', return_value=True), \
+					patch.object(runner.sys, 'stdin', terminal), patch.object(runner, 'ask', return_value='y'), \
+					patch.object(runner, 'desktop_config_dir', return_value=config), \
+					patch.object(runner, 'check_ports'), patch.object(runner, 'binary', return_value=cli), \
+					patch.object(runner, 'HostFixture', return_value=contextlib.nullcontext(host)), \
+					patch.object(runner, 'require_host_resolution', return_value={'certificate': {'ok': True}}), \
+					patch.object(runner.threading, 'Thread', return_value=thread), \
+					patch.object(runner, 'browser_system_tls', side_effect=system_tls), \
+					patch.object(run, 'serve', side_effect=serve) as started, \
+					patch.object(run, 'command', side_effect=command), redirect_stdout(io.StringIO()):
+				runner.browser(run)
+			started.assert_called_once()
+			self.assertEqual(run.results[-1]['name'], 'browser-results')
+			self.assertEqual(run.results[-1]['status'], 'pass')
+
 	def test_missing_host_is_started_for_the_fixture(self):
 		with tempfile.TemporaryDirectory() as directory:
 			run = self.create_run(directory)
@@ -1984,6 +2257,7 @@ class BrowserTests(unittest.TestCase):
 			errors = []
 			stop = Mock()
 			stop.wait = Mock(side_effect=[False, True])
+			stop.is_set.return_value = False
 			runner.watch_restart_requests(run, host, stop, errors)
 			host.restart.assert_called_once_with()
 			self.assertEqual(errors, [])
@@ -2000,9 +2274,23 @@ class BrowserTests(unittest.TestCase):
 			host.restart.side_effect = RuntimeError('the suite did not start this host; restart it manually')
 			stop = Mock()
 			stop.wait = Mock(side_effect=[False, True])
+			stop.is_set.return_value = False
 			runner.watch_restart_requests(run, host, stop, [])
 			self.assertEqual(json.loads((run.output / f'restart-result-{request_id}.json').read_text()),
 				{'status': 'failed', 'detail': 'the suite did not start this host; restart it manually'})
+
+	def test_restart_watcher_does_not_start_new_work_after_shutdown(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			request = run.output / 'restart-request-00000000-0000-4000-8000-000000000000.json'
+			request.write_text('', encoding='utf-8')
+			host = Mock()
+			stop = Mock()
+			stop.wait.return_value = False
+			stop.is_set.return_value = True
+			runner.watch_restart_requests(run, host, stop, [])
+			host.restart.assert_not_called()
+			self.assertTrue(request.exists())
 
 	def test_a_host_that_exits_while_starting_reports_its_log(self):
 		process = SimpleNamespace(poll=lambda: 1, returncode=1)
@@ -2056,6 +2344,21 @@ class BrowserTests(unittest.TestCase):
 				with self.assertRaisesRegex(RuntimeError, 'resolver: not configured; run `testd doctor --fix`'):
 					runner.require_host_resolution(run, pathlib.Path('/bin/true'))
 			self.assertIn('not configured', (run.output / '00-host-doctor.log').read_text())
+
+	def test_browser_doctor_does_not_inherit_operator_overrides(self):
+		with tempfile.TemporaryDirectory() as directory:
+			run = self.create_run(directory)
+			doctor = json.dumps({'checks': [{'name': 'resolver', 'ok': True},
+				{'name': 'resolution', 'ok': True}]}).encode()
+			result = SimpleNamespace(stdout=doctor, stderr=b'')
+			with patch.dict(os.environ, {'TESTD_TOKEN': 'secret', 'TESTD_HOSTS': 'remote.example'}), \
+					patch.object(runner.subprocess, 'run', return_value=result) as command, \
+					redirect_stdout(io.StringIO()):
+				runner.require_host_resolution(run, pathlib.Path('candidate'))
+			env = command.call_args.kwargs['env']
+			self.assertNotIn('TESTD_TOKEN', env)
+			self.assertNotIn('TESTD_HOSTS', env)
+			self.assertEqual(env['PYTHONUTF8'], '1')
 
 	def test_a_configured_os_resolver_passes(self):
 		with tempfile.TemporaryDirectory() as directory:

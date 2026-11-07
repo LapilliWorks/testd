@@ -2,6 +2,8 @@ import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { browserLaunchOptions, isExpectedUnknownFailure, isLoopback, validateBrowserChecks,
+	validateSecurityDetails } from './browser-playwright';
 
 let child: ReturnType<typeof Bun.spawn>;
 let directory: string;
@@ -45,6 +47,55 @@ afterAll(async () => {
 	if (child && child.exitCode === null) child.kill();
 	if (child) await child.exited;
 	if (directory) await rm(directory, { recursive: true, force: true });
+});
+
+test('Playwright evidence checks fail closed without trusted loopback results', () => {
+	expect(isLoopback('127.0.0.1')).toBe(true);
+	expect(isLoopback('::1')).toBe(true);
+	expect(isLoopback('::ffff:127.0.0.1')).toBe(true);
+	for (const address of ['127.evil', '192.0.2.1', '::', 'example.test']) expect(isLoopback(address)).toBe(false);
+	expect(isExpectedUnknownFailure('net::ERR_NAME_NOT_RESOLVED')).toBe(true);
+	expect(isExpectedUnknownFailure('net::ERR_SSL_UNRECOGNIZED_NAME_ALERT')).toBe(true);
+	for (const message of ['net::ERR_CONNECTION_REFUSED', 'Timeout 30000ms exceeded']) {
+		expect(isExpectedUnknownFailure(message)).toBe(false);
+	}
+	const now = 1800000000;
+	const details = { subjectName: 'app.releasecheck.test', issuer: 'testd intermediate',
+		validFrom: now - 60, validTo: now + 86400 };
+	expect(() => validateSecurityDetails(details, 'app.releasecheck.test', now)).not.toThrow();
+	for (const value of [null, { ...details, issuer: 'other' }, { ...details, validTo: now + 100000 }]) {
+		expect(() => validateSecurityDetails(value, 'app.releasecheck.test', now)).toThrow();
+	}
+	const checks = [
+		'HTTPS and secure context', 'WebSocket, including 60 seconds idle',
+		'Streaming SSE and 100 MiB upload', 'Cookie sharing and project isolation',
+	].map(name => ({ name, status: 'pass' }));
+	expect(() => validateBrowserChecks(JSON.stringify(checks))).not.toThrow();
+	expect(() => validateBrowserChecks(JSON.stringify([...checks.slice(0, 3), checks[0]]))).toThrow();
+	expect(() => validateBrowserChecks(JSON.stringify(checks.map(check => ({ ...check, status: 'fail' }))))).toThrow();
+});
+
+test('Playwright browsers use isolated profiles and no inherited proxy or TLS overrides', () => {
+	const names = ['HTTPS_PROXY', 'http_proxy', 'SSL_CERT_FILE', 'NODE_TLS_REJECT_UNAUTHORIZED', 'SSLKEYLOGFILE'];
+	const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
+	try {
+		for (const name of names) process.env[name] = 'fixture';
+		const chromium = browserLaunchOptions('chromium', '/fixture/home', '/fixture/tmp');
+		for (const name of names) expect(chromium.env[name]).toBeUndefined();
+		expect(chromium.env.HOME).toBe('/fixture/home');
+		expect(chromium.env.TMPDIR).toBe('/fixture/tmp');
+		expect(chromium.channel).toBe('chromium');
+		expect(chromium.chromiumSandbox).toBe(true);
+		expect(chromium.args).toContain('--no-proxy-server');
+		const firefox = browserLaunchOptions('firefox', '/fixture/home', '/fixture/tmp');
+		expect(firefox.firefoxUserPrefs['network.proxy.type']).toBe(0);
+		expect(firefox.firefoxUserPrefs['network.trr.mode']).toBe(5);
+	} finally {
+		for (const name of names) {
+			if (previous[name] === undefined) delete process.env[name];
+			else process.env[name] = previous[name];
+		}
+	}
 });
 
 test('binds concurrent fixtures to distinct ephemeral ports', async () => {

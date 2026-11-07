@@ -59,14 +59,16 @@ def parser_for(expected):
 	parser.add_argument('--port', type=int, help='browser fixture port; the following port must also be free')
 	parser.add_argument('--edge-port', type=int, help='candidate HTTPS edge port for browser checks')
 	parser.add_argument('--intake-port', type=int, help='candidate registration port for browser checks')
+	parser.add_argument('--browser-engine', choices=['chromium', 'firefox', 'webkit'],
+		help='run the real browser fixture with a Playwright engine')
 	return parser
 
 
 def validate_options(parser, args):
 	if args.gui and args.suite not in ('automated', 'all'):
 		parser.error('--gui is only available for automated or all checks')
-	if args.system and args.suite not in ('host', 'all'):
-		parser.error('--system is only available for host or all checks')
+	if args.system and args.suite not in ('host', 'browser', 'all'):
+		parser.error('--system is only available for host, browser, or all checks')
 	if args.bin is not None and args.suite not in ('host', 'browser', 'desktop', 'all'):
 		parser.error('--bin is only available for host, browser, desktop, or all checks')
 	if args.build and args.suite not in ('host', 'browser', 'all'):
@@ -80,6 +82,10 @@ def validate_options(parser, args):
 		parser.error('--interactive requires --system and a disposable, backed-up host')
 	if args.suite == 'all' and args.app and not args.interactive:
 		parser.error('all --app requires --interactive')
+	if args.browser_engine and args.suite not in ('browser', 'all'):
+		parser.error('--browser-engine requires browser or all')
+	if args.suite == 'all' and args.browser_engine and not args.interactive:
+		parser.error('all --browser-engine requires --interactive')
 	if args.suite == 'all' and args.previous_bin and not args.artifacts:
 		parser.error('--previous-bin requires --artifacts in the all suite')
 	if args.suite == 'all' and args.system and not args.report and not args.plan:
@@ -159,12 +165,14 @@ def runner_arguments(parser, args):
 	if report is not None:
 		command.extend(['--report', str(report)])
 	if args.system:
-		if args.suite == 'host':
+		if args.suite in ('host', 'browser'):
 			confirm_system_checks(parser)
 		command.append('--system')
 	for name, port in [('port', args.port), ('edge-port', args.edge_port), ('intake-port', args.intake_port)]:
 		if port is not None:
 			command.extend([f'--{name}', str(port)])
+	if args.browser_engine:
+		command.extend(['--browser-engine', args.browser_engine])
 	return command
 
 

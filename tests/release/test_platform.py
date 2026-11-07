@@ -233,6 +233,39 @@ class PlatformScriptsTests(unittest.TestCase):
 						self.script.main('Linux', arguments)
 				run.assert_not_called()
 
+	def test_browser_engine_is_forwarded_and_restricted_to_browser_suites(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = pathlib.Path(directory).resolve()
+			candidate = root / 'candidate'
+			candidate.write_text('fixture', encoding='utf-8')
+			arguments = ['browser', '--bin', str(candidate), '--report', str(root / 'browser'),
+				'--browser-engine', 'chromium']
+			with patch.object(self.script.platform, 'system', return_value='Linux'), \
+					patch.object(self.script, 'is_ephemeral_report', return_value=False), \
+					patch.object(self.script, 'run_cli', return_value=0) as run:
+				self.script.main('Linux', arguments)
+				run.assert_called_once_with(arguments)
+			with patch.object(self.script.platform, 'system', return_value='Linux'), \
+					patch.object(self.script, 'run_cli') as run, contextlib.redirect_stderr(io.StringIO()):
+				with self.assertRaises(SystemExit):
+					self.script.main('Linux', ['contracts', '--browser-engine', 'chromium'])
+				run.assert_not_called()
+
+	def test_linux_system_browser_forwards_after_disposable_host_confirmation(self):
+		with tempfile.TemporaryDirectory() as directory:
+			root = pathlib.Path(directory).resolve()
+			candidate = root / 'candidate'
+			candidate.write_text('fixture', encoding='utf-8')
+			arguments = ['browser', '--bin', str(candidate), '--report', str(root / 'browser'), '--system',
+				'--edge-port', '8443', '--browser-engine', 'chromium']
+			with patch.object(self.script.platform, 'system', return_value='Linux'), \
+					patch.object(self.script, 'is_ephemeral_report', return_value=False), \
+					patch.object(self.script, 'confirm_system_checks') as confirm, \
+					patch.object(self.script, 'run_cli', return_value=0) as run:
+				self.script.main('Linux', arguments)
+			confirm.assert_called_once()
+			run.assert_called_once_with(arguments)
+
 	def test_desktop_and_browser_forward_only_relevant_options(self):
 		with tempfile.TemporaryDirectory() as directory:
 			root = pathlib.Path(directory).resolve()

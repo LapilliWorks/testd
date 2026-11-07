@@ -56,6 +56,8 @@ def validate(parser, args):
 		parser.error('all --interactive requires --system and a disposable, backed-up host')
 	if args.app and not args.interactive:
 		parser.error('all --app requires --interactive')
+	if getattr(args, 'browser_engine', None) and not args.interactive:
+		parser.error('all --browser-engine requires --interactive')
 	if args.previous_bin and not args.artifacts:
 		parser.error('--previous-bin requires --artifacts in the all suite')
 	if args.plan:

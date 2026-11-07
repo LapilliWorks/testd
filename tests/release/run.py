@@ -10,7 +10,9 @@ import functools
 import hashlib
 import http.client
 import importlib.util
+import ipaddress
 import json
+import math
 import os
 import pathlib
 import platform
@@ -851,13 +853,14 @@ def wait_for_host(port, process, output, timeout=30):
 	raise RuntimeError(f'the host did not listen on 127.0.0.1:{port} within {timeout} seconds')
 
 
-def require_host_resolution(run, cli):
+def require_host_resolution(run, cli, environment=None):
 	"""Fail before a browser opens if the OS resolver does not reach the host TLD."""
 	log = run.log_path('host-doctor')
 	print(f'Running: {cli} doctor --json', flush=True)
+	env = isolated_environment(PYTHONUTF8='1') if environment is None else {**environment, 'PYTHONUTF8': '1'}
 	try:
 		result = subprocess.run([str(cli), 'doctor', '--json'], cwd=ROOT,
-			env={**os.environ, 'PYTHONUTF8': '1'}, capture_output=True, timeout=60)
+			env=env, capture_output=True, timeout=60)
 	except subprocess.TimeoutExpired as error:
 		raise RuntimeError(f'`testd doctor --json` timed out; inspect {log}') from error
 	log.write_bytes(result.stdout + result.stderr)
@@ -872,6 +875,7 @@ def require_host_resolution(run, cli):
 			fix = (check.get('fix') if check else None) or 'run `testd doctor --fix` on the host'
 			raise RuntimeError(f'{name}: {detail}; {fix}')
 	run.record('host-resolution', 'pass', 'the OS resolver resolves the host TLD')
+	return checks
 
 
 def isolated_environment(**values):
@@ -884,10 +888,11 @@ def isolated_environment(**values):
 class HostFixture:
 	"""A host the browser suite owns. An already-running host is left untouched."""
 
-	def __init__(self, run, cli, port):
+	def __init__(self, run, cli, port, environment=None):
 		self.run = run
 		self.cli = cli
 		self.port = port
+		self.environment = environment
 		self.started = False
 		self.starts = 0
 		self.status = None
@@ -906,7 +911,8 @@ class HostFixture:
 		name = 'host-fixture' if self.starts == 0 else f'host-fixture-restart-{self.starts}'
 		self.starts += 1
 		# The daemon's startup sweep must never invoke a real tunnel provider.
-		env = isolated_environment(TESTD_TUNNEL=str(self.run.output))
+		env = isolated_environment() if self.environment is None else dict(self.environment)
+		env['TESTD_TUNNEL'] = str(self.run.output)
 		self.context = self.run.serve(name, [str(self.cli), 'host'], env=env, stop_signal=signal.SIGINT)
 		self.process, self.output = self.context.__enter__()
 		try:
@@ -946,6 +952,8 @@ def watch_restart_requests(run, host, stop, errors):
 	try:
 		while not stop.wait(0.25):
 			for request in sorted(run.output.glob('restart-request-*.json')):
+				if stop.is_set():
+					return
 				if request.name in handled:
 					continue
 				handled.add(request.name)
@@ -960,6 +968,15 @@ def watch_restart_requests(run, host, stop, errors):
 	except Exception as error:
 		errors.append(error)
 		raise
+
+
+PLAYWRIGHT_CHECKS = frozenset({
+	'trusted TLS and secure context',
+	'automatic browser checks before restart',
+	'dashboard and negative routing controls',
+	'restart and renewed trusted TLS',
+	'automatic browser checks after restart',
+})
 
 
 BROWSER_CHECKS = frozenset({
@@ -994,51 +1011,303 @@ def browser_report_error(result, commit, edge_port):
 	return None
 
 
+def browser_driver_environment(**values):
+	env = isolated_environment(**values)
+	blocked = {'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
+		'CURL_CA_BUNDLE', 'REQUESTS_CA_BUNDLE', 'NODE_EXTRA_CA_CERTS', 'NODE_TLS_REJECT_UNAUTHORIZED',
+		'NODE_OPTIONS', 'SSLKEYLOGFILE', 'RES_OPTIONS', 'HOSTALIASES', 'LOCALDOMAIN', 'DBUS_SESSION_BUS_ADDRESS',
+		'WAYLAND_DISPLAY', 'DISPLAY', 'XAUTHORITY', 'SSH_AUTH_SOCK', 'GPG_AGENT_INFO', 'OPENSSL_CONF',
+		'OPENSSL_MODULES', 'OPENSSL_ENGINES', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'DYLD_INSERT_LIBRARIES',
+		'DYLD_LIBRARY_PATH', 'PYTHONPATH', 'PYTHONHOME', 'PYTHONUSERBASE'}
+	return {name: value for name, value in env.items() if name.upper() not in blocked}
+
+
+def playwright_available(run, engine):
+	bun = require('bun')
+	if SYSTEM == 'Linux' and engine in ('chromium', 'firefox') and not shutil.which('certutil'):
+		run.record('playwright-prerequisite', 'skip', 'blocked: install NSS certutil for the isolated browser trust store')
+		return False
+	log = run.log_path('playwright-prerequisite')
+	try:
+		result = subprocess.run([bun, str(ROOT / 'tests/release/browser-playwright.ts'), engine, '--probe'],
+			cwd=ROOT, env=browser_driver_environment(), capture_output=True, timeout=30)
+	except subprocess.TimeoutExpired as error:
+		with log.open('xb') as output:
+			output.write((error.stdout or b'') + (error.stderr or b''))
+		run.record('playwright-prerequisite', 'fail', f'timed out; {log}')
+		raise RuntimeError('the Playwright prerequisite check timed out') from error
+	with log.open('xb') as output:
+		output.write(result.stdout + result.stderr)
+	if result.returncode == 2:
+		run.record('playwright-prerequisite', 'skip', f'blocked: install Playwright and {engine}; {log}')
+		return False
+	if result.returncode != 0:
+		run.record('playwright-prerequisite', 'fail', f'exit {result.returncode}; {log}')
+		raise RuntimeError('the Playwright prerequisite check failed')
+	run.record('playwright-prerequisite', 'pass', f'{engine}; {log}')
+	return True
+
+
+def playwright_report_error(result, engine, edge_port, commit, candidate, root_digest):
+	if not isinstance(result, dict) or result.get('status') != 'pass' or result.get('engine') != engine or \
+			result.get('cleanupComplete') is not True:
+		return 'the Playwright browser run or its cleanup did not pass'
+	if result.get('origin') != f'https://app.releasecheck.test:{edge_port}' or \
+			result.get('commit') != commit or result.get('candidate') != candidate or \
+			result.get('rootSha256') != root_digest:
+		return 'the Playwright browser report does not match the candidate, root, and origin'
+	checks = result.get('checks')
+	if not isinstance(checks, list) or len(checks) != len(PLAYWRIGHT_CHECKS) or \
+			any(not isinstance(item, str) for item in checks) or set(checks) != PLAYWRIGHT_CHECKS:
+		return 'the Playwright browser report has missing or duplicate checks'
+	fingerprints = [result.get('firstFingerprint'), result.get('secondFingerprint')]
+	if any(not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{64}', value) for value in fingerprints):
+		return 'the Playwright browser report is missing leaf fingerprints'
+	if fingerprints[0] == fingerprints[1]:
+		return 'the Playwright browser report did not verify a renewed leaf'
+	for field in ('firstCertificate', 'secondCertificate'):
+		details = result.get(field)
+		if not isinstance(details, dict) or details.get('subjectName') != 'app.releasecheck.test' or \
+				details.get('issuer') != 'testd intermediate':
+			return 'the Playwright browser report is missing the expected certificate chain details'
+		valid_from, valid_to = details.get('validFrom'), details.get('validTo')
+		if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+				for value in (valid_from, valid_to)) or not valid_from <= time.time() < valid_to <= time.time() + 90000:
+			return 'the Playwright browser report has an invalid leaf lifetime'
+	if not isinstance(result.get('userAgent'), str) or not result['userAgent'].strip():
+		return 'the Playwright browser report is missing its user agent'
+	return None
+
+
+def browser_system_tls_error(run, result):
+	for stage, fingerprint in (('before', result.get('firstFingerprint')), ('after', result.get('secondFingerprint'))):
+		report = run.output / f'browser-system-tls-{stage}.json'
+		if report.is_symlink() or not report.is_file():
+			return f'the OS TLS {stage} report is missing'
+		try:
+			evidence = json.loads(report.read_text(encoding=ENCODING))
+			addresses = evidence['addresses']
+			if not isinstance(addresses, list) or not addresses or any(
+					not ipaddress.ip_address(address.split('%', 1)[0]).is_loopback for address in addresses):
+				return f'the OS TLS {stage} report contains a non-loopback address'
+		except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError):
+			return f'the OS TLS {stage} report is malformed'
+		if evidence.get('host') != 'app.releasecheck.test' or evidence.get('port') != run.args.edge_port or \
+				evidence.get('leafSha256') != fingerprint or not evidence.get('openssl'):
+			return f'the OS TLS {stage} report does not match the browser leaf'
+	return None
+
+
+def browser_ports(run):
+	if not 1 <= run.args.port <= 65534 or not 1 <= run.args.edge_port <= 65535 or \
+			not 1 <= run.args.intake_port <= 65535:
+		raise RuntimeError('browser fixture ports are outside the permitted range')
+	tcp = [run.args.port, run.args.port + 1, run.args.intake_port, run.args.edge_port, 7740]
+	if len(set(tcp)) != len(tcp):
+		raise RuntimeError('browser fixture ports must be distinct')
+	return tcp, [53 if SYSTEM == 'Windows' else 7753]
+
+
+def initialize_browser_home(run, cli, home):
+	env = isolated_environment(HOME=str(home), TESTD_HOST_TLD='test', TESTD_TUNNEL=str(run.output))
+	run.command('browser-init', [str(cli), 'init', '--caddyfile', ''], 120, env=env)
+	config = home / '.config/testd/config.toml'
+	if config.is_symlink() or not config.is_file():
+		raise RuntimeError('the browser fixture config is missing or linked')
+	before = config.lstat()
+	content = config.read_text(encoding=ENCODING)
+	digest = hashlib.sha256(content.encode(ENCODING)).hexdigest()
+	host = tomllib.loads(content).get('host', {})
+	if not isinstance(host, dict) or any(key in host for key in ('listen_addr', 'edge_addr', 'http_addr')):
+		raise RuntimeError('the browser fixture config already sets listener addresses')
+	marker = '[host]\n'
+	if content.count(marker) != 1:
+		raise RuntimeError('the browser fixture config has an unexpected host section')
+	backup = run.output / 'browser-config-before.toml'
+	with backup.open('xb') as output:
+		output.write(content.encode(ENCODING))
+		output.flush()
+		os.fsync(output.fileno())
+	updated = content.replace(marker, marker + f'listen_addr = "127.0.0.1:{run.args.intake_port}"\n'
+		f'edge_addr = "127.0.0.1:{run.args.edge_port}"\nhttp_addr = "127.0.0.1:7740"\n')
+	temporary = config.with_name('config.toml.browser-fixture')
+	flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+	descriptor = os.open(temporary, flags, 0o600)
+	with os.fdopen(descriptor, 'wb') as output:
+		output.write(updated.encode(ENCODING))
+		output.flush()
+		os.fsync(output.fileno())
+	after = config.lstat()
+	if config.is_symlink() or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != \
+			(after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) or file_digest(config) != digest:
+		raise RuntimeError('the browser fixture config changed; leaving it untouched')
+	os.replace(temporary, config)
+	return env
+
+
+def cleanup_browser_system(run, cli, home, snapshot, tcp_ports, udp_ports, cli_digest):
+	try:
+		if run.metadata.get('browser_watcher_active'):
+			raise RuntimeError('the browser restart watcher is still running')
+		if run.metadata.get('browser_cleanup_unverified'):
+			raise RuntimeError('browser process cleanup is unverified; restore the full-system snapshot')
+		wait_for_fixture_ports(tcp_ports, udp_ports)
+	except Exception as error:
+		run.record('fixture-shutdown', 'fail', str(error))
+		run.record('system-restore', 'skip',
+			'blocked: stop fixtures and restore the full-system snapshot; scoped recovery cannot remove candidate state')
+		raise
+	run.record('fixture-shutdown', 'pass', 'browser fixture ports are available')
+	try:
+		try:
+			if file_digest(cli) != cli_digest:
+				raise RuntimeError('the candidate CLI changed; no system cleanup was attempted')
+			cleanup_owned_linux_integration(run, cli, home, DESKTOP_TLD, interactive=True)
+		except Exception as error:
+			if not any(item['name'] == 'system-owned-cleanup' and item['status'] == 'fail' for item in run.results):
+				run.record('system-owned-cleanup', 'fail', str(error))
+			raise
+	finally:
+		system_restore(run, snapshot, DESKTOP_TLD, interactive=True)
+
+
 def browser(run):
 	require('bun')
-	check_ports([run.args.port, run.args.port + 1])
+	tcp_ports, udp_ports = browser_ports(run)
+	engine = getattr(run.args, 'browser_engine', None)
+	changes_system = getattr(run.args, 'system', False)
+	if changes_system:
+		require_owned_product_integration()
+	if engine and not playwright_available(run, engine):
+		return
+	if engine or changes_system:
+		if not sys.stdin.isatty() or ask('Confirm this disposable host blocks external network egress [y/N]: ') != 'y':
+			run.record('browser-network', 'skip', 'blocked: isolated network egress was not confirmed')
+			return
+	check_ports(tcp_ports, udp_ports)
 	cli = binary(run)
-	with HostFixture(run, cli, run.args.intake_port) as host:
-		status = host.status
-		if status.get('tld') != 'test':
-			raise RuntimeError(f'the host at 127.0.0.1:{run.args.intake_port} serves .{status.get("tld")}, '
+	if not changes_system:
+		return browser_session(run, cli, engine)
+	home = run.output / 'browser-home'
+	home.mkdir(mode=0o700)
+	cli_digest = file_digest(cli)
+	snapshot = system_snapshot(run, DESKTOP_TLD, interactive=True)
+	try:
+		environment = initialize_browser_home(run, cli, home)
+		browser_session(run, cli, engine, environment, home / '.config/testd')
+	finally:
+		cleanup_browser_system(run, cli, home, snapshot, tcp_ports, udp_ports, cli_digest)
+
+
+def browser_session(run, cli, engine, environment=None, config=None):
+	root = (desktop_config_dir() if config is None else config) / 'pki/root.crt' if engine else None
+	if engine and (root.is_symlink() or not root.is_file()):
+		raise RuntimeError(f'the candidate public root certificate is missing or linked: {root}')
+	root_digest = file_digest(root) if engine else None
+	with HostFixture(run, cli, run.args.intake_port, environment) as host:
+		if host.status.get('tld') != 'test':
+			raise RuntimeError(f'the host at 127.0.0.1:{run.args.intake_port} serves .{host.status.get("tld")}, '
 				'but testd serves .test; run `testd init` and restart the host')
-		require_host_resolution(run, cli)
+		if environment is not None:
+			run.command('browser-system-fix', [str(cli), 'doctor', '--fix', '--json'], 300,
+				env=environment, terminal=True)
+		checks = require_host_resolution(run, cli, environment)
+		if engine and not checks.get('certificate', {}).get('ok'):
+			raise RuntimeError('the operating system does not report the candidate root as trusted')
 		run.metadata['browser_host_managed'] = host.started
 		run.save()
-		url = f'https://app.releasecheck.test:{run.args.edge_port}/'
-		print(f'Open {url} in each browser. Do not bypass certificate warnings.\n'
-			'Run the checks and save the JSON report using the page. Ctrl+C stops only the fixtures.', flush=True)
-		env = isolated_environment(TESTD_BROWSER_REPORT=str(run.output), TESTD_BROWSER_PORT=str(run.args.port),
-			TESTD_BROWSER_TLD='test', TESTD_BROWSER_EDGE_PORT=str(run.args.edge_port))
-		command = [str(cli), 'run', '--host', f'127.0.0.1:{run.args.intake_port}',
-			f'app.releasecheck:{run.args.port}', f'api.releasecheck:{run.args.port}',
-			f'app.othercheck:{run.args.port}', f'dead.releasecheck:{run.args.port + 1}',
-			'--', 'bun', 'tests/release/browser-server.ts']
-		stop = threading.Event()
-		errors = []
-		watcher = threading.Thread(target=watch_restart_requests, args=(run, host, stop, errors), daemon=True)
-		watcher.start()
-		try:
-			run.command('browser-fixture', command, 3600, env, interrupt_ok=True)
-		except KeyboardInterrupt:
-			pass
-		finally:
-			stop.set()
-			watcher.join(40)
-			if watcher.is_alive():
-				raise RuntimeError('the host restart watcher did not stop')
-			if errors:
-				raise RuntimeError('the host restart watcher failed') from errors[0]
+		browser_fixture(run, cli, host, engine, root, environment)
+	if engine:
+		report = run.output / f'playwright-{engine}.json'
+		if not report.is_file() or report.is_symlink():
+			raise RuntimeError('the Playwright browser report is missing')
+		result = json.loads(report.read_text(encoding=ENCODING))
+		if file_digest(root) != root_digest:
+			raise RuntimeError('the candidate root certificate changed during the browser run')
+		error = playwright_report_error(result, engine, run.args.edge_port, run.metadata['commit'],
+			run.metadata['binaries'][str(cli)], root_digest)
+		if not error:
+			error = browser_system_tls_error(run, result)
+		run.record('browser-results', 'fail' if error else 'pass', f'{report}; {error}' if error else str(report))
+		return
 	reports = list(run.output.glob('browser-*.json'))
 	if not reports:
-		run.metadata['incomplete'] = True
-		run.record('browser-results', 'skip', 'no browser report was saved')
+		run.record('browser-results', 'skip', 'blocked: no browser report was saved')
 	for report in reports:
 		result = json.loads(report.read_text(encoding=ENCODING))
 		error = browser_report_error(result, run.metadata['commit'], run.args.edge_port)
 		status = 'fail' if error else 'pass'
 		run.record('browser-results', status, f'{report}; {error}' if error else str(report))
+
+
+def browser_cleanup_confirmed(run, engine):
+	report = run.output / f'playwright-{engine}.json'
+	if report.is_symlink() or not report.is_file():
+		return False
+	try:
+		result = json.loads(report.read_text(encoding=ENCODING))
+	except (OSError, UnicodeError, json.JSONDecodeError):
+		return False
+	return isinstance(result, dict) and result.get('cleanupComplete') is True
+
+
+def browser_system_tls(run, stage, environment):
+	run.command(f'browser-system-tls-{stage}', [sys.executable, 'tests/release/browser_system_tls.py',
+		'--port', str(run.args.edge_port), '--output', str(run.output / f'browser-system-tls-{stage}.json')],
+		75, environment)
+
+
+def browser_fixture(run, cli, host, engine, root, environment):
+	url = f'https://app.releasecheck.test:{run.args.edge_port}/'
+	if not engine:
+		print(f'Open {url} in each browser. Do not bypass certificate warnings.\n'
+			'Run the checks and save the JSON report using the page. Ctrl+C stops only the fixtures.', flush=True)
+	options = {'TESTD_BROWSER_REPORT': str(run.output), 'TESTD_BROWSER_PORT': str(run.args.port),
+		'TESTD_BROWSER_TLD': 'test', 'TESTD_BROWSER_EDGE_PORT': str(run.args.edge_port)}
+	fixture_env = isolated_environment(**options) if environment is None else {**environment, **options}
+	driver_env = browser_driver_environment(**options)
+	if engine:
+		driver_env['TESTD_BROWSER_ROOT'] = str(root)
+		driver_env['TESTD_BROWSER_COMMIT'] = run.metadata['commit']
+		driver_env['TESTD_BROWSER_CANDIDATE'] = run.metadata['binaries'][str(cli)]
+	command = [str(cli), 'run', '--host', f'127.0.0.1:{run.args.intake_port}',
+		f'app.releasecheck:{run.args.port}', f'api.releasecheck:{run.args.port}',
+		f'app.othercheck:{run.args.port}', f'dead.releasecheck:{run.args.port + 1}',
+		'--', 'bun', 'tests/release/browser-server.ts']
+	stop = threading.Event()
+	errors = []
+	watcher = threading.Thread(target=watch_restart_requests, args=(run, host, stop, errors), daemon=True)
+	run.metadata['browser_watcher_active'] = True
+	if not engine and environment is not None:
+		run.metadata['browser_cleanup_unverified'] = True
+	watcher.start()
+	driver_started = False
+	try:
+		if engine:
+			with run.serve('browser-fixture', command, fixture_env, stop_signal=signal.SIGINT):
+				browser_system_tls(run, 'before', driver_env)
+				driver_started = True
+				run.metadata['browser_cleanup_unverified'] = True
+				run.command('playwright-browser', ['bun', 'tests/release/browser-playwright.ts', engine], 600, driver_env)
+				browser_system_tls(run, 'after', driver_env)
+		else:
+			run.command('browser-fixture', command, 3600, fixture_env, interrupt_ok=True)
+	except KeyboardInterrupt:
+		if engine:
+			raise
+	finally:
+		stop.set()
+		watcher.join(60)
+		if driver_started and browser_cleanup_confirmed(run, engine):
+			run.metadata.pop('browser_cleanup_unverified')
+		if not engine and environment is not None and \
+				ask('Confirm all manual fixture browsers are stopped [y/N]: ') == 'y':
+			run.metadata.pop('browser_cleanup_unverified')
+		if watcher.is_alive():
+			raise RuntimeError('the host restart watcher did not stop')
+		run.metadata.pop('browser_watcher_active')
+		if errors:
+			raise RuntimeError('the host restart watcher failed') from errors[0]
 
 
 def desktop_config_dir():
@@ -1303,6 +1572,8 @@ def main(argv=None):
 	parser.add_argument('--port', type=int, default=19080)
 	parser.add_argument('--edge-port', type=int, default=443)
 	parser.add_argument('--intake-port', type=int, default=7737)
+	parser.add_argument('--browser-engine', choices=['chromium', 'firefox', 'webkit'],
+		help='run the real browser fixture with the selected Playwright engine')
 	args = parser.parse_args(argv)
 	match_redirected_encoding()
 	if args.restore_report:
@@ -1319,6 +1590,8 @@ def main(argv=None):
 		parser.error('a suite is required unless --restore-report is given')
 	if args.suite == 'artifacts' and not args.artifacts:
 		parser.error('artifacts requires --artifacts')
+	if args.browser_engine and args.suite not in ('browser', 'all'):
+		parser.error('--browser-engine requires browser or all')
 	if args.suite in ('host', 'artifacts') and args.system and args.service:
 		parser.error('--system and --service require separate runs and restored snapshots')
 	if args.suite == 'all':
