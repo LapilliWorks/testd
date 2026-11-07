@@ -147,20 +147,85 @@ pub(crate) trait RootAuthority: Send + Sync {
 /// The tray installs trust at startup for fresh installs. Without this marker,
 /// removing trust from the maintenance UI would be undone on the next launch.
 const AUTO_TRUST_DISABLED: &str = "trust-disabled";
+const AUTO_TRUST_DISABLED_CONTENT: &[u8] = b"removed by the user\n";
 
 /// Record whether the daemon may install root trust without being asked.
 pub fn set_auto_trust(pki_dir: &Path, allowed: bool) -> io::Result<()> {
 	let path = pki_dir.join(AUTO_TRUST_DISABLED);
 	if allowed {
-		match std::fs::remove_file(&path) {
-			Ok(()) => Ok(()),
-			Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-			Err(e) => Err(e),
+		if valid_trust_marker_exists(&path)? {
+			std::fs::remove_file(path)?;
 		}
-	} else {
-		std::fs::create_dir_all(pki_dir)?;
-		std::fs::write(path, b"removed by the user\n")
+		return Ok(());
 	}
+
+	std::fs::create_dir_all(pki_dir)?;
+	// Never truncate an existing path: it may be a link or a changed file.
+	match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+		Ok(mut file) => {
+			use std::io::Write;
+			file.write_all(AUTO_TRUST_DISABLED_CONTENT)
+		},
+		Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+			if valid_trust_marker_exists(&path)? {
+				Ok(())
+			} else {
+				Err(trust_marker_conflict(&path))
+			}
+		},
+		Err(error) => Err(error),
+	}
+}
+
+fn trust_marker_conflict(path: &Path) -> io::Error {
+	io::Error::new(io::ErrorKind::AlreadyExists, format!("{} is linked or changed; left untouched", path.display()))
+}
+
+fn valid_trust_marker_exists(path: &Path) -> io::Result<bool> {
+	use std::io::Read;
+
+	let metadata = match std::fs::symlink_metadata(path) {
+		Ok(metadata) => metadata,
+		Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+		Err(error) => return Err(error),
+	};
+	if !metadata.is_file() || metadata.len() != AUTO_TRUST_DISABLED_CONTENT.len() as u64 {
+		return Err(trust_marker_conflict(path));
+	}
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::MetadataExt;
+		if metadata.nlink() != 1 {
+			return Err(trust_marker_conflict(path));
+		}
+	}
+	let file = std::fs::File::open(path)?;
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::MetadataExt;
+		let opened = file.metadata()?;
+		if opened.dev() != metadata.dev() || opened.ino() != metadata.ino() || opened.nlink() != 1 {
+			return Err(trust_marker_conflict(path));
+		}
+	}
+	let mut content = Vec::new();
+	file.take(AUTO_TRUST_DISABLED_CONTENT.len() as u64 + 1)
+		.read_to_end(&mut content)?;
+	if content != AUTO_TRUST_DISABLED_CONTENT {
+		return Err(trust_marker_conflict(path));
+	}
+	let current = std::fs::symlink_metadata(path)?;
+	if !current.is_file() {
+		return Err(trust_marker_conflict(path));
+	}
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::MetadataExt;
+		if current.dev() != metadata.dev() || current.ino() != metadata.ino() || current.nlink() != 1 {
+			return Err(trust_marker_conflict(path));
+		}
+	}
+	Ok(true)
 }
 
 /// The real root CA in the daemon's PKI directory.
@@ -566,10 +631,55 @@ mod tests {
 		assert!(PkiRoot::new(pki.clone()).auto_trust_allowed());
 
 		set_auto_trust(&pki, false).unwrap();
+		set_auto_trust(&pki, false).unwrap();
 		assert!(!PkiRoot::new(pki.clone()).auto_trust_allowed());
 
 		set_auto_trust(&pki, true).unwrap();
 		assert!(PkiRoot::new(pki).auto_trust_allowed());
+	}
+
+	#[test]
+	fn auto_trust_marker_preserves_changed_files() {
+		let dir = tempfile::tempdir().unwrap();
+		let pki = dir.path().join("pki");
+		std::fs::create_dir(&pki).unwrap();
+		let marker = pki.join(AUTO_TRUST_DISABLED);
+		std::fs::write(&marker, "operator data").unwrap();
+		assert!(set_auto_trust(&pki, false).is_err());
+		assert!(set_auto_trust(&pki, true).is_err());
+		assert_eq!(std::fs::read_to_string(marker).unwrap(), "operator data");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn auto_trust_marker_refuses_symlinks() {
+		let dir = tempfile::tempdir().unwrap();
+		let pki = dir.path().join("pki");
+		std::fs::create_dir(&pki).unwrap();
+		let target = dir.path().join("unrelated");
+		std::fs::write(&target, "keep this file").unwrap();
+		let marker = pki.join(AUTO_TRUST_DISABLED);
+		std::os::unix::fs::symlink(&target, &marker).unwrap();
+		assert!(set_auto_trust(&pki, false).is_err());
+		assert!(set_auto_trust(&pki, true).is_err());
+		assert!(std::fs::symlink_metadata(marker).unwrap().is_symlink());
+		assert_eq!(std::fs::read_to_string(target).unwrap(), "keep this file");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn auto_trust_marker_refuses_hardlinks() {
+		let dir = tempfile::tempdir().unwrap();
+		let pki = dir.path().join("pki");
+		std::fs::create_dir(&pki).unwrap();
+		let target = dir.path().join("unrelated");
+		std::fs::write(&target, "removed by the user\n").unwrap();
+		let marker = pki.join(AUTO_TRUST_DISABLED);
+		std::fs::hard_link(&target, &marker).unwrap();
+		assert!(set_auto_trust(&pki, false).is_err());
+		assert!(set_auto_trust(&pki, true).is_err());
+		assert_eq!(std::fs::read_to_string(&marker).unwrap(), "removed by the user\n");
+		assert_eq!(std::fs::read_to_string(target).unwrap(), "removed by the user\n");
 	}
 
 	#[test]
