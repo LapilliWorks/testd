@@ -30,6 +30,15 @@ function Fail($msg) { $script:Failed++; Write-Host "FAIL  $msg" -ForegroundColor
 function Skip($msg) { $script:Skipped++; Write-Host "skip  $msg" }
 function Section($msg) { Write-Host "`n== $msg ==" }
 
+function Report-LaunchAtLogin([string]$Value) {
+	# The CLI suite has no candidate GUI to compare against the existing entry.
+	if ($Value) {
+		Skip "launch-at-login entry not validated against the candidate ($Value)"
+	} else {
+		Skip 'launch at login not configured yet (start the tray once): HKCU\...\Run\dev.testd.host'
+	}
+}
+
 function Wait-Tcp([string]$HostName, [int]$Port, [int]$Seconds = 30) {
 	for ($i = 0; $i -lt $Seconds; $i++) {
 		$client = New-Object System.Net.Sockets.TcpClient
@@ -624,15 +633,7 @@ Skip 'system checks blocked until Windows resolver and trust ownership is enforc
 Section 'launch at login'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $runValue = (Get-ItemProperty -Path $runKey -Name 'dev.testd.host' -ErrorAction SilentlyContinue).'dev.testd.host'
-if ($runValue) {
-	if ($runValue -match 'testd') {
-		Pass "launch-at-login entry ($runValue)"
-	} else {
-		Fail "launch-at-login entry points elsewhere: $runValue"
-	}
-} else {
-	Skip 'launch at login not configured yet (start the tray once): HKCU\...\Run\dev.testd.host'
-}
+Report-LaunchAtLogin $runValue
 
 } finally {
 	Section 'cleanup'

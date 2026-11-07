@@ -1242,6 +1242,9 @@ class HostSystemTests(unittest.TestCase):
 			('skip  system checks blocked until ownership\npassed 12, failed 0, skipped 1\n', False, False,
 				'not applicable:'),
 			('skip  launch at login not configured\npassed 12, failed 0, skipped 1\n', False, True, 'blocked:'),
+			('skip  system checks blocked until ownership\n'
+				'skip  launch-at-login entry not validated against the candidate (debug)\n'
+				'passed 12, failed 0, skipped 2\n', False, True, 'blocked:'),
 			('skip  system changes disabled (fixture)\npassed 12, failed 0, skipped 1\n', True, True, 'blocked:'),
 			('passed 12, failed 0, skipped 1\n', False, True, 'blocked:'),
 			('passed 0, failed 0, skipped 0\n', False, True, 'blocked:'),
@@ -1292,15 +1295,16 @@ class HostSystemTests(unittest.TestCase):
 		with tempfile.TemporaryDirectory() as temporary:
 			run = self.create_run(temporary)
 			home = pathlib.Path(temporary) / 'fixture-home'
+			cli = pathlib.Path(temporary) / 'candidate'
 			owner = home / '.config/testd/system-ownership-id'
 			with patch.dict(os.environ, {'TESTD_TOKEN': 'real-secret'}), \
 					patch.object(run, 'command') as command:
-				runner.cleanup_owned_linux_integration(run, pathlib.Path('/candidate'), home, 'testdcheck', True)
+				runner.cleanup_owned_linux_integration(run, cli, home, 'testdcheck', True)
 				command.assert_not_called()
 				owner.parent.mkdir(parents=True)
 				owner.write_text('fixture-owner', encoding='utf-8')
-				runner.cleanup_owned_linux_integration(run, pathlib.Path('/candidate'), home, 'testdcheck', True)
-			self.assertEqual(command.call_args.args[:3], ('system-owned-cleanup', ['/candidate', 'uninstall'], 300))
+				runner.cleanup_owned_linux_integration(run, cli, home, 'testdcheck', True)
+			self.assertEqual(command.call_args.args[:3], ('system-owned-cleanup', [str(cli), 'uninstall'], 300))
 			self.assertNotIn('--purge', command.call_args.args[1])
 			self.assertEqual(command.call_args.kwargs['env']['HOME'], str(home))
 			self.assertEqual(command.call_args.kwargs['env']['TESTD_HOST_TLD'], 'testdcheck')
@@ -1336,29 +1340,34 @@ class HostSystemTests(unittest.TestCase):
 	def test_failed_host_checks_still_restore_the_snapshot(self):
 		with tempfile.TemporaryDirectory() as directory:
 			run = self.create_run(directory)
+			cli = pathlib.Path(directory) / 'candidate'
+			cli.write_bytes(b'fixture')
 			events = []
 
 			def snapshot(*args, **kwargs):
 				events.append('snapshot')
 				return pathlib.Path('system-before')
 
-			with patch.object(runner, 'binary', return_value=pathlib.Path('/bin/true')), \
-				patch.object(runner, 'check_ports'), \
+			with patch.object(runner, 'SYSTEM', 'Linux'), patch.object(runner, 'require'), \
+				patch.object(runner, 'binary', return_value=cli), patch.object(runner, 'check_ports'), \
 				patch.object(runner, 'system_snapshot', side_effect=snapshot), \
 				patch.object(runner, 'system_restore', side_effect=lambda *a, **k: events.append('restore')), \
 				patch.object(run, 'command', side_effect=RuntimeError('host checks failed')):
-				with self.assertRaises(RuntimeError):
+				with self.assertRaisesRegex(RuntimeError, 'host checks failed'):
 					runner.host(run)
 			self.assertEqual(events, ['snapshot', 'restore'])
 
 	def test_busy_fixture_ports_are_refused_before_the_snapshot(self):
 		with tempfile.TemporaryDirectory() as directory:
 			run = self.create_run(directory)
-			with patch.object(runner, 'binary', return_value=pathlib.Path('/bin/true')), \
+			cli = pathlib.Path(directory) / 'candidate'
+			cli.write_bytes(b'fixture')
+			with patch.object(runner, 'SYSTEM', 'Linux'), patch.object(runner, 'binary', return_value=cli), \
 				patch.object(runner, 'check_ports', side_effect=RuntimeError('port busy')), \
-				patch.object(runner, 'system_snapshot', side_effect=AssertionError('snapshot ran too early')):
-				with self.assertRaises(RuntimeError):
+				patch.object(runner, 'system_snapshot') as snapshot:
+				with self.assertRaisesRegex(RuntimeError, 'port busy'):
 					runner.host(run)
+			snapshot.assert_not_called()
 
 	def test_plain_host_run_does_not_touch_system_state(self):
 		with tempfile.TemporaryDirectory() as directory:
@@ -1406,14 +1415,16 @@ class HostSystemTests(unittest.TestCase):
 			with self.subTest(system=system), tempfile.TemporaryDirectory() as directory:
 				run = self.create_run(directory)
 				run.args.system = system
-				with patch.object(runner, 'binary', return_value=pathlib.Path('/bin/true')), \
-					patch.object(runner, 'check_ports'), \
-					patch.object(runner, 'system_snapshot'), \
-					patch.object(runner, 'system_restore'), \
-					patch.object(run, 'command', return_value='ok    doctor --fix\n') as command, \
-					redirect_stdout(io.StringIO()):
+				cli = pathlib.Path(directory) / 'candidate'
+				cli.write_bytes(b'fixture')
+				output = 'ok    doctor --fix\npassed 1, failed 0, skipped 0\n'
+				with patch.object(runner, 'SYSTEM', 'Linux'), patch.object(runner, 'require'), \
+					patch.object(runner, 'binary', return_value=cli), patch.object(runner, 'check_ports'), \
+					patch.object(runner, 'system_snapshot'), patch.object(runner, 'system_restore'), \
+					patch.object(run, 'command', return_value=output) as command, redirect_stdout(io.StringIO()):
 					runner.host(run)
 				self.assertEqual(command.call_args.kwargs['terminal'], system)
+				self.assertFalse(run.metadata.get('incomplete', False))
 
 
 class ManualContractTests(unittest.TestCase):
@@ -2446,6 +2457,35 @@ class PowerShellScriptTests(unittest.TestCase):
 					capture_output=True, encoding='utf-8', timeout=30)
 				self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 		self.assertNotIn('Stop-Process -Id', (ROOT / 'tests/host/windows.ps1').read_text(encoding='utf-8'))
+
+	def test_windows_login_entry_does_not_count_as_candidate_evidence(self):
+		script = state.powershell_quote(ROOT / 'tests/host/windows.ps1')
+		command = (
+			'[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false);'
+			'$tokens = $null; $errors = $null;'
+			f'$ast = [System.Management.Automation.Language.Parser]::ParseFile({script}, [ref]$tokens, [ref]$errors);'
+			'$definition = $ast.Find({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] '
+			"-and $args[0].Name -eq 'Report-LaunchAtLogin' }, $true);"
+			'. ([scriptblock]::Create($definition.Extent.Text));'
+			'$script:records = @();'
+			'function global:Skip([string]$message) { $script:records += $message };'
+			"function global:Pass { throw 'unvalidated login entry was counted as a pass' };"
+			"function global:Fail { throw 'an unrelated login entry was counted as a failure' };"
+			"Report-LaunchAtLogin 'C:\\work\\target\\debug\\testd-gui.exe';"
+			"Report-LaunchAtLogin 'C:\\other\\unrelated.exe';"
+			"Report-LaunchAtLogin '';"
+			'$script:records | ConvertTo-Json -Compress'
+		)
+		for engine in POWERSHELLS:
+			with self.subTest(engine=pathlib.Path(engine).name):
+				result = subprocess.run([engine, '-NoProfile', '-NonInteractive', '-Command', command],
+					capture_output=True, encoding='utf-8', timeout=30)
+				self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+				records = json.loads(result.stdout)
+				self.assertEqual(len(records), 3)
+				self.assertIn('not validated against the candidate', records[0])
+				self.assertIn('not validated against the candidate', records[1])
+				self.assertIn('not configured', records[2])
 
 	def test_windows_host_fixture_disables_real_providers(self):
 		with tempfile.TemporaryDirectory() as temporary:
