@@ -197,7 +197,7 @@ stop_app() {
 # Start the upstream HTTP server once for registration and sharing checks.
 ensure_app_server() {
 	if [ -n "$APP_PID" ] && kill -0 "$APP_PID" 2>/dev/null; then return 0; fi
-	python3 -m http.server "$APP_PORT" --bind 127.0.0.1 >"$APP_LOG" 2>&1 &
+	python3 tests/host/http-server.py "$APP_PORT" >"$APP_LOG" 2>&1 &
 	APP_PID=$!
 	if wait_for_tcp 127.0.0.1 "$APP_PORT" 10; then return 0; fi
 	printf 'upstream failed to start:\n' >&2

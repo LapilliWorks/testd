@@ -378,13 +378,14 @@ check_sharing() {
 quick_launch_definition() {
 	python3 - "$LAUNCH_PORT" <<'PY'
 import json
+import pathlib
 import sys
 
 port = sys.argv[1]
 print(json.dumps({
 	'label': 'host check',
 	'program': sys.executable,
-	'args': ['-m', 'http.server', port, '--bind', '127.0.0.1'],
+	'args': [str(pathlib.Path('tests/host/http-server.py').resolve()), port],
 	'entries': [{'domain': 'launch.testdproj', 'target': f'127.0.0.1:{port}'}],
 }))
 PY

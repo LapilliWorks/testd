@@ -1579,8 +1579,16 @@ class UnixHostContractTests(unittest.TestCase):
 			text=True, timeout=15).strip()
 		self.assertEqual(definition['program'], interpreter)
 		self.assertTrue(pathlib.Path(definition['program']).is_absolute())
-		self.assertEqual(definition['args'], ['-m', 'http.server', '18081', '--bind', '127.0.0.1'])
+		self.assertEqual(definition['args'], [str(ROOT / 'tests/host/http-server.py'), '18081'])
 		self.assertEqual(definition['entries'], [{'domain': 'launch.testdproj', 'target': '127.0.0.1:18081'}])
+
+	def test_loopback_http_fixture_binds_without_reverse_dns(self):
+		fixture = load('loopback_http_fixture', ROOT / 'tests/host/http-server.py')
+		with patch('socket.getfqdn', side_effect=AssertionError('fixture must not use reverse DNS')):
+			with fixture.LoopbackHTTPServer(('127.0.0.1', 0), fixture.http.server.SimpleHTTPRequestHandler) as server:
+				self.assertEqual(server.server_name, 'localhost')
+				self.assertGreater(server.server_port, 0)
+				self.assertEqual(server.server_address, ('127.0.0.1', server.server_port))
 
 	def test_quick_launch_diagnostics_are_bounded_and_omit_definition_credentials(self):
 		private = 'private fixture credential'
