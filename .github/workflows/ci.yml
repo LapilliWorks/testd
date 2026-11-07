@@ -34,35 +34,113 @@ jobs:
     name: test (${{ matrix.os }})
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.release == 'true'
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-15, windows-latest]
+        include:
+          - os: ubuntu-24.04
+            platform: linux
+          - os: macos-15
+            platform: macos
+          - os: macos-15-intel
+            platform: macos
+          - os: windows-2025
+            platform: windows
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - run: rustup toolchain install 1.89.0 1.90.0 --profile minimal
       - uses: ./.github/actions/linux-dependencies
         if: runner.os == 'Linux'
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.14'
       - uses: oven-sh/setup-bun@v2
-      - uses: taiki-e/install-action@nextest
-      - run: cargo fmt --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo nextest run --workspace --locked
-      - name: Stable-release contract gate
-        if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
-        run: cargo nextest run --workspace --locked --run-ignored all
-      - run: python scripts/release.py verify-version
-      - run: python -m unittest discover -s tests/release -p 'test_*.py'
-      - run: >-
-          python -c "import pathlib, subprocess;
-          subprocess.run(['bun', 'test', str(pathlib.Path('tests/release/browser.test.ts').resolve())],
-          check=True, timeout=300)"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-deny
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-${{ matrix.os }}
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - run: bun install --frozen-lockfile
+      - name: Run all unprivileged platform checks
+        run: python scripts/test-${{ matrix.platform }}.py ci --report ci-reports
+      - name: Retain status summary, never fixture state or raw reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-summary-${{ matrix.os }}
+          path: ci-reports/ci-summary.json
+          retention-days: 7
+          if-no-files-found: warn
+
+  fedora:
+    name: test (fedora-44 userspace)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    container: fedora:44
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      HOME: /home/testd-ci
+      CARGO_HOME: /home/testd-ci/.cargo
+      RUSTUP_HOME: /home/testd-ci/.rustup
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - name: Bootstrap Fedora container
+        run: |
+          dnf install -y git tar gzip ca-certificates libstdc++ shadow-utils util-linux python3 curl
+          useradd --create-home testd-ci
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/linux-dependencies
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: rustup toolchain install 1.89.0 1.90.0 --profile minimal
+      - uses: oven-sh/setup-bun@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-deny
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-fedora-44
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - run: bun install --frozen-lockfile
+      - name: Run Fedora userspace checks as a normal user
+        run: |
+          chown -R testd-ci:testd-ci "$HOME" "$GITHUB_WORKSPACE"
+          runuser -u testd-ci --preserve-environment -- \
+            env USER=testd-ci LOGNAME=testd-ci \
+            python3 scripts/test-linux.py ci --report "$GITHUB_WORKSPACE/ci-reports"
+      - name: Retain status summary, never fixture state or raw reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-summary-fedora-44
+          path: ci-reports/ci-summary.json
+          retention-days: 7
+          if-no-files-found: warn
 
   site:
     name: site
@@ -95,40 +173,10 @@ jobs:
       # a persisted full-system snapshot; hosted CI only runs fake-state tests.
       - run: python -m unittest discover -s tests/release -p test_release.py -k SystemStateTests
 
-  msrv:
-    name: msrv (${{ matrix.toolchain }})
-    needs: changes
-    if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - toolchain: '1.89.0'
-            packages: '--workspace --exclude testd-gui'
-          - toolchain: '1.90.0'
-            packages: '-p testd-gui'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ matrix.toolchain }}
-      - uses: ./.github/actions/linux-dependencies
-        if: matrix.toolchain == '1.90.0'
-      - run: cargo check ${{ matrix.packages }} --locked
-
-  deny:
-    name: cargo-deny
-    needs: changes
-    if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
-
   bundle:
     name: bundle (${{ matrix.target }})
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, msrv, deny]
+    needs: [test, fedora]
     strategy:
       fail-fast: false
       matrix:
@@ -174,10 +222,11 @@ jobs:
         run: cargo install tauri-cli --locked --version '^2'
       - run: cargo build --release --bin testd --locked --target ${{ matrix.target }}
       - run: cargo tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
-      - run: >-
+      - name: Package archives and validate bundle selection without installing
+        run: >-
           python scripts/release.py package --version "${GITHUB_REF_NAME#v}"
           --target ${{ matrix.target }} --build-dir target/${{ matrix.target }}/release --output dist
-      - run: python tests/release/run.py artifacts --artifacts dist
+      # Installer smoke tests require a separately backed-up, interactive VM.
       - uses: actions/upload-artifact@v4
         with:
           name: bundles-${{ matrix.target }}
@@ -186,7 +235,7 @@ jobs:
 
   sbom:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, msrv, deny]
+    needs: [test, fedora]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

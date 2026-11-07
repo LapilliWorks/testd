@@ -292,7 +292,13 @@ Recovery requires the same platform and any necessary sudo or elevation. It leav
 
 ### CI coverage
 
-`.github/workflows/ci.yml` runs system-state fixtures on `ubuntu-latest`, `macos-15`, and `windows-latest`. These use an in-memory host and do not change the runner's resolver or trust store. Real system and service checks require an explicitly confirmed disposable host with a persisted full-system snapshot; hosted CI does not supply that snapshot and does not run them.
+`.github/workflows/ci.yml` provisions and runs the `ci` suite on Ubuntu 24.04, macOS 15 Apple Silicon and Intel, and Windows Server 2025. It installs Python 3.14, stable and both MSRV Rust toolchains, `cargo-nextest`, `cargo-deny`, Bun, and website dependencies; Linux build libraries come from the local dependency action. Xcode and MSVC/Windows SDK prerequisites come from the hosted runner images. Rust build caches are isolated by platform, and only master runs save them.
+
+A separate Fedora 44 container job installs Fedora build dependencies, uses its system Python, and runs the same suite as a normal user. It establishes Fedora userspace compilation and CLI/daemon behavior on the Ubuntu runner's kernel, not native Fedora resolver, trust, systemd-session, SELinux, or desktop integration. Hosted Windows Server is not desktop Windows 11 evidence.
+
+Every applicable job runs ignored contracts and executable doctests, rather than reserving them for stable tags. Missing prerequisites, unexpected skips, and incomplete checks make the CI command nonzero. The workflow uploads only `ci-summary.json`; fixture state and full report files are not uploaded. Separate Python 3.12 system-state fixture jobs retain minimum-runtime coverage without changing the runner's resolver or trust store. Site-only changes retain their lightweight website job.
+
+Real system, service, browser-trust, installer, and desktop checks still require an explicitly confirmed disposable host with a persisted full-system snapshot; hosted CI does not supply that snapshot and does not run them. Tag jobs build and package artifacts without executing the interactive artifact smoke runner. Source builds and package creation do not replace installation, signing, or uninstall evidence. A green workflow is not release approval. Required-check settings must use the current platform job names rather than the removed standalone MSRV/audit jobs.
 
 ### System checks need a running daemon
 

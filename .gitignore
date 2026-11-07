@@ -13,6 +13,8 @@ node_modules/
 /.playwright-cli/
 # Local design references; not shipped.
 /lapilli-directions.pdf
+# Private test reports can contain fixture credentials and PKI.
+/ci-reports/
 # Local PKI output from manual host runs.
 pki/
 *.cdx.json

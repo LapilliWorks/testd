@@ -181,7 +181,7 @@ class AllChecks:
 				precondition=self.probe_available,
 				checkpoint='Use a separate, clean disposable host; the macOS probe changes resolver and trust state.'),
 		]
-		return [stage for stage in stages if self.args.suite != 'ci' or not stage.system]
+		return [stage for stage in stages if self.args.suite != 'ci' or not (stage.system or stage.interactive)]
 
 	def command(self, name, argv, tools, timeout=1200, environment=None, skip_pattern=None):
 		def action(child):

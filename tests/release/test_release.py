@@ -86,13 +86,12 @@ class ReleaseTests(unittest.TestCase):
 		workspace = release.tomllib.loads((ROOT / 'Cargo.toml').read_text())
 		tray = release.tomllib.loads((ROOT / 'src-tauri/Cargo.toml').read_text())
 		workflow = (ROOT / '.github/workflows/ci.yml').read_text()
-		for name, version in [
-			('msrv-cli', workspace['workspace']['package']['rust-version']),
-			('msrv-tray', tray['package']['rust-version']),
-		]:
+		versions = [workspace['workspace']['package']['rust-version'], tray['package']['rust-version']]
+		for name, version in zip(('msrv-cli', 'msrv-tray'), versions):
 			with self.subTest(name=name):
 				self.assertEqual(commands[name][1], f'+{version}.0')
-				self.assertIn(f"toolchain: '{version}.0'", workflow)
+		toolchains = ' '.join(f'{version}.0' for version in versions)
+		self.assertIn(f'rustup toolchain install {toolchains} --profile minimal', workflow)
 
 	def test_release_core_uses_the_absolute_browser_fixture_path(self):
 		run = Mock(args=SimpleNamespace(gui=False, strict=True))
@@ -101,11 +100,40 @@ class ReleaseTests(unittest.TestCase):
 		command = next(call.args[1] for call in run.command.call_args_list if call.args[0] == 'browser-fixture-tests')
 		self.assertEqual(command, ['bun', 'test', str(ROOT / 'tests/release/browser.test.ts')])
 
-	def test_ci_uses_the_absolute_browser_fixture_path(self):
+	def test_ci_uses_the_runner_with_the_absolute_browser_fixture_path(self):
+		workflow = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
+		test_job = workflow.split('\n  test:\n', 1)[1].split('\n  fedora:\n', 1)[0]
+		self.assertIn('scripts/test-${{ matrix.platform }}.py ci --report ci-reports', test_job)
+		self.assertNotIn('bun test tests/release/browser.test.ts', test_job)
+		checks = runner.helper('all_checks')
+		stage = next(stage for stage in checks.AllChecks(None, None, SimpleNamespace(suite='ci')).stages()
+			if stage.name == 'browser-server-fixtures')
+		child = Mock()
+		child.command.return_value = ''
+		with patch.object(checks.shutil, 'which', return_value='installed'):
+			stage.action(child)
+		self.assertEqual(child.command.call_args.args[1],
+			['bun', '--no-install', 'test', str(ROOT / 'tests/release/browser.test.ts')])
+
+	def test_ci_provisions_supported_platforms_and_uploads_only_status_summaries(self):
 		workflow = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
 		test_job = workflow.split('\n  test:\n', 1)[1].split('\n  site:\n', 1)[0]
-		self.assertIn("str(pathlib.Path('tests/release/browser.test.ts').resolve())", test_job)
-		self.assertNotIn('bun test tests/release/browser.test.ts', test_job)
+		for platform in ('ubuntu-24.04', 'macos-15', 'macos-15-intel', 'windows-2025'):
+			self.assertIn(f'os: {platform}', test_job)
+		for prerequisite in ("python-version: '3.14'", 'cargo-nextest,cargo-deny',
+				'bun install --frozen-lockfile', 'persist-credentials: false', 'timeout-minutes: 90'):
+			self.assertIn(prerequisite, test_job)
+		self.assertIn('container: fedora:44', test_job)
+		self.assertIn('runuser -u testd-ci --preserve-environment', test_job)
+		self.assertIn('path: ci-reports/ci-summary.json', test_job)
+		self.assertNotRegex(test_job, r'(?m)^\s+path: ci-reports/?\s*$')
+		self.assertNotIn('continue-on-error:', test_job)
+		self.assertIn('/ci-reports/', (ROOT / '.gitignore').read_text(encoding='utf-8'))
+		dependencies = (ROOT / '.github/actions/linux-dependencies/action.yml').read_text(encoding='utf-8')
+		self.assertIn('fedora)', dependencies)
+		self.assertIn('dnf install -y gcc gcc-c++', dependencies)
+		for package in ('webkit2gtk4.1-devel', 'libappindicator-gtk3-devel', 'unzip', 'systemd'):
+			self.assertIn(package, dependencies)
 
 	@unittest.skipUnless(shutil.which('bun'), 'Bun is not installed')
 	def test_link_checker_uses_the_isolated_site_output(self):
@@ -139,12 +167,20 @@ class ReleaseTests(unittest.TestCase):
 				else:
 					self.assertIn('--include-ignored', command)
 
-	def test_stable_release_ci_runs_ignored_contracts(self):
+	def test_ci_always_runs_ignored_contracts_and_gates_release_builds(self):
 		workflow = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
-		test_job = workflow.split('\n  test:\n', 1)[1].split('\n  site:\n', 1)[0]
-		gate = test_job.split('\n      - name: Stable-release contract gate\n', 1)[1].split('\n      - ', 1)[0]
-		self.assertIn("if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')", gate)
-		self.assertIn('cargo nextest run --workspace --locked --run-ignored all', gate)
+		checks = runner.helper('all_checks')
+		stages = checks.AllChecks(None, None, SimpleNamespace(suite='ci')).stages()
+		for name in ('contracts-msrv', 'cli-stable', 'workspace-stable'):
+			child = Mock()
+			child.command.return_value = ''
+			with patch.object(checks.shutil, 'which', return_value='installed'):
+				next(stage for stage in stages if stage.name == name).action(child)
+			command = child.command.call_args.args[1]
+			self.assertEqual(command[command.index('--run-ignored') + 1], 'all')
+		for job, following in (('bundle', 'sbom'), ('sbom', 'release')):
+			section = workflow.split(f'\n  {job}:\n', 1)[1].split(f'\n  {following}:\n', 1)[0]
+			self.assertIn('needs: [test, fedora]', section)
 
 	def test_notification_dependency_is_not_downgraded_to_4_17(self):
 		manifest = release.tomllib.loads((ROOT / 'crates/testd-daemon/Cargo.toml').read_text())
@@ -1174,6 +1210,8 @@ class ReleaseEntrySafetyTests(unittest.TestCase):
 		self.assertIn('-k SystemStateTests', workflow)
 		self.assertNotIn('system_state.py --self-test', workflow)
 		self.assertNotIn('tests/release/run.py host --system', workflow)
+		self.assertNotIn('tests/release/run.py artifacts', workflow)
+		self.assertNotIn('pull_request_target:', workflow)
 
 	def test_restore_report_requires_interactive_confirmation_before_recovery(self):
 		for terminal, answer in ((False, 'yes'), (True, 'no')):

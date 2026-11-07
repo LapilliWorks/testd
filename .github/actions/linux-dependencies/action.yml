@@ -5,7 +5,24 @@ runs:
   steps:
     - shell: bash
       run: |
-        sudo apt-get update
-        sudo apt-get install -y pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
-          libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
-          libdbus-1-dev patchelf
+        set -euo pipefail
+        source /etc/os-release
+        privilege=()
+        if (( EUID != 0 )); then privilege=(sudo); fi
+        case "$ID" in
+          ubuntu|debian)
+            "${privilege[@]}" apt-get update
+            "${privilege[@]}" apt-get install -y pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+              libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
+              libdbus-1-dev patchelf
+            ;;
+          fedora)
+            "${privilege[@]}" dnf install -y gcc gcc-c++ make pkgconf-pkg-config python3 curl wget file \
+              findutils gawk grep sed unzip xz zstd openssl openssl-devel webkit2gtk4.1-devel \
+              libappindicator-gtk3-devel librsvg2-devel libxdo-devel systemd patchelf
+            ;;
+          *)
+            printf 'Unsupported CI distribution: %s\n' "$ID" >&2
+            exit 1
+            ;;
+        esac

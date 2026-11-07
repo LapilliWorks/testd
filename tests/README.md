@@ -47,6 +47,10 @@ Use `ci --plan` to list the selected stages. The same prerequisites and new pers
 
 The report includes `ci-summary.json`, containing only OS/Python/source metadata and stage names, statuses, and durations. CI may publish that summary; full reports, fixture homes, profiles, keys, credentials, source patches, and raw command logs must remain private. A successful `ci` run establishes its unprivileged scope only and is not release approval.
 
+`.github/workflows/ci.yml` performs the setup and runs this suite on Ubuntu 24.04, macOS 15 Apple Silicon and Intel, Windows Server 2025, and Fedora 44 userspace in a container. Pushes to master, release tags, pull requests, and manual workflow runs trigger the applicable jobs. The container shares the Ubuntu runner's kernel and lacks a real Fedora desktop/systemd session; it is not native Fedora system-integration evidence. Windows Server is not desktop Windows 11 evidence. Runner messages and command output appear in the job transcript; only status summaries are uploaded as artifacts.
+
+The workflow installs Python 3.14 on hosted VMs, uses Fedora's system Python, and installs stable Rust, Rust 1.89.0 and 1.90.0, cargo tools, Bun, and checkout dependencies. Linux libraries are installed explicitly; the macOS and Windows runner images supply their native build prerequisites. Manual and system-changing checks require separate restorable infrastructure and remain outside hosted CI.
+
 ## All-in-one platform run
 
 Run the matching script on each actual platform and architecture. The `all` suite runs GUI and non-GUI Rust checks, the ignored release contracts, doctests, release-script and browser-server fixtures, the full dependency audit, version verification, website checks, a candidate CLI build, and the unprivileged host suite. Each stage has explicit `BEGIN` and `END` markers, its own report and logs, and a final summary. Failed stages do not prevent independent checks from running.
