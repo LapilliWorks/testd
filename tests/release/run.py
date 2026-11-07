@@ -104,6 +104,35 @@ def file_digest(path):
 		return hashlib.file_digest(source, 'sha256').hexdigest()
 
 
+def git_diff(root, scope):
+	command = ['git', 'diff', '--binary', '--no-ext-diff', '--no-textconv', '--no-color']
+	command.extend({'staged': ['--cached'], 'unstaged': []}[scope])
+	return subprocess.run(command, cwd=root, capture_output=True, check=True, timeout=60).stdout
+
+
+def capture_source_diff(run):
+	"""Retain tracked changes without collecting untracked file contents."""
+	before = {name: git_diff(ROOT, name) for name in ('staged', 'unstaged')}
+	for name, data in before.items():
+		path = run.output / f'git-diff-{name}.patch'
+		with path.open('xb') as output:
+			output.write(data)
+			output.flush()
+			os.fsync(output.fileno())
+	after = {name: git_diff(ROOT, name) for name in ('staged', 'unstaged')}
+	commit = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True,
+		encoding=ENCODING, errors='replace', check=True, timeout=60).stdout.strip()
+	consistent = before == after and commit == run.metadata['commit']
+	run.metadata['source_diff'] = {
+		name: {'path': f'git-diff-{name}.patch', 'sha256': hashlib.sha256(data).hexdigest()}
+		for name, data in before.items()
+	}
+	run.metadata['source_diff']['untracked_contents'] = 'not captured'
+	run.metadata['source_diff']['consistent'] = consistent
+	if not consistent:
+		run.record('source-provenance', 'skip', 'blocked: tracked source changed while its diff was captured')
+
+
 def safe_members(names):
 	for name in names:
 		path = pathlib.PurePosixPath(name.replace('\\', '/'))
@@ -241,6 +270,8 @@ class Run:
 		status = subprocess.run(['git', 'status', '--porcelain'], cwd=ROOT, capture_output=True,
 			encoding=ENCODING, errors='replace', check=True)
 		self.metadata['dirty'] = bool(status.stdout.strip())
+		if getattr(args, 'include_git_diff', False):
+			capture_source_diff(self)
 		self.save()
 		print(f'Report: {self.output}', flush=True)
 
@@ -1250,6 +1281,8 @@ def main(argv=None):
 	parser.add_argument('suite', nargs='?', choices=['automated', 'contracts', 'audit', 'all', 'core', 'host',
 		'artifacts', 'browser', 'desktop', 'service'])
 	parser.add_argument('--report', type=pathlib.Path, help='new persisted report directory')
+	parser.add_argument('--include-git-diff', action='store_true',
+		help='save sensitive staged and unstaged tracked changes in the private report')
 	parser.add_argument('--restore-report', type=pathlib.Path,
 		help='restore the system integration recorded in an existing report directory, then exit')
 	parser.add_argument('--bin', type=pathlib.Path, help='candidate CLI; otherwise build from source')

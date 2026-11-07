@@ -415,6 +415,7 @@ class AllChecks:
 		args = copy.copy(self.args)
 		args.suite = stage.name
 		args.report = self.run.output / f'{index:02d}-{stage.name}'
+		args.include_git_diff = False
 		return self.api.Run(args)
 
 	def classify(self, child):

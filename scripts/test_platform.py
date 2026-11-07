@@ -53,6 +53,8 @@ def parser_for(expected):
 	parser.add_argument('--interactive', action='store_true', help='include real browser, desktop, and manual checks')
 	parser.add_argument('--plan', action='store_true', help='list all stages without running them')
 	parser.add_argument('--report', type=pathlib.Path, help='new persisted report directory')
+	parser.add_argument('--include-git-diff', action='store_true',
+		help='save sensitive tracked changes in the private report')
 	parser.add_argument('--system', action='store_true', help='include guarded privileged and service checks')
 	parser.add_argument('--port', type=int, help='browser fixture port; the following port must also be free')
 	parser.add_argument('--edge-port', type=int, help='candidate HTTPS edge port for browser checks')
@@ -151,6 +153,8 @@ def runner_arguments(parser, args):
 		command.append('--interactive')
 	if args.plan:
 		command.append('--plan')
+	if args.include_git_diff:
+		command.append('--include-git-diff')
 	report = report_path(parser, args)
 	if report is not None:
 		command.extend(['--report', str(report)])

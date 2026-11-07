@@ -228,6 +228,16 @@ class AllChecksTests(unittest.TestCase):
 			self.assertEqual(outcome(parent, 'release-script-fixtures')['status'], 'blocked')
 			self.assertTrue(parent.metadata['incomplete'])
 
+	def test_source_diff_is_captured_only_by_the_parent_report(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			args = arguments(include_git_diff=True)
+			parent, api, _ = fixture(temporary, args=args)
+			run = checks.AllChecks(parent, api, args)
+			stage = next(item for item in run.stages() if item.name == 'format')
+			child = run.child_run(1, stage)
+			self.assertTrue(parent.args.include_git_diff)
+			self.assertFalse(child.args.include_git_diff)
+
 	def test_platform_fixture_skips_are_not_confused_with_missing_evidence(self):
 		cases = (
 			('Ran 2 tests in 0.1s\n\nOK (skipped=0)\n', 'pass'),

@@ -88,6 +88,12 @@ class PlatformScriptsTests(unittest.TestCase):
 			self.assertEqual(self.script.main('Linux', []), 0)
 			run.assert_called_once_with(['automated'])
 
+	def test_sensitive_git_diff_capture_is_explicitly_forwarded(self):
+		with patch.object(self.script.platform, 'system', return_value='Linux'), \
+				patch.object(self.script, 'run_cli', return_value=0) as run:
+			self.script.main('Linux', ['--include-git-diff'])
+			run.assert_called_once_with(['automated', '--include-git-diff'])
+
 	def test_gui_option_is_forwarded_to_automated_checks(self):
 		with patch.object(self.script.platform, 'system', return_value='Darwin'), \
 			patch.object(self.script, 'run_cli', return_value=0) as run:
