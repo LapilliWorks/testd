@@ -51,6 +51,11 @@ def fixture_symlink(test, path, target, **options):
 
 
 class ReleaseTests(unittest.TestCase):
+	def test_powershell_is_required_only_on_windows(self):
+		self.assertFalse(powershell_skip_reason('Windows').startswith('not applicable:'))
+		for system in ('Darwin', 'Linux'):
+			self.assertTrue(powershell_skip_reason(system).startswith('not applicable:'))
+
 	def test_windows_symlink_capability_skip_is_not_a_pass(self):
 		path = Mock()
 		unavailable = OSError('fixture privilege unavailable')
@@ -2315,7 +2320,14 @@ class CommandOutputTests(unittest.TestCase):
 			self.assertEqual(run.results[-1]['status'], 'pass')
 
 
+def powershell_skip_reason(system):
+	if system == 'Windows':
+		return 'PowerShell is required on Windows'
+	return 'not applicable: PowerShell fixtures are required only on Windows'
+
+
 POWERSHELLS = [engine for engine in (shutil.which('powershell'), shutil.which('pwsh')) if engine]
+POWERSHELL_SKIP = powershell_skip_reason(runner.SYSTEM)
 PARSE_COMMAND = (
 	'$errors = $null;'
 	'[void][System.Management.Automation.Language.Parser]::ParseInput('
@@ -2408,7 +2420,7 @@ def snapshot_probe(engine):
 	return result.returncode, (result.stdout + result.stderr).decode('utf-8', errors='replace').strip()
 
 
-@unittest.skipUnless(POWERSHELLS, 'PowerShell is not installed')
+@unittest.skipUnless(POWERSHELLS, POWERSHELL_SKIP)
 class PowerShellScriptTests(unittest.TestCase):
 	"""A broken script only fails when the release suite runs, so parse it here.
 

@@ -232,7 +232,9 @@ class AllChecksTests(unittest.TestCase):
 		cases = (
 			('Ran 2 tests in 0.1s\n\nOK (skipped=0)\n', 'pass'),
 			("test_a ... skipped 'not applicable: Unix only'\nRan 2 tests in 0.1s\n\nOK (skipped=1)\n", 'pass'),
-			("test_a ... skipped 'PowerShell is not installed'\nRan 2 tests in 0.1s\n\nOK (skipped=1)\n", 'blocked'),
+			("test_a ... skipped 'not applicable: PowerShell fixtures are required only on Windows'\n"
+				"Ran 2 tests in 0.1s\n\nOK (skipped=1)\n", 'pass'),
+			("test_a ... skipped 'PowerShell is required on Windows'\nRan 2 tests in 0.1s\n\nOK (skipped=1)\n", 'blocked'),
 			("test_a ... skipped 'not applicable: Unix only'\nRan 2 tests in 0.1s\n\nOK (skipped=2)\n", 'blocked'),
 			("test_a ... skipped 'not applicable: Unix only'\nRan 2 tests in 0.1s\n\nOK\n", 'blocked'),
 			('Ran 0 tests in 0.1s\n\nOK\n', 'blocked'),

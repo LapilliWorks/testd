@@ -113,7 +113,7 @@ bun test "$(pwd)/tests/release/browser.test.ts"
 
 Use an absolute fixture path: Bun treats a relative path as a search pattern and can otherwise run matching tests from nested worktrees or build snapshots. On Windows PowerShell, use `bun test "$PWD\tests\release\browser.test.ts"`.
 
-The GUI requires its platform build prerequisites and separate Rust 1.90 checks. Run the full dependency policy against the selected release scope; a non-GUI or CI-scoped pass does not clear a GUI-only advisory. The cross-language browser-report fixture skips without Bun, and PowerShell parser and behavior fixtures skip when PowerShell is unavailable; a PowerShell fixture is not a Windows platform run.
+The GUI requires its platform build prerequisites and separate Rust 1.90 checks. Run the full dependency policy against the selected release scope; a non-GUI or CI-scoped pass does not clear a GUI-only advisory. The cross-language browser-report fixture requires Bun. PowerShell parser and behavior fixtures are required on Windows; their absence on other platforms is inapplicable. A PowerShell fixture is not a Windows platform run.
 
 The four share contracts are deliberately ignored in the default Rust run because they currently fail. Run them explicitly to reproduce the known failures, then remove the ignore markers when the behavior is implemented. The release runner's `core` suite includes ignored tests, so it remains blocked by these failures. Stable version tags also run that gate in CI; prerelease tags and ordinary CI runs do not, and do not constitute release approval. These contracts use fake Unix providers and do not test the deferred grant-revocation race.
 
