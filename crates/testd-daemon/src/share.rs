@@ -20,6 +20,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -190,6 +191,7 @@ pub struct Shares {
 struct ShareState {
 	active: BTreeMap<String, Active>,
 	pending: BTreeMap<String, Pending>,
+	claim_changes: BTreeMap<String, Vec<Arc<()>>>,
 	is_shutting_down: bool,
 }
 
@@ -242,20 +244,110 @@ pub(crate) struct ClaimTransition<'a> {
 	state: tokio::sync::MutexGuard<'a, ShareState>,
 }
 
+#[derive(Clone)]
+pub(crate) struct ClaimChange {
+	inner: Arc<ClaimChangeInner>,
+}
+
+struct ClaimChangeInner {
+	shares: Shares,
+	domain: String,
+	identity: Arc<()>,
+	finished: AtomicBool,
+}
+
+impl ClaimChange {
+	pub(crate) async fn finish(self) -> Result<()> {
+		let result = self
+			.inner
+			.shares
+			.end_claim_change(&self.inner.domain, &self.inner.identity)
+			.await;
+		self.inner.finished.store(true, Ordering::SeqCst);
+		result
+	}
+}
+
+impl Drop for ClaimChangeInner {
+	fn drop(&mut self) {
+		if self.finished.load(Ordering::SeqCst) {
+			return;
+		}
+		let shares = self.shares.clone();
+		let domain = self.domain.clone();
+		let identity = Arc::clone(&self.identity);
+		if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+			runtime.spawn(async move {
+				if let Err(error) = shares.end_claim_change(&domain, &identity).await {
+					eprintln!("[error]  could not reconcile an interrupted claim change: {error:#}");
+				}
+			});
+		} else {
+			eprintln!("[error]  interrupted claim change for {domain} could not be reconciled");
+		}
+	}
+}
+
 impl ClaimTransition<'_> {
+	pub(crate) fn begin_change(&mut self, registry: &mut Registry, domain: &str) -> (ClaimChange, DetachedShares) {
+		let identity = Arc::new(());
+		self.state
+			.claim_changes
+			.entry(domain.to_owned())
+			.or_default()
+			.push(Arc::clone(&identity));
+		let names: Vec<String> = self
+			.state
+			.pending
+			.iter()
+			.filter(|(_, pending)| pending.binding.domain == domain)
+			.map(|(name, _)| name.clone())
+			.collect();
+		let mut batch = StopBatch::default();
+		for name in names {
+			Shares::detach_name(&mut self.state, registry, &name, &mut batch);
+		}
+		let change = ClaimChange {
+			inner: Arc::new(ClaimChangeInner {
+				shares: self.shares.clone(),
+				domain: domain.to_owned(),
+				identity,
+				finished: AtomicBool::new(false),
+			}),
+		};
+		(change, self.shares.queue_cleanup(batch))
+	}
+
 	pub(crate) fn detach_claims(&mut self, registry: &mut Registry, claims: &[Claim]) -> DetachedShares {
 		let bindings: Vec<ClaimBinding> = claims.iter().map(ClaimBinding::from_claim).collect();
+		self.detach_matching(registry, |binding| bindings.contains(binding))
+	}
+
+	pub(crate) fn detach_connections(&mut self, registry: &mut Registry, connections: &[u64]) -> DetachedShares {
+		self.detach_matching(registry, |binding| connections.contains(&binding.connection))
+	}
+
+	pub(crate) fn detach_domain(&mut self, registry: &mut Registry, domain: &str) -> DetachedShares {
+		self.detach_matching(registry, |binding| binding.domain == domain)
+	}
+
+	pub(crate) fn detach_unapplied(&mut self, registry: &mut Registry, claims: &[Claim]) -> DetachedShares {
+		let bindings: Vec<ClaimBinding> = claims.iter().map(ClaimBinding::from_claim).collect();
+		self.detach_matching(registry, |binding| !bindings.contains(binding))
+	}
+
+	fn detach_matching(&mut self, registry: &mut Registry, matches: impl Fn(&ClaimBinding) -> bool) -> DetachedShares {
 		let names: Vec<String> = self
 			.state
 			.active
 			.iter()
-			.filter(|(_, share)| bindings.contains(&share.binding))
+			.filter(|(_, share)| matches(&share.binding))
 			.map(|(name, _)| name.clone())
 			.chain(
 				self.state
 					.pending
 					.iter()
-					.filter(|(_, pending)| bindings.contains(&pending.binding))
+					.filter(|(_, pending)| matches(&pending.binding))
 					.map(|(name, _)| name.clone()),
 			)
 			.collect();
@@ -385,6 +477,9 @@ impl Shares {
 		let mut state = self.state.lock().await;
 		if state.is_shutting_down {
 			bail!("the share manager is shutting down");
+		}
+		if state.claim_changes.contains_key(&binding.domain) {
+			bail!("{} is being registered; wait for its result before sharing", binding.domain);
 		}
 		if let Some(existing) = state.active.get(name) {
 			bail!("{name} is already shared at {} ({})", existing.url, existing.provider.name());
@@ -731,6 +826,43 @@ impl Shares {
 		Ok(())
 	}
 
+	async fn end_claim_change(&self, domain: &str, identity: &Arc<()>) -> Result<()> {
+		let mut registry = self.registrations.lock().await;
+		let mut state = self.state.lock().await;
+		if let Some(changes) = state.claim_changes.get_mut(domain) {
+			changes.retain(|change| !Arc::ptr_eq(change, identity));
+			if changes.is_empty() {
+				state.claim_changes.remove(domain);
+			}
+		}
+		let mut batch = StopBatch::default();
+		if !state.claim_changes.contains_key(domain) {
+			let current = registry.claim(domain).map(ClaimBinding::from_claim);
+			let names: Vec<String> = state
+				.active
+				.iter()
+				.filter(|(_, share)| share.binding.domain == domain && Some(&share.binding) != current.as_ref())
+				.map(|(name, _)| name.clone())
+				.chain(
+					state
+						.pending
+						.iter()
+						.filter(|(_, pending)| {
+							pending.binding.domain == domain && Some(&pending.binding) != current.as_ref()
+						})
+						.map(|(name, _)| name.clone()),
+				)
+				.collect();
+			for name in names {
+				Self::detach_name(&mut state, &mut registry, &name, &mut batch);
+			}
+		}
+		drop(state);
+		drop(registry);
+		let detached = self.queue_cleanup(batch);
+		self.finish_detached(detached).await
+	}
+
 	/// Stop shares whose owning connection or target no longer matches the live claim.
 	pub(crate) async fn reconcile(&self) -> Result<()> {
 		let mut registry = self.registrations.lock().await;
@@ -743,13 +875,15 @@ impl Shares {
 		let stale: Vec<String> = state
 			.active
 			.iter()
-			.filter(|(_, share)| !valid(&share.binding))
+			.filter(|(_, share)| !state.claim_changes.contains_key(&share.binding.domain) && !valid(&share.binding))
 			.map(|(name, _)| name.clone())
 			.chain(
 				state
 					.pending
 					.iter()
-					.filter(|(_, pending)| !valid(&pending.binding))
+					.filter(|(_, pending)| {
+						!state.claim_changes.contains_key(&pending.binding.domain) && !valid(&pending.binding)
+					})
 					.map(|(name, _)| name.clone()),
 			)
 			.collect();

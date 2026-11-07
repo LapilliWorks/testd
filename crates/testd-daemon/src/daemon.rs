@@ -228,20 +228,9 @@ impl Daemon {
 		crate::control::client_config()
 	}
 
-	/// Stop supervised launches and shares before the process exits.
+	/// Stop supervised launches before the process exits.
 	pub async fn shutdown(&self) {
-		if let Err(error) = self.shutdown_checked().await {
-			eprintln!("[error]  {error}");
-		}
-	}
-
-	/// Stop supervised launches and shares, returning an incomplete provider cleanup.
-	pub async fn shutdown_checked(&self) -> Result<(), String> {
 		self.launches.shutdown().await;
-		self.shares
-			.shutdown()
-			.await
-			.map_err(|error| format!("share shutdown was incomplete: {error:#}"))
 	}
 
 	/// Repair a prerequisite. Runs the privileged helper off the runtime.
@@ -488,6 +477,41 @@ mod tests {
 			result.is_err() && !listed,
 			"a pending start must be cancelled when its claim disappears: {result:?}, listed={listed}"
 		);
+	}
+
+	#[tokio::test]
+	async fn reconciliation_does_not_close_a_share_during_an_unresolved_claim_change() {
+		let dir = tempfile::tempdir().unwrap();
+		let provider = dir.path().join("provider");
+		std::fs::write(&provider, "#!/bin/sh\necho 'https://fixture.trycloudflare.com' >&2\nexec sleep 30\n").unwrap();
+		std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o700)).unwrap();
+		let registry = Arc::new(tokio::sync::Mutex::new(crate::registry::Registry::default()));
+		let shares = Shares::new(Provider::Cloudflared, Some(provider), None, Arc::clone(&registry));
+		let (owner, replacement) = {
+			let mut registry = registry.lock().await;
+			let owner = registry.connection_id();
+			let replacement = registry.connection_id();
+			registry.register(owner, claim("127.0.0.1:3000"), false, &[]).unwrap();
+			(owner, replacement)
+		};
+		shares.start("app", "app.test", None).await.unwrap();
+		let (change, detached) = {
+			let mut registry = registry.lock().await;
+			let mut transition = shares.claim_transition().await;
+			registry.register(replacement, claim("127.0.0.1:4000"), true, &[]).unwrap();
+			transition.begin_change(&mut registry, "app.test")
+		};
+		shares.finish_detached(detached).await.unwrap();
+		reconcile_shares(&shares).await;
+		assert_eq!(shares.list().await[0].target, "127.0.0.1:3000");
+		registry
+			.lock()
+			.await
+			.register(owner, claim("127.0.0.1:3000"), true, &[])
+			.unwrap();
+		change.finish().await.unwrap();
+		assert_eq!(shares.list().await.len(), 1);
+		assert!(shares.stop("app").await.unwrap());
 	}
 
 	#[tokio::test]
